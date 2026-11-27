@@ -292,6 +292,16 @@ impl EngineHost {
             ) {
                 return false;
             }
+            // A witness that saw an unsafe navigation never allows a replay
+            // again; dropping it takes its handler off every later request.
+            #[cfg(target_os = "windows")]
+            if view
+                .request_witness
+                .as_ref()
+                .is_some_and(crate::platform::imp::RequestWitness::tainted)
+            {
+                view.request_witness = None;
+            }
             if view.navigation.current_committed() != Some(epoch)
                 || view.navigation.document_replaced(epoch)
             {

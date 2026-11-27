@@ -406,6 +406,8 @@ use objc2_app_kit::NSWindow;
 use objc2_web_kit::WKUserContentController;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) mod wkwebview;
+#[cfg(target_os = "macos")]
+pub use wkwebview::context_menu_download_in_progress;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use wkwebview::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -916,6 +918,9 @@ struct WebViewAttributes<'a> {
   pub navigation_failure_handler:
     Option<Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>>,
 
+  /// Metadata-free refusal when a native URL cannot cross the bounded copy boundary.
+  pub native_url_refused_handler: Option<NativeUrlRefusedHandler>,
+
   /// Hide the native presentation surface synchronously at each main-frame
   /// commit, before delivering its identity event. Hardened embedders can
   /// then update trusted chrome and explicitly reveal the exact document.
@@ -1062,6 +1067,7 @@ impl Default for WebViewAttributes<'_> {
       on_page_load_handler: None,
       navigation_event_handler: None,
       navigation_failure_handler: None,
+      native_url_refused_handler: None,
       navigation_presentation_guard: None,
       proxy_config: None,
       focused: true,
@@ -1781,6 +1787,17 @@ impl<'a> WebViewBuilder<'a> {
     self
   }
 
+  /// Report unreadable/oversized native URL refusal without allocating the
+  /// refused URL or inventing a native navigation identity. Supported on macOS
+  /// and Windows; child-frame events depend on the embedder's frame adapter.
+  pub fn with_native_url_refused_handler(
+    mut self,
+    handler: impl Fn(NativeUrlTarget) + 'static,
+  ) -> Self {
+    self.attrs.native_url_refused_handler = Some(std::rc::Rc::new(handler));
+    self
+  }
+
   /// Hide each newly committed main-frame document before its identity event
   /// reaches the embedder. `guard` runs before the native hide primitive, so
   /// it should synchronously revoke the embedder's reveal permit without
@@ -1926,9 +1943,22 @@ impl<'a> WebViewBuilder<'a> {
   }
 }
 
+/// How a top-level `http` navigation is upgraded to `https` (macOS 15.2 and
+/// later; ignored before).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleHttpsUpgrade {
+  /// Try https, and load over http when that fails.
+  AutomaticFallback,
+  /// Try https, and show WebKit's warning before falling back to http.
+  UserMediatedFallback,
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) struct PlatformSpecificWebViewAttributes {
   data_store_identifier: Option<[u8; 16]>,
+  #[cfg(target_os = "macos")]
+  https_upgrade: Option<AppleHttpsUpgrade>,
   traffic_light_inset: Option<dpi::Position>,
   allow_link_preview: bool,
   on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
@@ -1954,6 +1984,8 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   #[cfg(target_os = "macos")]
   autofill_button_handler: Option<Box<dyn Fn()>>,
   #[cfg(target_os = "macos")]
+  media_return_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
   context_menu_handler: Option<
     Box<
       dyn Fn(
@@ -1969,6 +2001,8 @@ impl Default for PlatformSpecificWebViewAttributes {
   fn default() -> Self {
     Self {
       data_store_identifier: None,
+      #[cfg(target_os = "macos")]
+      https_upgrade: None,
       traffic_light_inset: None,
       // platform default for this is true
       allow_link_preview: true,
@@ -1993,6 +2027,8 @@ impl Default for PlatformSpecificWebViewAttributes {
       native_download_handler: None,
       #[cfg(target_os = "macos")]
       autofill_button_handler: None,
+      #[cfg(target_os = "macos")]
+      media_return_handler: None,
       #[cfg(target_os = "macos")]
       context_menu_handler: None,
     }
@@ -2051,6 +2087,9 @@ impl WebViewBuilderExtDarwin for WebViewBuilder<'_> {
 
 #[cfg(target_os = "macos")]
 pub trait WebViewBuilderExtMacos {
+  /// Upgrades top-level `http` navigations to `https` as `policy` says,
+  /// where WebKit can (macOS 15.2 and later).
+  fn with_https_upgrade(self, policy: AppleHttpsUpgrade) -> Self;
   /// Set the webview configuration that must be used to create the new webview.
   fn with_webview_configuration(
     self,
@@ -2110,6 +2149,10 @@ pub trait WebViewBuilderExtMacos {
   /// field. Only a script in a content world allowed to drive AutoFill can
   /// show that button; page script cannot.
   fn with_autofill_button_handler(self, handler: impl Fn() + 'static) -> Self;
+  /// Called when a video presented outside the page, such as in picture in
+  /// picture, asks to return to it. WebKit puts the video back only once the
+  /// page is visible again, so the embedder should bring the page on screen.
+  fn with_media_return_handler(self, handler: impl Fn() + 'static) -> Self;
   /// Merges browser-owned items into the native page context menu without
   /// serializing page metadata through Rust. The callback receives WebKit's
   /// already-created default menu and may replace or suppress it.
@@ -2125,6 +2168,11 @@ pub trait WebViewBuilderExtMacos {
 
 #[cfg(target_os = "macos")]
 impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
+  fn with_https_upgrade(mut self, policy: AppleHttpsUpgrade) -> Self {
+    self.platform_specific.https_upgrade = Some(policy);
+    self
+  }
+
   fn with_webview_configuration(
     mut self,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
@@ -2191,6 +2239,11 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
 
   fn with_autofill_button_handler(mut self, handler: impl Fn() + 'static) -> Self {
     self.platform_specific.autofill_button_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_media_return_handler(mut self, handler: impl Fn() + 'static) -> Self {
+    self.platform_specific.media_return_handler = Some(Box::new(handler));
     self
   }
 
@@ -3436,6 +3489,26 @@ impl NavigationId {
   }
 }
 
+/// Which native navigation surface supplied an unreadable or oversized URL.
+/// No navigation identity or partial/untrusted address is manufactured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeUrlTarget {
+  MainFrame,
+  Subframe,
+  NewWindow,
+}
+
+pub(crate) type NativeUrlRefusedHandler = std::rc::Rc<dyn Fn(NativeUrlTarget)>;
+
+pub(crate) fn report_native_url_refused(
+  handler: Option<&NativeUrlRefusedHandler>,
+  target: NativeUrlTarget,
+) {
+  if let Some(handler) = handler {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(target)));
+  }
+}
+
 /// A phase in one identity-bearing main-frame navigation sequence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavigationEventPhase {
@@ -3475,6 +3548,8 @@ pub enum NavigationFailure {
   /// The server's certificate was refused, and what the engine could tell
   /// about why.
   Certificate(CertificateProblem),
+  /// macOS: the view's content rules refused the page.
+  Blocked,
   /// Any other failure.
   Other,
 }
@@ -3488,6 +3563,9 @@ pub enum FailedDocument {
   /// one (blank when its built-in error page is off). `url` is the address
   /// the navigation was for, from Wry's own in-flight navigation record.
   Replaced { url: String },
+  /// macOS: a content rule refused the navigation to `url`, taken from the
+  /// error itself; the document shown before is still there.
+  Refused { url: String },
 }
 
 /// Why a server certificate was refused, as a category; never native text.
@@ -3544,9 +3622,21 @@ pub enum AppleNavigationType {
   Other,
 }
 
+/// The frame a navigation came from, as WebKit's security origin names it.
+/// Scheme and host are empty when WebKit's origin does not fit.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppleNavigationSource {
+  pub is_main_frame: bool,
+  pub scheme: String,
+  pub host: String,
+  /// Zero when the scheme's default.
+  pub port: u16,
+}
+
 /// Bounded native provenance accompanying an Apple navigation policy request.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppleNavigationAction {
   /// Native navigation cause.
   pub navigation_type: AppleNavigationType,
@@ -3555,6 +3645,8 @@ pub struct AppleNavigationAction {
   /// Whether WebKit identified the target as the main frame. `None` denotes a
   /// target-less/new-window action and must not be treated as main-frame work.
   pub target_is_main_frame: Option<bool>,
+  /// The frame that asked, when WebKit names one.
+  pub source: Option<AppleNavigationSource>,
 }
 
 /// Background throttling policy

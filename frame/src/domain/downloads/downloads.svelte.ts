@@ -158,7 +158,9 @@ export class DownloadSession {
           });
         this.entries = more
           ? [
-              ...this.entries,
+              ...this.entries.map(
+                (current) => entries.find((entry) => entry.id === current.id) ?? current,
+              ),
               ...entries.filter((entry) => !this.entries.some((old) => old.id === entry.id)),
             ]
           : [

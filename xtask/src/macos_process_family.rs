@@ -378,13 +378,29 @@ fn parse_single_asn(output: &str) -> Result<&str, String> {
     Ok(asn)
 }
 
+/// macOS 27 prints `pid = 123` and `bundleID="..."` where earlier systems
+/// printed `"pid"=123` and `"CFBundleIdentifier"="..."`.
+#[cfg(any(target_os = "macos", test))]
+const CURRENT_KEYS: [(&str, &str); 2] = [("pid", "pid = "), ("CFBundleIdentifier", "bundleID=")];
+
+#[cfg(any(target_os = "macos", test))]
+fn find_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+    let legacy = format!("\"{key}\"=");
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&legacy))
+        .or_else(|| {
+            let (_, current) = CURRENT_KEYS.iter().find(|(name, _)| *name == key)?;
+            output.lines().find_map(|line| {
+                let value = line.trim().strip_prefix(current)?;
+                Some(value.split_ascii_whitespace().next().unwrap_or(value))
+            })
+        })
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn parse_integer_value(output: &str, key: &str) -> Result<i32, String> {
-    let prefix = format!("\"{key}\"=");
-    let value = output
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(&prefix))
-        .ok_or_else(|| format!("LaunchServices omitted {key}"))?;
+    let value = find_value(output, key).ok_or_else(|| format!("LaunchServices omitted {key}"))?;
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!("LaunchServices returned an invalid {key}"));
     }
@@ -395,16 +411,28 @@ fn parse_integer_value(output: &str, key: &str) -> Result<i32, String> {
 
 #[cfg(any(target_os = "macos", test))]
 fn parse_string_value(output: &str, key: &str, maximum: usize) -> Result<String, String> {
-    let prefix = format!("\"{key}\"=\"");
-    let value = output
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(&prefix))
+    let value = find_value(output, key)
+        .and_then(|value| value.strip_prefix('"'))
         .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            (key == "LSDisplayName")
+                .then(|| display_name(output))
+                .flatten()
+        })
         .ok_or_else(|| format!("LaunchServices omitted {key}"))?;
     if value.is_empty() || value.len() > maximum || value.contains(['\r', '\n', '\0']) {
         return Err(format!("LaunchServices returned an invalid {key}"));
     }
     Ok(value.to_owned())
+}
+
+/// macOS 27 leads the record with the quoted display name.
+#[cfg(any(target_os = "macos", test))]
+fn display_name(output: &str) -> Option<&str> {
+    let line = output.lines().next()?.trim_start();
+    let rest = line.strip_prefix('"')?;
+    let end = rest.find("\" ASN:")?;
+    Some(&rest[..end])
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -438,6 +466,48 @@ fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     Ok(pids)
 }
 
+/// A process's resource coalition. Only a process that has exited has none;
+/// any other failure could hide one of the app's own helpers, so it fails the
+/// measurement.
+#[cfg(target_os = "macos")]
+fn coalition_lookup(
+    pid: i32,
+    coalition: u64,
+    error: Option<std::io::Error>,
+) -> Result<Option<u64>, String> {
+    match error {
+        None => Ok(Some(coalition)),
+        Some(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Some(error) => Err(format!("cannot read the coalition of PID {pid}: {error}")),
+    }
+}
+
+/// The processes of `listed[..count]` in the `root` resource coalition. A
+/// full buffer may have cut the list short, so it is refused rather than
+/// measured as a smaller family.
+#[cfg(any(target_os = "macos", test))]
+fn coalition_members(
+    listed: &[i32],
+    count: usize,
+    root: u64,
+    mut coalition_of: impl FnMut(i32) -> Result<Option<u64>, String>,
+) -> Result<Vec<i32>, String> {
+    if count >= listed.len() {
+        return Err("the process list filled its buffer and may be incomplete".into());
+    }
+    let mut pids = Vec::new();
+    for &pid in &listed[..count] {
+        if pid > 1 && coalition_of(pid)? == Some(root) {
+            pids.push(pid);
+            if pids.len() > MAX_COALITION_PROCESSES {
+                return Err("application coalition exceeds the measurement process bound".into());
+            }
+        }
+    }
+    pids.sort_unstable();
+    Ok(pids)
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
     if pid == root {
@@ -454,10 +524,11 @@ fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{
-        parse_coalition_pids, parse_integer_value, parse_single_asn, parse_string_value,
-        role_for_process, KernelCounters, MeasurementArguments, MeasurementReport, MemorySample,
-        ProcessIdentity, ProcessRole, ProcessSample, RoleAccumulator, RoleReport, TrackedProcess,
-        UsageCounters, MAX_APPLICATION_NAME_BYTES,
+        coalition_lookup, coalition_members, parse_coalition_pids, parse_integer_value,
+        parse_single_asn, parse_string_value, role_for_process, KernelCounters,
+        MeasurementArguments, MeasurementReport, MemorySample, ProcessIdentity, ProcessRole,
+        ProcessSample, RoleAccumulator, RoleReport, TrackedProcess, UsageCounters,
+        MAX_APPLICATION_NAME_BYTES,
     };
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::c_void;
@@ -660,11 +731,58 @@ mod platform {
         {
             return Err("LaunchServices application identity changed during measurement".into());
         }
-        let pids = parse_coalition_pids(&output)?;
+        let pids = if output.contains("LSApplicationCoalitionPIDsKey") {
+            parse_coalition_pids(&output)?
+        } else {
+            kernel_coalition(root_pid)?
+        };
         if !pids.contains(&root_pid) {
             return Err("the application coalition omitted its admitted root process".into());
         }
         Ok(pids)
+    }
+
+    /// macOS 27's LaunchServices no longer lists the coalition; the kernel
+    /// still reports the resource coalition each process belongs to.
+    fn kernel_coalition(root_pid: i32) -> Result<Vec<i32>, String> {
+        let root = resource_coalition(root_pid)?
+            .ok_or_else(|| "the application process was not readable".to_owned())?;
+        let mut all = vec![0i32; 16_384];
+        let capacity = i32::try_from(all.len() * std::mem::size_of::<i32>())
+            .map_err(|_| "PID buffer exceeds its bound".to_owned())?;
+        // SAFETY: proc_listallpids fills at most `capacity` bytes of the
+        // writable buffer and returns how many PIDs it wrote.
+        let count = unsafe { libc::proc_listallpids(all.as_mut_ptr().cast::<c_void>(), capacity) };
+        let count = usize::try_from(count).map_err(|_| "cannot list processes".to_owned())?;
+        coalition_members(&all, count, root, resource_coalition)
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct CoalitionInfo {
+        coalition_id: [u64; 2],
+        reserved: [u64; 3],
+    }
+
+    const PROC_PIDCOALITIONINFO: i32 = 20;
+
+    fn resource_coalition(pid: i32) -> Result<Option<u64>, String> {
+        let mut info = CoalitionInfo::default();
+        let size = i32::try_from(std::mem::size_of::<CoalitionInfo>())
+            .map_err(|_| "coalition record size overflowed".to_owned())?;
+        // SAFETY: proc_pidinfo writes at most `size` bytes of the exact
+        // proc_pidcoalitioninfo layout into the owned record.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDCOALITIONINFO,
+                0,
+                std::ptr::addr_of_mut!(info).cast::<c_void>(),
+                size,
+            )
+        };
+        let error = (written != size).then(std::io::Error::last_os_error);
+        coalition_lookup(pid, info.coalition_id[0], error)
     }
 
     fn application_info(asn: &str) -> Result<String, String> {
@@ -854,8 +972,9 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_arguments, parse_coalition_pids, parse_integer_value, parse_single_asn,
-        parse_string_value, role_for_process, KernelCounters, ProcessRole, UsageCounters,
+        coalition_members, parse_arguments, parse_coalition_pids, parse_integer_value,
+        parse_single_asn, parse_string_value, role_for_process, KernelCounters, ProcessRole,
+        UsageCounters, MAX_COALITION_PROCESSES,
     };
 
     #[test]
@@ -919,6 +1038,52 @@ mod tests {
             vec![45010, 45011, 45012]
         );
         assert!(parse_coalition_pids("\"LSApplicationCoalitionPIDsKey\"=( 2, 2)\n").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_an_exited_process_has_no_coalition() {
+        use super::coalition_lookup;
+        assert_eq!(coalition_lookup(7, 42, None), Ok(Some(42)));
+        let exited = std::io::Error::from_raw_os_error(libc::ESRCH);
+        assert_eq!(coalition_lookup(7, 0, Some(exited)), Ok(None));
+        let denied = std::io::Error::from_raw_os_error(libc::EPERM);
+        assert!(coalition_lookup(7, 0, Some(denied)).is_err());
+    }
+
+    #[test]
+    fn coalition_members_refuse_a_full_list_and_an_oversized_family() {
+        let coalition = |pid: i32| Ok(Some(if pid % 2 == 0 { 7 } else { 9 }));
+        assert_eq!(
+            coalition_members(&[1, 4, 3, 2, 0, 0], 4, 7, coalition).unwrap(),
+            vec![2, 4]
+        );
+        assert!(coalition_members(&[2, 4, 6], 3, 7, coalition).is_err());
+        assert!(coalition_members(&[2, 4, 6], 4, 7, coalition).is_err());
+        let family: Vec<i32> = (2..=2 * (MAX_COALITION_PROCESSES as i32 + 2))
+            .step_by(2)
+            .collect();
+        let mut buffer = family.clone();
+        buffer.push(0);
+        assert!(coalition_members(&buffer, family.len(), 7, coalition).is_err());
+    }
+
+    #[test]
+    fn launchservices_parsers_read_the_macos_27_record() {
+        let info = "\"Zephium Extensions QA\" ASN:0x0-0x1183182: (in front) \n\
+            \x20   bundleID=\"app.zephium.webext-qa\"\n\
+            \x20   bundle path=[ NULL ] \n\
+            \x20   pid = 79754 !cgsConnection !signalled type=[ NULL ]  Arch=!!none \n";
+        assert_eq!(
+            parse_string_value(info, "CFBundleIdentifier", 255).unwrap(),
+            "app.zephium.webext-qa"
+        );
+        assert_eq!(parse_integer_value(info, "pid").unwrap(), 79754);
+        assert_eq!(
+            parse_string_value(info, "LSDisplayName", 512).unwrap(),
+            "Zephium Extensions QA"
+        );
+        assert!(parse_integer_value("    pid = 79x ", "pid").is_err());
     }
 
     #[test]

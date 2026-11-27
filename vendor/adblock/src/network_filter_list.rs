@@ -23,14 +23,6 @@ pub(crate) struct CheckResult {
     pub debug_data: Option<FilterRuleDebugInfo>,
 }
 
-/// Outcome of one exception-list pass when the native request has no exact
-/// initiating-document attribution.
-pub(crate) enum UnknownAttributionExceptionMatch {
-    None,
-    Exact(CheckResult),
-    PotentialAttributionSensitive,
-}
-
 impl fmt::Display for CheckResult {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         if let Some(ref debug_data) = self.debug_data {
@@ -166,48 +158,6 @@ impl NetworkFilterList<'_> {
             }
         }
         Some(None)
-    }
-
-    /// Evaluates every candidate through exactly one of the exact or
-    /// attribution-agnostic matchers.
-    pub(crate) fn check_unknown_attribution_exception_bounded(
-        &self,
-        request: &Request,
-        active_tags: &HashSet<String>,
-        regex_manager: &mut RegexManager,
-        remaining_checks: &mut usize,
-    ) -> Option<UnknownAttributionExceptionMatch> {
-        if self.list.filter_map_index().is_empty() {
-            return Some(UnknownAttributionExceptionMatch::None);
-        }
-
-        let filter_map = self.get_filter_map();
-        for token in request.get_tokens_for_match() {
-            if let Some(iter) = filter_map.get(to_short_hash(*token)) {
-                for fb_filter in iter {
-                    let filter = FlatNetworkFilter::new(&fb_filter, self.filter_data_context);
-                    let requires_exact_attribution = filter.requires_exact_attribution();
-                    *remaining_checks = remaining_checks.checked_sub(1)?;
-                    let matches = if requires_exact_attribution {
-                        filter.matches_without_attribution(request, regex_manager)
-                    } else {
-                        filter.matches(request, regex_manager)
-                    };
-                    if matches && filter.tag().is_none_or(|tag| active_tags.contains(tag)) {
-                        return Some(if requires_exact_attribution {
-                            UnknownAttributionExceptionMatch::PotentialAttributionSensitive
-                        } else {
-                            UnknownAttributionExceptionMatch::Exact(CheckResult {
-                                filter_mask: filter.mask,
-                                modifier_option: filter.modifier_option(),
-                                debug_data: filter.get_rule_debug_info(),
-                            })
-                        });
-                    }
-                }
-            }
-        }
-        Some(UnknownAttributionExceptionMatch::None)
     }
 
     /// Returns _all_ filters that match the given request. This should be used for any category of

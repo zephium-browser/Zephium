@@ -18,7 +18,10 @@
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, roomy = false }: { compact?: boolean; roomy?: boolean } = $props();
+  // Down a rail alone the stack is glyphs; with a tool or Work beside the
+  // rail it has room to name them, as in the full column.
+  const glyphs = $derived(compact && !roomy);
   onMount(() => {
     void profiles.retain();
     return () => profiles.release();
@@ -74,13 +77,13 @@
     role="menuitem"
     class="ui-menu-item shelf-item"
     style:--step={step}
-    title={compact ? named(label, keys) : undefined}
-    aria-label={compact ? label : undefined}
+    title={glyphs ? named(label, keys) : undefined}
+    aria-label={glyphs ? label : undefined}
     aria-current={current || undefined}
     {onclick}
   >
     <span class="ui-menu-icon"><Icon {icon} size={16} /></span>
-    {#if !compact}<span>{label}</span>{#if keys}<span class="shelf-keys">{keys}</span>{/if}{/if}
+    {#if !glyphs}<span>{label}</span>{#if keys}<span class="shelf-keys">{keys}</span>{/if}{/if}
   </button>
 {/snippet}
 
@@ -103,6 +106,7 @@
 <div
   class="shelf"
   data-compact={compact}
+  data-glyphs={glyphs}
   data-morph="profile"
   role="presentation"
   oncontextmenu={nativeMenu}
@@ -126,12 +130,12 @@
         type="button"
         role="menuitem"
         class="ui-menu-item shelf-me"
-        title={compact ? `${name} — ${m.browse_profile_settings()}` : m.browse_profile_settings()}
+        title={glyphs ? `${name} — ${m.browse_profile_settings()}` : m.browse_profile_settings()}
         aria-label={`${name} — ${m.browse_profile_settings()}`}
         onclick={() => run("settings.profiles")}
       >
-        {@render me(compact ? 24 : 22)}
-        {#if !compact}<span class="shelf-me-name">{name}</span>{/if}
+        {@render me(glyphs ? 24 : 22)}
+        {#if !glyphs}<span class="shelf-me-name">{name}</span>{/if}
       </button>
       {#if others.length > 0 || !privately}<div class="shelf-chips" role="presentation">
           {#each others as profile (profile.id)}
@@ -182,6 +186,8 @@
 
 <style>
   .shelf {
+    --shelf-stagger: 22ms;
+
     position: relative;
     z-index: 20;
     flex: none;
@@ -258,6 +264,28 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     transform-origin: bottom left;
+    scale: 0.98;
+    transition:
+      opacity var(--motion-fast) var(--ease-smooth),
+      scale var(--motion-fast) var(--ease-smooth),
+      translate var(--motion-fast) var(--ease-smooth),
+      visibility 0s linear var(--motion-fast);
+  }
+
+  /* Named beside a narrow rail, the stack keeps its own width and spills
+     over whatever stands beside the rail. */
+  .shelf[data-compact="true"][data-glyphs="false"] :global(.shelf-stack) {
+    min-width: 232px;
+    max-width: none;
+  }
+
+  .shelf :global(.shelf-stack[data-open="true"]) {
+    scale: 1;
+    transition:
+      opacity var(--motion-base) var(--ease-smooth),
+      scale var(--motion-page) var(--ease-smooth),
+      translate var(--motion-page) var(--ease-smooth),
+      visibility 0s;
   }
 
   .shelf :global(.shelf-stack:not([data-open="true"])) {
@@ -399,8 +427,8 @@
   /* Each row settles in behind the one below it, so the stack reads as
      unfolding from the case instead of arriving as a block. */
   .shelf :global(.shelf-stack[data-open="true"] :is(.shelf-item, .shelf-head)) {
-    animation: shelf-item-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 14ms);
+    animation: shelf-item-in var(--motion-page) var(--ease-smooth) both;
+    animation-delay: calc(var(--step) * var(--shelf-stagger));
   }
 
   /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
@@ -427,45 +455,45 @@
 
   /* Centred on the 40px case: four points either side of it. The rail's marks
      and header lie behind it, so it is near-solid rather than glass. */
-  .shelf[data-compact="true"] :global(.shelf-stack) {
+  .shelf[data-glyphs="true"] :global(.shelf-stack) {
     background: color-mix(in srgb, var(--color-float) 96%, transparent);
     inset-inline-start: -4px;
     min-width: 0;
     width: 48px;
   }
 
-  .shelf[data-compact="true"] .shelf-head,
-  .shelf[data-compact="true"] .shelf-chips {
+  .shelf[data-glyphs="true"] .shelf-head,
+  .shelf[data-glyphs="true"] .shelf-chips {
     flex-direction: column;
     gap: 2px;
     padding: 0;
   }
 
-  .shelf[data-compact="true"] .shelf-me {
+  .shelf[data-glyphs="true"] .shelf-me {
     flex: none;
     justify-content: center;
     width: 100%;
     padding-inline: 0;
   }
 
-  .shelf[data-compact="true"] .shelf-chip {
+  .shelf[data-glyphs="true"] .shelf-chip {
     width: 36px;
     height: 32px;
     border-radius: calc(var(--radius-menu) - var(--menu-pad));
   }
 
-  .shelf[data-compact="true"] .shelf-private[data-after-others] {
+  .shelf[data-glyphs="true"] .shelf-private[data-after-others] {
     margin: 7px 0 0;
   }
 
-  .shelf[data-compact="true"] .shelf-private[data-after-others]::before {
+  .shelf[data-glyphs="true"] .shelf-private[data-after-others]::before {
     width: 14px;
     height: 1px;
     inset-block-start: -4px;
     inset-inline-start: 11px;
   }
 
-  .shelf[data-compact="true"] :global(.shelf-item) {
+  .shelf[data-glyphs="true"] :global(.shelf-item) {
     justify-content: center;
     padding-inline: 0;
   }
@@ -474,5 +502,23 @@
     .shelf :global(.case.case-lit) {
       border: 1px solid Highlight;
     }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .shelf {
+      --shelf-stagger: 0ms;
+    }
+
+    .shelf :global(.shelf-stack) {
+      transition-delay: 0s;
+    }
+  }
+
+  :global(:root[data-reduce-motion="true"]) .shelf {
+    --shelf-stagger: 0ms;
+  }
+
+  :global(:root[data-reduce-motion="true"]) .shelf :global(.shelf-stack) {
+    transition-delay: 0s;
   }
 </style>

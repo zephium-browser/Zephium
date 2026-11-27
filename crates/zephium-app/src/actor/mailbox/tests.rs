@@ -847,3 +847,39 @@ fn observational_status_query_never_evicts_browser_state_at_capacity() {
             if title == "retained presentation"
     )));
 }
+
+#[test]
+fn a_navigation_failure_report_is_never_dropped_for_a_full_queue() {
+    // Its handler starts an https try's http fallback, which nothing retries.
+    assert!(command_is_critical(&Command::Engine(
+        EngineEvent::NavigationFailureReported {
+            id: ItemId::from(1),
+            reason: zephium_core::ports::engine::NavigationFailureReason::Unreachable,
+            url: None,
+            replaced_page: false,
+        }
+    )));
+}
+
+#[test]
+fn preview_completion_has_one_reserved_slot_under_ui_pressure() {
+    let queue = CommandQueue::new();
+    for _ in 0..NORMAL_COMMAND_CAPACITY {
+        queue.try_push(Command::Open).ok().unwrap();
+    }
+    queue
+        .try_push(Command::TabPreviewReady {
+            request: 1,
+            bytes: Some(vec![1]),
+        })
+        .ok()
+        .unwrap();
+    assert!(queue
+        .inner
+        .state
+        .lock()
+        .unwrap()
+        .commands
+        .iter()
+        .any(|command| matches!(command, Command::TabPreviewReady { request: 1, .. })));
+}

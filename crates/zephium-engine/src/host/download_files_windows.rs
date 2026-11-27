@@ -853,6 +853,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         fs::write(pending.payload(), b"keep").unwrap();
         assert!(recover_staging(&record).is_err());

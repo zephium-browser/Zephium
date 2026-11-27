@@ -38,7 +38,7 @@ impl zephium_core::ports::notes::Notes for FakeNotes {
 fn runs_on_any_thread<T: Send>(_: &T) {}
 
 fn today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+    jiff::Zoned::now().date().strftime("%Y-%m-%d").to_string()
 }
 
 #[test]

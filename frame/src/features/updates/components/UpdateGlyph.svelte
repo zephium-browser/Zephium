@@ -5,7 +5,7 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import * as notices from "../lib/notices.svelte";
-  import { PILL_ICON, activatePill, cardView, pillLabel } from "../lib/present";
+  import { PILL_ICON, activatePill, cardView, pillBusy, pillLabel } from "../lib/present";
 
   let { onabout }: { onabout: () => void } = $props();
 
@@ -31,11 +31,11 @@
     data-kind={pill ? "pill" : "card"}
     title={label}
     aria-label={label}
-    disabled={pill?.kind === "installing"}
-    aria-busy={pill?.kind === "installing" || undefined}
+    disabled={pill ? pillBusy(pill) : false}
+    aria-busy={(pill && pillBusy(pill)) || undefined}
     onclick={open}
   >
-    {#if pill?.kind === "installing"}<span class="orbit" aria-hidden="true"></span>
+    {#if pill && pillBusy(pill)}<span class="orbit" aria-hidden="true"></span>
     {:else}<Icon icon={pill ? PILL_ICON : card!.icon} size={16} />{/if}
   </button>
 {/if}

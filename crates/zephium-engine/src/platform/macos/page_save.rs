@@ -74,6 +74,9 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
             .map(|title| title.to_string())
             .unwrap_or_default(),
     );
+    let origin = unsafe { page.URL().and_then(|url| url.absoluteString()) }
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| "about:blank".into());
     let host = page.clone();
     let archived = RcBlock::new(move |data: *mut NSData, _error: *mut NSError| {
         // SAFETY: WebKit passes an autoreleased NSData or null, on the main thread.
@@ -106,6 +109,7 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
         panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&kinds)));
         let chosen = panel.clone();
         let source = source.clone();
+        let origin = origin.clone();
         let done = RcBlock::new(move |result: NSModalResponse| {
             let path = (result == NSModalResponseOK)
                 .then(|| chosen.URL())
@@ -120,11 +124,12 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
                 (Format::Source, Some(html)) => html.as_bytes().to_vec(),
                 _ => data.to_vec(),
             };
+            let origin = origin.clone();
             // Writing can be large; the main thread has a page to draw.
             let _ = std::thread::Builder::new()
                 .name("save-page".into())
                 .spawn(move || {
-                    if let Err(error) = std::fs::write(&path, bytes) {
+                    if let Err(error) = write_page(&path, &bytes[..], &origin) {
                         eprintln!("engine: could not save the page: {}", error.kind());
                     }
                 });
@@ -135,11 +140,147 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
     true
 }
 
+fn write_page(
+    path: &std::path::Path,
+    mut bytes: impl std::io::Read,
+    origin: &str,
+) -> std::io::Result<()> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = path.as_path();
+    let permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing page directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("missing page name"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let mut partial_name = std::ffi::OsString::from(".");
+    partial_name.push(name);
+    partial_name.push(format!(".{}-{stamp}.partial", std::process::id()));
+    let partial = parent.join(partial_name);
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)?;
+        std::io::copy(&mut bytes, &mut file)?;
+        crate::host::download_files::quarantine(&partial, origin)
+            .map_err(|_| std::io::Error::other("page quarantine failed"))?;
+        crate::host::download_files::verify_quarantine(&file)
+            .map_err(|_| std::io::Error::other("page quarantine verification failed"))?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&partial, path)?;
+        std::fs::File::open(parent)?.sync_all()
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn failed_page_write_preserves_the_original() {
+        use std::io::{self, Read};
+        struct Failed;
+        impl Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected failure"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        std::fs::write(&path, b"original").unwrap();
+        let bytes = (&b"partial"[..]).chain(Failed);
+        assert!(write_page(&path, bytes, "https://example.com/").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn replacing_a_page_preserves_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        std::fs::write(&path, b"original").unwrap();
+        for mode in [0o640, 0o440] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn saving_through_a_symlink_replaces_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.html");
+        let link = dir.path().join("page.html");
+        std::fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink("target.html", &link).unwrap();
+        write_page(&link, &b"replacement"[..], "https://example.com/").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("target.html"));
+    }
+
+    #[test]
+    fn saving_reports_failure_to_open_the_parent_for_sync_after_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        // Search and write allow the rename, but no read permission prevents
+        // opening the directory for the final durability barrier.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = write_page(&path, &b"replacement"[..], "https://example.com/");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn saved_pages_carry_quarantine() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["page.html", "page.webarchive"] {
+            let path = dir.path().join(name);
+            write_page(&path, &b"saved page"[..], "https://example.com/").unwrap();
+            let file = std::fs::File::open(path).unwrap();
+            let size = unsafe {
+                libc::fgetxattr(
+                    file.as_raw_fd(),
+                    c"com.apple.quarantine".as_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                )
+            };
+            assert!(size > 0, "saved page has no quarantine");
+        }
+    }
 
     #[test]
     fn a_title_becomes_one_plain_file_name() {

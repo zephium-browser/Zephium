@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::ProfileId;
 
+mod activity;
+pub use activity::{ActivePageLoad, PageActivity};
 mod statistics;
 pub use statistics::{BlockedLoadCounter, BlockerStatistics};
 
@@ -19,9 +21,9 @@ mod cosmetics;
 pub use cosmetics::{DocumentStyleFailure, DocumentStylePlan, DocumentStyleProvider};
 mod sites;
 pub use sites::{
-    BlockerSite, BlockerSitePreferences, PersonalHide, PreparedBlockerSite, PreparedBlockerSites,
-    SitePreferenceChange, SitePreferenceError, MAX_PAUSED_BLOCKER_SITES, MAX_PERSONAL_HIDES,
-    MAX_PERSONAL_RULE_BYTES,
+    scriptlet_program_with_pauses, BlockerSite, BlockerSitePreferences, PersonalHide,
+    PreparedBlockerSite, PreparedBlockerSites, SitePreferenceChange, SitePreferenceError,
+    MAX_PAUSED_BLOCKER_SITES, MAX_PERSONAL_HIDES, MAX_PERSONAL_RULE_BYTES,
 };
 
 /// Upper bound for one native declarative policy crossing the application to
@@ -176,6 +178,34 @@ impl DeclarativeArtifactDigest {
 
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+/// The rule text behind a declarative artifact. A freshly compiled artifact
+/// holds it in memory; one read back from the compiled-artifact cache reads,
+/// re-checks and validates it only when the native store has no compiled list
+/// for its digest, so a warm launch never brings it into memory.
+pub trait DeclarativeRuleText: Send + Sync {
+    /// The text's length in bytes, known without reading it.
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The validated text, or `None` when it no longer matches the artifact
+    /// digest. This may read and parse tens of megabytes: never call it on a
+    /// thread that serves the UI.
+    fn load(&self) -> Option<Arc<str>>;
+}
+
+impl DeclarativeRuleText for Arc<str> {
+    fn len(&self) -> usize {
+        str::len(self)
+    }
+
+    fn load(&self) -> Option<Arc<str>> {
+        Some(self.clone())
     }
 }
 
@@ -520,7 +550,7 @@ pub enum ContentRulesPayload {
     Declarative {
         format: DeclarativeRuleFormat,
         artifact_digest: DeclarativeArtifactDigest,
-        encoded: Arc<str>,
+        encoded: Arc<dyn DeclarativeRuleText>,
     },
 }
 
@@ -549,6 +579,16 @@ pub struct ContentRules {
     coverage: ContentRuleCoverage,
     payload: ContentRulesPayload,
     cosmetics: Option<Arc<dyn DocumentStyleProvider>>,
+    navigation: Option<NavigationPolicy>,
+}
+
+#[derive(Clone)]
+struct NavigationPolicy(Arc<dyn NetworkRequestPolicy>);
+
+impl fmt::Debug for NavigationPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<bounded matcher>")
+    }
 }
 
 impl ContentRules {
@@ -558,6 +598,7 @@ impl ContentRules {
             coverage: ContentRuleCoverage::default(),
             payload: ContentRulesPayload::AllowAll,
             cosmetics: None,
+            navigation: None,
         })
     }
 
@@ -572,6 +613,7 @@ impl ContentRules {
                 coverage,
                 payload: ContentRulesPayload::Runtime(policy),
                 cosmetics: None,
+                navigation: None,
             })
         })
     }
@@ -596,9 +638,40 @@ impl ContentRules {
             payload: ContentRulesPayload::Declarative {
                 format,
                 artifact_digest,
+                encoded: Arc::new(encoded),
+            },
+            cosmetics: None,
+            navigation: None,
+        }))
+    }
+
+    /// A declarative artifact whose producer already bound `artifact_digest`
+    /// to the text, as the integrity-checked compiled-artifact cache does.
+    /// `encoded.load()` must refuse text that does not match it.
+    pub fn declarative_with_digest(
+        digest: ContentRuleDigest,
+        coverage: ContentRuleCoverage,
+        format: DeclarativeRuleFormat,
+        artifact_digest: [u8; 32],
+        encoded: Arc<dyn DeclarativeRuleText>,
+    ) -> Option<Arc<Self>> {
+        if !coverage.is_consistent()
+            || !coverage.has_blocking_entries()
+            || encoded.is_empty()
+            || encoded.len() > MAX_DECLARATIVE_RULE_BYTES
+        {
+            return None;
+        }
+        Some(Arc::new(Self {
+            digest,
+            coverage,
+            payload: ContentRulesPayload::Declarative {
+                format,
+                artifact_digest: DeclarativeArtifactDigest(artifact_digest),
                 encoded,
             },
             cosmetics: None,
+            navigation: None,
         }))
     }
 
@@ -617,6 +690,24 @@ impl ContentRules {
 
     pub fn cosmetics(&self) -> Option<&Arc<dyn DocumentStyleProvider>> {
         self.cosmetics.as_ref()
+    }
+
+    /// Attaches the policy that judges a page or frame before it loads.
+    pub fn with_navigation(
+        mut self: Arc<Self>,
+        policy: Arc<dyn NetworkRequestPolicy>,
+    ) -> Arc<Self> {
+        if self.enabled() {
+            let rules = Arc::make_mut(&mut self);
+            rules.navigation = Some(NavigationPolicy(policy));
+        }
+        self
+    }
+
+    /// uBlock Origin's badware list alone, which judges each page and frame
+    /// as it starts loading.
+    pub fn navigation_policy(&self) -> Option<&Arc<dyn NetworkRequestPolicy>> {
+        self.navigation.as_ref().map(|navigation| &navigation.0)
     }
 
     pub const fn digest(&self) -> ContentRuleDigest {

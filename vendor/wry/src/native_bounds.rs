@@ -27,11 +27,11 @@ pub(crate) const PAGE_TITLE_LIMIT: NativeStringLimit = NativeStringLimit {
 };
 
 // Keep this synchronized with Zephium's committed-navigation ceiling. The
-// second check is intentional: 8 Ki UTF-16 units can expand past 8 KiB in
-// UTF-8, while navigation policy is byte based.
+// second check is intentional: UTF-16 units can expand past the same byte
+// ceiling in UTF-8, while navigation policy is byte based.
 pub(crate) const PAGE_URL_LIMIT: NativeStringLimit = NativeStringLimit {
-  max_utf16_units: 8 * 1_024,
-  max_utf8_bytes: 8 * 1_024,
+  max_utf16_units: 256 * 1_024,
+  max_utf8_bytes: 256 * 1_024,
 };
 
 // Privileged chrome commands are intentionally small (URLs, identifiers,
@@ -111,6 +111,14 @@ impl CustomProtocolRequestBudget {
 
 // A destination component is restricted more tightly than a URL or title.
 #[cfg(target_vendor = "apple")]
+// A security origin's scheme and host: a DNS name is at most 253 bytes, so
+// 512 covers any host WebKit can name.
+pub(crate) const ORIGIN_PART_LIMIT: NativeStringLimit = NativeStringLimit {
+  max_utf16_units: 512,
+  max_utf8_bytes: 512,
+};
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) const DOWNLOAD_FILENAME_LIMIT: NativeStringLimit = NativeStringLimit {
   max_utf16_units: 240,
   max_utf8_bytes: 240,
@@ -211,6 +219,30 @@ mod tests {
     max_utf16_units: 4,
     max_utf8_bytes: 4,
   };
+
+  #[test]
+  fn long_page_navigation_urls_keep_both_native_allocation_bounds() {
+    let long: Vec<u16> = "https://sso.example.test/callback?state="
+      .encode_utf16()
+      .chain(std::iter::repeat_n(97, 32 * 1024))
+      .collect();
+    assert!(bounded_utf16(&long, PAGE_URL_LIMIT).is_some());
+    let exact = vec![97; PAGE_URL_LIMIT.max_utf16_units];
+    assert_eq!(
+      bounded_utf16(&exact, PAGE_URL_LIMIT).unwrap().len(),
+      PAGE_URL_LIMIT.max_utf8_bytes
+    );
+    assert!(bounded_utf16(
+      &vec![97; PAGE_URL_LIMIT.max_utf16_units + 1],
+      PAGE_URL_LIMIT
+    )
+    .is_none());
+    assert!(bounded_utf16(
+      &vec![0x6c34; PAGE_URL_LIMIT.max_utf16_units],
+      PAGE_URL_LIMIT
+    )
+    .is_none());
+  }
 
   #[test]
   fn utf16_checks_native_units_and_encoded_bytes() {

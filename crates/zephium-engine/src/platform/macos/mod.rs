@@ -6,6 +6,8 @@ mod agent_history;
 pub(crate) mod agentic_liveness_probe;
 #[cfg(feature = "agentic-browser-qa")]
 pub(crate) mod profile_seed_probe;
+#[cfg(feature = "blocker-bench")]
+pub mod qa_capture;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(all(
@@ -41,7 +43,7 @@ pub(crate) use page_reader_probe::run as run_page_reader_probe;
 pub(crate) mod audio;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
-pub(crate) use automatic_pip::automatic_pip;
+pub(crate) use automatic_pip::{after_document_fullscreen, automatic_pip};
 pub(crate) use fullscreen::{exit as exit_fullscreen, state as fullscreen_state};
 pub(crate) mod autofill;
 mod content_filter;
@@ -80,6 +82,7 @@ pub(crate) use work_observation_presentation::retained_page_hidden;
 pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
 mod pointer_cover;
 mod stage;
+pub(crate) mod store_button;
 mod webext_action_icon;
 
 pub(crate) use find::{find, FindReport, FindSession};
@@ -166,11 +169,14 @@ pub use native::{
     reload_ignoring_cache, set_media_suspended, stop_loading, user_script_refusal,
     user_style_refusal,
 };
-pub(crate) use native::{native_discard_idle, page_footprint, set_background_suspension};
+pub(crate) use native::{ask_web_process, end_web_process};
+pub(crate) use native::{
+    background_preferences_key, native_discard_idle, page_footprint, set_background_suspension,
+};
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
-pub use stage::ContentStage;
+pub use stage::{home_window, ContentStage};
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 
 pub(crate) struct ContentPolicyTimeout {
@@ -844,3 +850,5 @@ pub(crate) fn media_diagnostics_enabled() -> bool {
 pub(crate) fn configure_media_diagnostic(public: bool, account: bool) {
     semantic_runtime::configure_media_diagnostic(public, account);
 }
+
+pub(crate) mod tab_preview;

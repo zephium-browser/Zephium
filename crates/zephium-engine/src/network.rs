@@ -38,9 +38,11 @@ mod tests {
     use super::*;
     use zephium_core::proxy::from_settings;
 
+    // The proxy is process-wide; tests that set it take turns.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn a_new_environment_carries_the_proxy_chosen_when_it_is_made() {
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _serial = SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -56,5 +58,20 @@ mod tests {
         );
         set(None);
         assert_eq!(current(), None);
+    }
+
+    #[test]
+    fn page_environments_keep_their_network_service_in_its_own_process() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for proxy in [None, from_settings("socks5", "127.0.0.1:9050")] {
+            set(proxy);
+            let arguments = browser_arguments().to_ascii_lowercase();
+            assert!(!arguments.contains("networkserviceinprocess"));
+            assert!(!arguments.contains("--enable-features"));
+            assert!(!arguments.contains("single-process"));
+        }
+        set(None);
     }
 }

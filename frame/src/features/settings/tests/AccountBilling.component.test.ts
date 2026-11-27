@@ -27,6 +27,7 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    chromeModal: async () => {},
     accountGet: native.get,
     accountRefresh: native.refresh,
     accountBuy: native.buy,
@@ -427,6 +428,8 @@ test("several packs are a list to pick from, smallest first: credits lead, the p
   native.buy.mockResolvedValue(reply(account));
   const screen = await render(AccountPage);
   await screen.getByRole("button", { name: "Buy credits" }).click();
+  // The dialog is imported on first use, so it can land after the click returns.
+  await expect.element(screen.getByRole("radio").first()).toBeInTheDocument();
   const radios = screen.getByRole("radio").elements() as HTMLInputElement[];
   expect(radios.map((radio) => radio.value)).toEqual([
     "staging-topup",

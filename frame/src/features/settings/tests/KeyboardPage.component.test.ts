@@ -6,6 +6,16 @@ import type { KeymapEntry, LauncherTrigger } from "$shared/ipc/bindings";
 import { keymap } from "$domain/keymap";
 import KeyboardPage from "../components/sections/KeyboardPage.svelte";
 
+const platform = vi.hoisted(() => ({ IS_MAC: true, IS_WINDOWS: false }));
+vi.mock("$shared/platform", () => ({
+  get IS_MAC() {
+    return platform.IS_MAC;
+  },
+  get IS_WINDOWS() {
+    return platform.IS_WINDOWS;
+  },
+}));
+
 const entry = (id: string, title: string, accelerator: string | null, customized = false) =>
   ({
     id,
@@ -46,16 +56,40 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 beforeEach(async () => {
+  platform.IS_MAC = true;
+  platform.IS_WINDOWS = false;
   native.entries.mockResolvedValue([
     entry("tab.new", "New Tab", "Cmd+T"),
     entry("tab.close", "Close Tab", "Cmd+W"),
     entry("page.print", "Print…", "Cmd+Shift+P", true),
+    { ...entry("profile.next", "Next Profile", "Ctrl+Cmd+P"), group: "keys" },
+    { ...entry("profile.previous", "Previous Profile", "Ctrl+Cmd+Shift+P"), group: "keys" },
   ]);
   await keymap.init();
 });
 afterEach(() => {
   keymap.dispose();
   vi.clearAllMocks();
+});
+
+test("shows both profile shortcuts and rebinds the previous-profile command", async () => {
+  native.bind.mockResolvedValue({ kind: "applied" });
+  const screen = await render(KeyboardPage);
+  await expect
+    .element(screen.getByRole("heading", { name: "Profiles", exact: true }))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Change the shortcut for Next profile" }))
+    .toBeVisible();
+  const previous = screen.getByRole("button", { name: "Change the shortcut for Previous profile" });
+  await expect.element(previous).toBeVisible();
+  await page.viewport(1000, 900);
+  await page.screenshot({ path: "../../../../../target/settings-profile-shortcuts.png" });
+  await previous.click();
+  await userEvent.keyboard("{Control>}{Meta>}k{/Meta}{/Control}");
+  await vi.waitFor(() =>
+    expect(native.bind).toHaveBeenLastCalledWith("profile.previous", "Ctrl+Cmd+KeyK", false),
+  );
 });
 
 test("records a shortcut, names a conflict, and takes the keys when asked", async () => {
@@ -83,6 +117,19 @@ test("records a shortcut, names a conflict, and takes the keys when asked", asyn
   await page.viewport(720, 640);
   await page.screenshot({ path: "../../../../../target/settings-keyboard.png" });
   delete document.documentElement.dataset.theme;
+});
+
+test("reports reserved Ctrl+A when recorded on Windows AZERTY", async () => {
+  platform.IS_MAC = false;
+  platform.IS_WINDOWS = true;
+  native.bind.mockResolvedValue({ kind: "reserved" });
+  const screen = await render(KeyboardPage);
+  await screen.getByRole("button", { name: "Change the shortcut for New tab" }).click();
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyQ", key: "a", ctrlKey: true }));
+  await vi.waitFor(() =>
+    expect(native.bind).toHaveBeenLastCalledWith("tab.new", "Ctrl+A", false),
+  );
+  await expect.element(screen.getByText("That shortcut belongs to the system.")).toBeVisible();
 });
 
 test("Delete clears a shortcut, Escape keeps it, and Reset restores the default", async () => {

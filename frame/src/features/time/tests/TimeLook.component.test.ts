@@ -78,9 +78,11 @@ vi.mock("$domain/tabs", () => ({
 }));
 
 afterEach(() => {
+  vi.restoreAllMocks();
   preferences.dispose();
   focus.dispose();
   delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.reduceMotion;
 });
 
 const settled = () =>
@@ -169,4 +171,26 @@ test("a shut page is covered with the round's time and a way out", async () => {
   await screen.getByRole("button", { name: "Allow 5 minutes" }).click();
   expect(native.control).toHaveBeenCalledWith({ kind: "allow", site: "youtube.com" });
   await capture(screen.container, "cover");
+});
+
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])("site management honors OS reduced motion %s and app reduced motion %s", async (os, app) => {
+  const matchMedia = window.matchMedia.bind(window);
+  vi.spyOn(window, "matchMedia").mockImplementation((query) =>
+    query === "(prefers-reduced-motion: reduce)"
+      ? { ...matchMedia(query), matches: os }
+      : matchMedia(query),
+  );
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+  const screen = await setup("page");
+  document.documentElement.dataset.reduceMotion = String(app);
+  await screen.getByRole("button", { name: "Shuts 2 sites" }).click();
+  expect(scroll).toHaveBeenCalledWith({
+    block: "start",
+    behavior: os || app ? "instant" : "smooth",
+  });
 });

@@ -27,9 +27,11 @@ impl Shell {
             .tab(id)
             .is_some_and(|tab| tab.content == TabContent::Web && tab.has_view());
         let media = media.filter(|_| live);
+        let was_running = self.keeps_running(id);
         if self.media.observe(id, media, std::time::Instant::now()) {
             self.project_media_player();
         }
+        self.follow_running(id, was_running);
     }
 
     /// The tab closed, or its page went away with its media.
@@ -130,7 +132,7 @@ impl Shell {
 
     /// The player can show a tab of another space; going to it shows that
     /// space, arriving on the tab.
-    fn show_media_tab(&mut self, id: ItemId) -> OperationDisposition {
+    pub(super) fn show_media_tab(&mut self, id: ItemId) -> OperationDisposition {
         if self.item_in_focused_scope(id) {
             return self.operation_activate(id);
         }

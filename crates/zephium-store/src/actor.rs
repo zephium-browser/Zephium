@@ -67,6 +67,13 @@ const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
 const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
 
+fn history_url_allowed(value: &str) -> bool {
+    value.len() <= hub::MAX_URL_BYTES
+        && url::Url::parse(value).is_ok_and(|url| {
+            url.as_str().len() <= hub::MAX_URL_BYTES && navigation::is_allowed(&url)
+        })
+}
+
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
 type BlockerConfigLoadDone = Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>;
@@ -309,6 +316,7 @@ enum Cmd {
     Load(Sender<SessionLoad>),
     /// Sets an unrestorable session aside and loads the restarted one.
     SetAsideSession(Sender<Option<(SessionLoad, Option<std::path::PathBuf>)>>),
+    SetAsideStartupSession(Sender<Option<(SessionLoad, Option<std::path::PathBuf>)>>),
     UpdateProfileBlockerConfig(
         ProfileId,
         BlockerConfigRevision,
@@ -401,8 +409,22 @@ enum Cmd {
         zephium_core::bookmarks::BookmarkRequest,
         Sender<zephium_core::bookmarks::BookmarkReply>,
     ),
+    BookmarksObserved(
+        ProfileId,
+        zephium_core::bookmarks::BookmarkRequest,
+        Sender<(
+            zephium_core::bookmarks::BookmarkReply,
+            Option<zephium_core::bookmarks::BookmarkChange>,
+        )>,
+    ),
+    ExtensionHistory(
+        ProfileId,
+        zephium_core::extension_data::HistoryRequest,
+        Sender<zephium_core::extension_data::HistoryReply>,
+    ),
     ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
     DiscardSessionBackup(ProfileId, Box<dyn FnOnce(bool) + Send>),
+    SiteOrigins(ProfileId, String, Box<dyn FnOnce(Vec<String>, bool) + Send>),
     Chats(ProfileId, u32, Sender<Vec<ChatSummary>>),
     Chat(ProfileId, String, Sender<Option<String>>),
     SaveChat {
@@ -417,10 +439,31 @@ enum Cmd {
     DeleteChat(ProfileId, String, Sender<bool>),
     ClearChats(ProfileId, Option<i64>, Sender<u32>),
     ZoomLevels(ProfileId, Sender<Vec<zephium_core::zoom::SavedLevel>>),
-    SaveZoomLevel(ProfileId, String, Option<u16>, i64),
+    SaveZoomLevel(ProfileId, String, Option<u16>, i64, Sender<bool>),
     PopupSites(
         ProfileId,
         Sender<Option<Vec<zephium_core::permissions::PageOrigin>>>,
+    ),
+    AppLinkSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, String)>>>,
+    ),
+    SetAppLinkSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        String,
+        bool,
+        Sender<bool>,
+    ),
+    DownloadSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, bool)>>>,
+    ),
+    SetDownloadSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        Option<bool>,
+        Sender<bool>,
     ),
     SetPopupSite(
         ProfileId,
@@ -475,6 +518,23 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// After an explicit startup recovery choice, preserves the current
+    /// bounded session bytes and restarts without tabs, retaining draft scopes.
+    pub fn set_aside_startup_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        let lifecycle = match self.lifecycle.try_read() {
+            Ok(lifecycle) => lifecycle,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return None;
+        }
+        let (send, receive) = mpsc::channel();
+        self.tx.try_send(Cmd::SetAsideStartupSession(send)).ok()?;
+        drop(lifecycle);
+        receive.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
+    }
+
     fn admits_writes(&self) -> bool {
         let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
         !lifecycle.terminal_admitted && !self.shutdown_clean.load(Ordering::Acquire)
@@ -1148,7 +1208,7 @@ impl Store for SqliteStore {
     }
 
     fn record_visit(&self, profile: ProfileId, url: String, title: String) {
-        if !navigation::is_allowed_str(&url) {
+        if !history_url_allowed(&url) {
             return;
         }
         let title = sanitize_page_title(&title);
@@ -1304,10 +1364,7 @@ impl Store for SqliteStore {
     }
 
     fn record_search(&self, profile: ProfileId, query: String, url: String) -> bool {
-        if query.trim().is_empty()
-            || query.len() > 512
-            || !zephium_core::navigation::is_allowed_str(&url)
-        {
+        if query.trim().is_empty() || query.len() > 512 || !history_url_allowed(&url) {
             return false;
         }
         self.tx
@@ -1459,6 +1516,50 @@ impl Store for SqliteStore {
             .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
     }
 
+    fn bookmarks_observed(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::bookmarks::BookmarkRequest,
+    ) -> (
+        zephium_core::bookmarks::BookmarkReply,
+        Option<zephium_core::bookmarks::BookmarkChange>,
+    ) {
+        use zephium_core::bookmarks::{BookmarkFailure, BookmarkReply, BookmarkRequest};
+        let timeout = if matches!(request, BookmarkRequest::Import { .. }) {
+            IMPORT_RPC_TIMEOUT
+        } else {
+            STORE_RPC_TIMEOUT
+        };
+        let failed = (BookmarkReply::Failed(BookmarkFailure::Unavailable), None);
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::BookmarksObserved(profile, request, tx))
+            .is_err()
+        {
+            return failed;
+        }
+        rx.recv_timeout(timeout).unwrap_or(failed)
+    }
+
+    fn extension_history(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::extension_data::HistoryRequest,
+    ) -> zephium_core::extension_data::HistoryReply {
+        use zephium_core::extension_data::HistoryReply;
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ExtensionHistory(profile, request, tx))
+            .is_err()
+        {
+            return HistoryReply::Failed;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT)
+            .unwrap_or(HistoryReply::Failed)
+    }
+
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
         self.clear_history_checked(profile, since)
             .unwrap_or_default()
@@ -1484,6 +1585,19 @@ impl Store for SqliteStore {
         self.tx
             .try_send(Cmd::DiscardSessionBackup(profile, done))
             .is_ok()
+    }
+
+    fn site_origins(
+        &self,
+        profile: ProfileId,
+        site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        zephium_core::browsing_data::is_site_name(&site)
+            && self
+                .tx
+                .try_send(Cmd::SiteOrigins(profile, site, done))
+                .is_ok()
     }
 
     fn chats(&self, profile: ProfileId, limit: u32) -> Vec<ChatSummary> {
@@ -1554,9 +1668,8 @@ impl Store for SqliteStore {
         hub::valid_zoom_site(&site)
             && percent.is_none_or(zephium_core::zoom::valid_percent)
             && self
-                .tx
-                .try_send(Cmd::SaveZoomLevel(profile, site, percent, set_at))
-                .is_ok()
+                .ask(|reply| Cmd::SaveZoomLevel(profile, site, percent, set_at, reply))
+                .unwrap_or(false)
     }
 
     fn popup_sites(
@@ -1576,8 +1689,45 @@ impl Store for SqliteStore {
             .unwrap_or(false)
     }
 
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.ask(|reply| Cmd::AppLinkSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply))
+            .unwrap_or(false)
+    }
+
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.ask(|reply| Cmd::DownloadSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetDownloadSite(profile, origin, allowed, reply))
+            .unwrap_or(false)
+    }
+
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
-        if !zephium_core::navigation::is_allowed_str(&url) || title.len() > hub::MAX_TITLE_BYTES {
+        if !history_url_allowed(&url) || title.len() > hub::MAX_TITLE_BYTES {
             return false;
         }
         self.tx
@@ -1835,6 +1985,20 @@ fn actor(
                 };
                 let _ = reply.send(restarted);
             }
+            Some(Cmd::SetAsideStartupSession(reply)) => {
+                let restarted = if flush(&mut hub, &mut pending) {
+                    match hub.set_aside_startup_session() {
+                        Ok(file) => Some((session_load(&mut hub), file)),
+                        Err(error) => {
+                            eprintln!("store: startup session recovery failed: {error}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let _ = reply.send(restarted);
+            }
             Some(Cmd::UpdateProfileBlockerConfig(profile, expected, next, done)) => {
                 let outcome = match hub.update_profile_blocker_config(profile, expected, next) {
                     Ok(outcome) => outcome,
@@ -2058,6 +2222,32 @@ fn actor(
             Some(Cmd::Bookmarks(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks(profile, request));
             }
+            Some(Cmd::BookmarksObserved(profile, request, reply)) => {
+                let _ = reply.send(hub.bookmarks_observed(profile, request));
+            }
+            Some(Cmd::ExtensionHistory(profile, request, reply)) => {
+                use zephium_core::extension_data::{HistoryReply, HistoryRequest};
+                // A removal must also take visits still waiting to be written.
+                let removes = matches!(
+                    request,
+                    HistoryRequest::RemoveUrl { .. }
+                        | HistoryRequest::RemoveRange { .. }
+                        | HistoryRequest::RemoveAll
+                );
+                let durable = !removes
+                    || ((hub.knows(profile) || flush(&mut hub, &mut pending))
+                        && flush_profile_visits(
+                            &mut hub,
+                            &pending_visits,
+                            &mut visit_retry,
+                            profile,
+                        ));
+                let _ = reply.send(if durable {
+                    hub.extension_history(profile, request)
+                } else {
+                    HistoryReply::Failed
+                });
+            }
             Some(Cmd::ClearHistory(profile, since, reply)) => {
                 let session_durable = hub.knows(profile) || flush(&mut hub, &mut pending);
                 let visits_durable = session_durable
@@ -2082,6 +2272,12 @@ fn actor(
                 }
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     done(result.is_ok());
+                }));
+            }
+            Some(Cmd::SiteOrigins(profile, site, done)) => {
+                let (origins, complete) = hub.site_origins(profile, &site);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    done(origins, complete)
                 }));
             }
             Some(Cmd::Chats(profile, limit, reply)) => {
@@ -2112,13 +2308,29 @@ fn actor(
             Some(Cmd::ZoomLevels(profile, reply)) => {
                 let _ = reply.send(hub.zoom_levels(profile));
             }
-            Some(Cmd::SaveZoomLevel(profile, site, percent, set_at)) => {
-                if hub.knows(profile) || flush(&mut hub, &mut pending) {
-                    hub.save_zoom_level(profile, &site, percent, set_at);
-                }
+            Some(Cmd::SaveZoomLevel(profile, site, percent, set_at, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.save_zoom_level(profile, &site, percent, set_at);
+                let _ = reply.send(stored);
             }
             Some(Cmd::PopupSites(profile, reply)) => {
                 let _ = reply.send(hub.popup_sites(profile));
+            }
+            Some(Cmd::AppLinkSites(profile, reply)) => {
+                let _ = reply.send(hub.app_link_sites(profile));
+            }
+            Some(Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_app_link_site(profile, &origin, &scheme, allowed);
+                let _ = reply.send(stored);
+            }
+            Some(Cmd::DownloadSites(profile, reply)) => {
+                let _ = reply.send(hub.download_sites(profile));
+            }
+            Some(Cmd::SetDownloadSite(profile, origin, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_download_site(profile, &origin, allowed);
+                let _ = reply.send(stored);
             }
             Some(Cmd::SetPopupSite(profile, origin, allowed, reply)) => {
                 let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
@@ -2247,7 +2459,19 @@ fn actor(
                 let _ = reply.send(result);
             }
             Some(Cmd::WorkDocument(profile, request, _permit, completion)) => {
-                let result = hub.work_document(profile, *request);
+                let composer = matches!(
+                    request.as_ref(),
+                    zephium_core::work::port::WorkRequest::Environment {
+                        call: zephium_core::work::environment::WorkEnvironmentCall::ComposerRead { .. }
+                            | zephium_core::work::environment::WorkEnvironmentCall::ComposerSave { .. },
+                        ..
+                    }
+                );
+                let result = if composer && !flush(&mut hub, &mut pending) {
+                    Err(zephium_core::work::WorkError::Unavailable)
+                } else {
+                    hub.work_document(profile, *request)
+                };
                 let _ =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
             }

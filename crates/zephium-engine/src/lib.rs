@@ -1,5 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
+#[cfg(any(target_os = "macos", test))]
+mod background_groups;
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{
     last_action_timeout_stage, AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES,
@@ -18,6 +20,8 @@ mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
+#[cfg(any(target_os = "windows", test))]
+mod extension_navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod haptics;
@@ -30,6 +34,8 @@ mod motion_curve;
 mod navigation_epoch;
 mod network;
 #[cfg(any(target_os = "windows", test))]
+mod replay_witness;
+#[cfg(any(target_os = "windows", test))]
 mod reputation;
 #[cfg(target_os = "windows")]
 pub use reputation::{
@@ -40,6 +46,8 @@ pub use reputation::{
 
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(all(target_os = "macos", feature = "blocker-bench"))]
+pub use platform::macos::qa_capture::capture_window_png;
 mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
@@ -58,6 +66,14 @@ pub use platform::windows::{install_work_rendering_backing, remove_work_renderin
 
 #[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
 compile_error!("agent browser QA is forbidden in optimized builds");
+
+#[cfg(all(
+    feature = "blocker-bench",
+    not(any(debug_assertions, zephium_protection_qa_profile))
+))]
+compile_error!(
+    "the blocker benchmark driver is forbidden in optimized builds outside protection-qa"
+);
 
 #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub use platform::macos::agentic_liveness_probe::{
@@ -164,6 +180,18 @@ compile_error!("the native agentic semantic probe is forbidden in optimized buil
 
 #[cfg(target_os = "macos")]
 pub use platform::macos::private_api::missing as missing_private_webkit_api;
+
+/// Runs the extension command a key press in the browser window is the
+/// shortcut of; true when one took it. Call it for keys no browser shortcut
+/// claimed, before the page sees them. Unmodified keys return at once.
+#[cfg(target_os = "macos")]
+pub fn perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as Flags;
+    event
+        .modifierFlags()
+        .intersects(Flags::Command | Flags::Control | Flags::Option)
+        && host::try_perform_extension_command(event)
+}
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     passkey_authorization_state as macos_passkey_authorization_state,
@@ -529,8 +557,10 @@ pub fn run_windows_agentic_semantic_probe(
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
-    detach_privileged_environment_update, finalize_privileged_environment_registrations,
-    install_privileged_environment_registration,
+    browser_process_record, detach_privileged_environment_update,
+    finalize_privileged_environment_registrations, generation_report_lines,
+    install_privileged_environment_registration, privileged_environment_process,
+    WindowsLeftoverProcesses,
 };
 
 /// Runs the isolated-principal native WebKit probe on the process main thread.
@@ -1078,6 +1108,7 @@ impl RetirementGate {
                     Some(EngineEvent::RuntimeRestartRequired)
                 }
             }
+            event @ EngineEvent::ProfileRestartRequired { .. } => Some(event),
             event @ EngineEvent::ContentRulesSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -1087,7 +1118,8 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
-            event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
+            event @ (EngineEvent::ExtensionActionSettled { profile, .. }
+            | EngineEvent::ExtensionActionMenuSelected { profile, .. }) => {
                 self.profile_is_active(profile).then_some(event)
             }
             event @ EngineEvent::ExtensionActionsInvalidated { profile } => {
@@ -1108,7 +1140,12 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionBrowserRequested { .. }
             | event @ EngineEvent::ExtensionPageClosed { .. }
             | event @ EngineEvent::PermissionRequested { .. }
-            | event @ EngineEvent::WebExtensionAccessRequested(_) => Some(event),
+            | event @ EngineEvent::WebExtensionAccessRequested(_)
+            | event @ EngineEvent::WebExtensionAccessRemoved(_)
+            | event @ EngineEvent::WebExtensionDataRequested(_) => Some(event),
+            event @ EngineEvent::WebExtensionDataInterest { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
+            }
             EngineEvent::WebExtensionSettled {
                 profile,
                 install,
@@ -1143,10 +1180,12 @@ impl RetirementGate {
             | event @ EngineEvent::PresentationReady { id, .. }
             | event @ EngineEvent::NavigationFailed { id, .. }
             | event @ EngineEvent::NavigationFailureReported { id, .. }
+            | event @ EngineEvent::NativeNavigationRefused { id, .. }
             | event @ EngineEvent::ZoomSettled { id, .. }
             | event @ EngineEvent::ZoomGesture { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::ContentProtectionChanged { id, .. }
             | event @ EngineEvent::MediaCaptureChanged { id, .. }
             | event @ EngineEvent::AudioChanged { id, .. }
             | event @ EngineEvent::MediaChanged { id, .. }
@@ -1160,11 +1199,16 @@ impl RetirementGate {
             | event @ EngineEvent::NavState { id, .. }
             | event @ EngineEvent::HistoryEntries { id, .. }
             | event @ EngineEvent::NativeTabCloseRequested { id }
+            | event @ EngineEvent::MediaReturnRequested { id }
             | event @ EngineEvent::PageOpenBlocked { id, .. }
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::DownloadPermissionRequested { id, .. }
+            | event @ EngineEvent::DownloadPermissionEnded { id, .. }
+            | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
+            | event @ EngineEvent::NavigationBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
@@ -1172,6 +1216,7 @@ impl RetirementGate {
             | event @ EngineEvent::Captured { id, .. }
             | event @ EngineEvent::HtmlExtracted { id, .. }
             | event @ EngineEvent::FindResult { id, .. }
+            | event @ EngineEvent::StoreButtonClicked { id, .. }
             | event @ EngineEvent::ShortcutPressed { item: id, .. } => item_token
                 .as_ref()
                 .is_some_and(|active| self.allows_item_token(id, active))
@@ -1232,6 +1277,17 @@ impl RetirementGate {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::ViewDiscardRefused { id, profile, probe }),
+            EngineEvent::DormancyRefused {
+                id,
+                profile,
+                request,
+            } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::DormancyRefused {
+                    id,
+                    profile,
+                    request,
+                }),
             EngineEvent::PageMemory { id, profile, bytes } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::PageMemory { id, profile, bytes }),
@@ -1319,6 +1375,15 @@ fn dispatch_layout_turn(
             let application_delivery = event_delivery.clone();
             let application_fatal = fatal.clone();
             let admitted = host::try_with(move |host| {
+                // A coalesced layout can occupy a queue position before capture.
+                let preview = update
+                    .tab_preview
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(preview) = preview {
+                    preview.capture(host);
+                }
                 if host_item_tokens
                     .iter()
                     .all(|(_, token)| token.load(Ordering::Acquire))
@@ -1330,6 +1395,12 @@ fn dispatch_layout_turn(
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .remove(&update.window);
                     let applied = host.set_content(update.window, update.tree, update.region, hint);
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(id) = update.focus.filter(|_| applied) {
+                        if !host.focus_page(id) {
+                            eprintln!("engine: a page was in no window to take the keyboard");
+                        }
+                    }
                     let _ = require_native_layout_application(
                         applied,
                         &application_delivery,
@@ -1484,6 +1555,7 @@ pub struct WebviewEngine {
     fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     runtime_security_advisories: RuntimeSecurityAdvisories,
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+    tab_preview: TabPreviewSlot,
     stage_motion: StageMotionHints,
     user_content_dispatch: Arc<UserContentDispatchGate>,
     #[cfg(feature = "agentic-browser")]
@@ -1616,11 +1688,56 @@ fn valid_page_zoom(scale: f64) -> bool {
 /// Motion requested for the next applied layout of each window.
 type StageMotionHints = Arc<Mutex<HashMap<WindowId, StageMotion>>>;
 
+type TabPreviewCompletion = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
+type TabPreviewCapture = (ItemId, String, TabPreviewCompletion);
+type TabPreviewSlot = Arc<Mutex<Option<Arc<TabPreviewRequest>>>>;
+
+struct TabPreviewRequest(Mutex<Option<TabPreviewCapture>>);
+
+impl TabPreviewRequest {
+    fn take(&self) -> Option<TabPreviewCapture> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    fn capture(&self, host: &mut host::EngineHost) {
+        if let Some((id, url, done)) = self.take() {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            host.capture_tab_preview(id, url, done);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                let _ = (host, id, url);
+                done(None);
+            }
+        }
+    }
+
+    fn refuse(&self) {
+        if let Some((_, _, done)) = self.take() {
+            done(None);
+        }
+    }
+}
+
+/// A replacement keeps the focus of the layout it replaces while it still
+/// shows that page; one that hides or removes it drops the focus.
+fn carry_layout_focus(replaced: &PendingLayout, replacement: &mut PendingLayout) {
+    replacement.focus = replacement.focus.or(replaced.focus.filter(|id| {
+        replacement.region.is_some()
+            && replacement
+                .tree
+                .as_ref()
+                .is_some_and(|tree| tree.tabs().contains(id))
+    }));
+}
+
 struct PendingLayout {
     window: WindowId,
     tree: Option<Pane>,
     region: Option<Rect>,
     item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
+    tab_preview: TabPreviewSlot,
+    /// A page that takes the keyboard once this layout has placed it.
+    focus: Option<ItemId>,
 }
 
 /// Install on the main thread at startup. macOS and Windows attach child
@@ -1668,7 +1785,7 @@ pub fn install(
         dispatch.clone(),
         fatal_security_failure.clone(),
     );
-    host::install(
+    let cleanup_advisory = host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
@@ -1690,8 +1807,9 @@ pub fn install(
         retirement,
         event_delivery,
         fatal_security_failure,
-        runtime_security_advisories,
+        runtime_security_advisories: runtime_security_advisories.with_optional(cleanup_advisory),
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
+        tab_preview: TabPreviewSlot::default(),
         stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         #[cfg(feature = "agentic-browser")]
@@ -1713,7 +1831,42 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
     platform::imp::enforce_runtime_security_floor()
 }
 
+/// Reports active downloads across all profiles. Call on the native main thread;
+/// false means the host could not admit the query and will not call `done`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn downloads_in_progress(done: impl FnOnce(bool) + 'static) -> bool {
+    host::try_with(move |host| {
+        done(
+            host.downloads
+                .as_ref()
+                .is_some_and(|downloads| downloads.in_progress()),
+        );
+    })
+}
+
 impl WebviewEngine {
+    /// The browser window came back in front.
+    #[cfg(target_os = "windows")]
+    pub fn window_foreground(&self) {
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.store_buttons_foreground());
+        });
+    }
+
+    /// Gives `window` its own native window, such as a mini window, on the
+    /// main thread before its first layout. `false` leaves it without one.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn attach_window(&self, window: WindowId, handle: RawWindowHandle) -> bool {
+        #[cfg(target_os = "macos")]
+        if objc2_foundation::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let attached = std::rc::Rc::new(std::cell::Cell::new(false));
+        let result = attached.clone();
+        host::try_with(move |host| result.set(host.attach_window(window, handle)));
+        attached.get()
+    }
+
     /// Installs the profile-scoped download service before raw views are made.
     pub fn initialize_downloads(
         &self,
@@ -1728,6 +1881,8 @@ impl WebviewEngine {
                         host.downloads =
                             Some(host::downloads::Downloads::new(store, Arc::new(notify)));
                     }
+                    #[cfg(target_os = "macos")]
+                    host.watch_extension_downloads();
                 });
             })
         }
@@ -2093,6 +2248,57 @@ impl WebviewEngine {
         answer
     }
 
+    /// QA only: runs script in the page's main world and yields its string
+    /// result, or `None` when the page gave none within the engine's limits.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_evaluate(
+        &self,
+        id: ItemId,
+        script: String,
+    ) -> std::sync::mpsc::Receiver<Option<String>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.blocker_bench_evaluate(id, &script, reply));
+        });
+        answer
+    }
+
+    /// Keeps the compiled rule lists with these digests through the native
+    /// cache's collection, as the blocker's cache still names them.
+    pub fn retain_content_rule_cache_digests(&self, digests: Vec<[u8; 32]>) {
+        #[cfg(not(target_os = "windows"))]
+        self.run(move || {
+            let _ = host::try_with(move |engine| engine.retain_content_rule_cache_digests(digests));
+        });
+        #[cfg(target_os = "windows")]
+        let _ = digests;
+    }
+
+    /// QA only: runs script at document start, in the main world of the main
+    /// frame of every page loaded from now on; yields whether every open page
+    /// took it.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_preload(&self, script: String) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            let sent = reply.clone();
+            if !host::try_with(move |engine| {
+                let _ = sent.send(engine.blocker_bench_preload(&script));
+            }) {
+                let _ = reply.send(false);
+            }
+        });
+        answer
+    }
+
     /// Finished page loads in the profile's ordinary tabs on a site: a count
     /// that grows when the person loads a page there, such as after signing in.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2197,6 +2403,21 @@ pub fn page_mute_supported() -> bool {
 }
 
 impl Engine for WebviewEngine {
+    fn capture_tab_preview(
+        &self,
+        id: ItemId,
+        url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((id, url, done)))));
+        *self.tab_preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
+        self.answer_on_host(
+            request,
+            |request| request.refuse(),
+            |host, request| request.capture(host),
+        );
+    }
+
     fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| host.set_focus_gate(gate));
@@ -2263,8 +2484,19 @@ impl Engine for WebviewEngine {
     ) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| {
-                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+                let applied = host.set_blocker_site_preferences(profile, preferences);
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                if applied {
+                    return host.finish_site_change(profile, completion);
+                }
+                completion.finish(applied)
             });
+        });
+    }
+    #[cfg(target_os = "macos")]
+    fn prepare_profile(&self, partition: Partition) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.prepare_profile(partition));
         });
     }
     fn set_popup_sites(
@@ -2276,6 +2508,18 @@ impl Engine for WebviewEngine {
             let _ = host::try_with(move |host| host.set_popup_sites(profile, origins));
         });
     }
+    // Only these platforms hold downloads; elsewhere the trait's default
+    // keeps nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_download_sites(profile, sites));
+        });
+    }
     fn site_permissions(
         &self,
         profile: ProfileId,
@@ -2285,6 +2529,17 @@ impl Engine for WebviewEngine {
             done,
             |done| done(None),
             move |host, done| host.site_permissions(profile, done),
+        );
+    }
+    fn site_permission_snapshot(
+        &self,
+        profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        self.answer_on_host(
+            done,
+            |done| done(None),
+            move |host, done| host.site_permission_snapshot(profile, done),
         );
     }
     fn set_site_permission(
@@ -2465,11 +2720,11 @@ impl Engine for WebviewEngine {
         });
     }
 
-    fn suspends_hidden_views(&self) -> bool {
-        cfg!(target_os = "windows")
+    fn release_spare(&self) {
+        self.run(|| host::best_effort_with(|host| host.release_spare()));
     }
 
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, request: u64) {
         // `set_dormant` replaces the host's desired set. Once any profile is
         // retired, even an empty or filtered replacement could resume one of
         // its surviving controllers after a teardown failure, so suppress the
@@ -2495,7 +2750,7 @@ impl Engine for WebviewEngine {
                         .iter()
                         .all(|(_, token)| token.load(Ordering::Acquire))
                     {
-                        h.set_dormant(ids);
+                        h.set_dormant(ids, request);
                     }
                 });
             }
@@ -2563,7 +2818,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     fn open_web_extension_options(
         &self,
         profile: ProfileId,
@@ -2587,6 +2842,31 @@ impl Engine for WebviewEngine {
             host::best_effort_with(move |host| {
                 host.answer_web_extension_access(profile, request, allowed)
             });
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn answer_web_extension_data(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        reply: zephium_core::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| {
+                host.answer_web_extension_data(profile, request, reply)
+            });
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn web_extension_data_changed(
+        &self,
+        profile: ProfileId,
+        change: zephium_core::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.web_extension_data_changed(profile, change));
         }))
     }
 
@@ -2794,6 +3074,10 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.run_for_active_item(item, move |host| host.allow_blocked_navigation(item, &url))
+    }
+
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
@@ -2828,6 +3112,25 @@ impl Engine for WebviewEngine {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (item, request, credentials);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(item, move |host| {
+                host.answer_download_permission(item, request, allow)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, request, allow);
             NativeDispatch::Unsupported
         }
     }
@@ -3003,8 +3306,13 @@ impl Engine for WebviewEngine {
             tree,
             region,
             item_tokens,
+            tab_preview: self.tab_preview.clone(),
+            focus: None,
         };
-        match self.layout_updates.submit(window, update) {
+        match self
+            .layout_updates
+            .submit_with(window, update, carry_layout_focus)
+        {
             layout_queue::Submit::Coalesced => NativeDispatch::Scheduled,
             layout_queue::Submit::Full => {
                 self.layout_updates.reject_scheduled();
@@ -3036,6 +3344,66 @@ impl Engine for WebviewEngine {
                 }
                 NativeDispatch::from_scheduled(scheduled)
             }
+        }
+    }
+
+    fn hosts_mini_windows(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "windows"))
+    }
+
+    fn focus_page(&self, id: ItemId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            // A layout still waiting to place the page carries the focus, so
+            // the page takes the keyboard only once it is in its window.
+            if self.layout_updates.amend(|layout| {
+                let places = layout.region.is_some()
+                    && layout
+                        .tree
+                        .as_ref()
+                        .is_some_and(|tree| tree.tabs().contains(&id));
+                if places {
+                    layout.focus = Some(id);
+                }
+                places
+            }) {
+                return NativeDispatch::Scheduled;
+            }
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::try_with(move |host| {
+                    if !host.focus_page(id) {
+                        eprintln!("engine: a page was in no window to take the keyboard");
+                    }
+                });
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn release_window(&self, window: WindowId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.stage_motion
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&window);
+            self.layout_updates.forget(window);
+            NativeDispatch::from_scheduled(self.run(move || {
+                // Refused only once the host is sealed or gone, when every
+                // native window and page is being torn down with it.
+                if !host::try_with_window_release(move |host| host.release_window(window)) {
+                    eprintln!("engine: window {window} released after the host stopped");
+                }
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = window;
+            NativeDispatch::Unsupported
         }
     }
 
@@ -3197,6 +3565,13 @@ impl Engine for WebviewEngine {
         NativeDispatch::Unsupported
     }
 
+    fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run_for_active_item(id, move |h| h.show_store_button(id, button));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (id, button);
+    }
+
     fn extract_html(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.extract_html(id))
     }
@@ -3208,6 +3583,24 @@ impl Engine for WebviewEngine {
     #[cfg(target_os = "macos")]
     fn autofill_password(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.autofill_password(id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn upgrades_https_natively(&self) -> bool {
+        // WebKit names the policy human tabs set from macOS 15.2.
+        static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *NATIVE.get_or_init(|| {
+            objc2::runtime::AnyClass::get(c"WKWebpagePreferences").is_some_and(|class| {
+                class
+                    .instance_method(objc2::sel!(setPreferredHTTPSNavigationPolicy:))
+                    .is_some()
+            })
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_insecure_password(id))
     }
 
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
@@ -3733,6 +4126,98 @@ mod tests {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
     }
 
+    #[test]
+    fn a_queued_focus_survives_a_replacement_that_still_shows_its_page() {
+        let preview = TabPreviewSlot::default();
+        let page = ItemId::from(7);
+        let layout = |tree: Option<Pane>, region: Option<Rect>| PendingLayout {
+            window: 1,
+            tree,
+            region,
+            item_tokens: Vec::new(),
+            tab_preview: preview.clone(),
+            focus: None,
+        };
+        let shown = || Some(Rect::new(0., 0., 800., 600.));
+        let focus_page = |updates: &layout_queue::LatestLayouts<PendingLayout>| {
+            updates.amend(|layout| {
+                layout.focus = Some(page);
+                true
+            })
+        };
+        let drained = |updates: &layout_queue::LatestLayouts<PendingLayout>| {
+            let focus: Vec<_> = updates.take_batch().iter().map(|l| l.focus).collect();
+            assert!(!updates.finish_batch());
+            focus
+        };
+
+        let updates = test_layout_updates();
+        updates.submit(1, layout(Some(Pane::leaf(page)), shown()));
+        assert!(focus_page(&updates));
+        updates.submit_with(
+            1,
+            layout(Some(Pane::leaf(page)), shown()),
+            carry_layout_focus,
+        );
+        assert_eq!(drained(&updates), vec![Some(page)]);
+
+        for (tree, region) in [
+            (Some(Pane::leaf(page)), None),
+            (Some(Pane::leaf(ItemId::from(8))), shown()),
+            (None, None),
+        ] {
+            updates.submit(1, layout(Some(Pane::leaf(page)), shown()));
+            assert!(focus_page(&updates));
+            updates.submit_with(1, layout(tree, region), carry_layout_focus);
+            assert_eq!(drained(&updates), vec![None]);
+        }
+    }
+
+    #[test]
+    fn coalesced_layout_observes_capture_submitted_after_its_queue_position() {
+        let updates = test_layout_updates();
+        let preview = TabPreviewSlot::default();
+        let layout = |id| PendingLayout {
+            window: 1,
+            tree: Some(Pane::leaf(id)),
+            region: Some(Rect::new(0., 0., 800., 600.)),
+            item_tokens: Vec::new(),
+            tab_preview: preview.clone(),
+            focus: None,
+        };
+        let outgoing = ItemId::from(1);
+        let incoming = ItemId::from(2);
+        assert_eq!(
+            updates.submit(1, layout(outgoing)),
+            layout_queue::Submit::Schedule
+        );
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed = completions.clone();
+        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((
+            outgoing,
+            "https://example.test/".into(),
+            Box::new(move |_| {
+                completed.fetch_add(1, Ordering::SeqCst);
+            }),
+        )))));
+        *preview.lock().unwrap() = Some(request.clone());
+        assert_eq!(
+            updates.submit(1, layout(incoming)),
+            layout_queue::Submit::Coalesced
+        );
+        let update = updates.take_batch().pop().unwrap();
+        let pending = update.tab_preview.lock().unwrap().take().unwrap();
+        let (id, _, done) = pending.take().unwrap();
+        assert_eq!(id, outgoing);
+        assert_eq!(update.tree.unwrap().tabs(), vec![incoming]);
+        request.refuse();
+        assert_eq!(completions.load(Ordering::SeqCst), 0);
+        done(None);
+        assert_eq!(completions.load(Ordering::SeqCst), 1);
+        assert!(request.take().is_none());
+        assert!(!updates.finish_batch());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn extension_guest_admission_reserves_layout_identity_and_rolls_back_rejected_dispatch() {
@@ -3782,6 +4267,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -3891,6 +4377,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: gate.clone(),
             #[cfg(feature = "agentic-browser")]
@@ -3937,6 +4424,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4021,6 +4509,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4057,6 +4546,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4142,6 +4632,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4229,7 +4720,7 @@ mod tests {
             ),
             NativeDispatch::Rejected
         );
-        engine.set_dormant(vec![id]);
+        engine.set_dormant(vec![id], 1);
         assert_eq!(
             engine.set_user_content(
                 ContentScope::Profile(profile),
@@ -4528,6 +5019,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4565,6 +5057,11 @@ mod tests {
                 action: zephium_core::ports::engine::NativeAction::GoBack,
             },
             EngineEvent::LoadingChanged { id, loading: true },
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded: true,
+                stranded_filters: 0,
+            },
             EngineEvent::FaviconPixels {
                 id,
                 page_url: "https://late.invalid".into(),
@@ -4870,6 +5367,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4904,6 +5402,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4973,6 +5472,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5023,6 +5523,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5088,6 +5589,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]

@@ -1,7 +1,10 @@
 #[path = "windows_caption.rs"]
 mod caption;
+pub(crate) use caption::replay as replay_caption;
 #[path = "windows_menus.rs"]
 mod menus;
+#[path = "windows_pointer.rs"]
+mod pointer;
 #[path = "windows_renderer.rs"]
 pub(crate) mod renderer;
 #[path = "windows_sidebar_edge.rs"]
@@ -70,8 +73,11 @@ pub fn remove_privileged_version_observer(label: &str) -> bool {
     zephium_engine::detach_privileged_environment_update(label)
 }
 
-pub fn finalize_privileged_environment_observers(expected_labels: &[&str]) -> bool {
-    zephium_engine::finalize_privileged_environment_registrations(expected_labels)
+pub fn finalize_privileged_environment_observers(
+    expected_labels: &[&str],
+    deadline: std::time::Instant,
+) -> (bool, bool) {
+    zephium_engine::finalize_privileged_environment_registrations(expected_labels, deadline)
 }
 
 /// Starts the log before anything can fail, in the folder Tauri will resolve
@@ -138,7 +144,7 @@ pub fn enforce_runtime_security_floor(
 
 #[path = "windows_log.rs"]
 mod windows_log;
-pub use windows_log::redirect_stderr;
+pub use windows_log::{flush_stderr_until, redirect_stderr};
 
 pub fn init(
     window: &WebviewWindow,
@@ -155,7 +161,11 @@ pub fn init(
         // A visual enhancement must never remove access to window controls.
         let _ = window.set_decorations(true);
     }
-    let hardened = harden_privileged(window, expected_user_data_folder, on_runtime_update);
+    let hardened = harden_privileged(
+        window,
+        expected_user_data_folder,
+        PrivilegedEnvironment::Own(on_runtime_update),
+    );
     apply_material(window, true);
     hardened
 }
@@ -177,13 +187,23 @@ fn bridge_caption_keys(window: &WebviewWindow) {
     }
 }
 
+/// Whose browser process a privileged WebView runs in.
+pub enum PrivilegedEnvironment {
+    /// Its own: the WebView registers it, so teardown proves its exit.
+    Own(RuntimeUpdateCallback),
+    /// The one already registered under this label, which it shares through
+    /// the same user-data folder and arguments, as a mini window's toolbar
+    /// shares the launcher's. Teardown's proof for that label covers it.
+    Joined(&'static str),
+}
+
 /// Tauri does not expose Wry's permission callback. Install the WebView2
 /// policy directly for privileged chrome so an XSS cannot prompt for ambient
 /// capabilities or persist password/form suggestions in its shared UDF.
 pub fn harden_privileged(
     window: &WebviewWindow,
     expected_user_data_folder: &Path,
-    on_runtime_update: RuntimeUpdateCallback,
+    environment_owner: PrivilegedEnvironment,
 ) -> Result<(), StartupFailure> {
     let installed = Arc::new(AtomicBool::new(false));
     let completed = installed.clone();
@@ -428,11 +448,34 @@ pub fn harden_privileged(
                 })),
                 &mut external_token,
             )?;
-            zephium_engine::install_privileged_environment_registration(
-                label,
-                &environment,
-                on_runtime_update,
-            )?;
+            match environment_owner {
+                PrivilegedEnvironment::Own(on_runtime_update) => {
+                    zephium_engine::install_privileged_environment_registration(
+                        label,
+                        &environment,
+                        on_runtime_update,
+                    )?;
+                    let mut browser = 0_u32;
+                    // An id left unread records nothing, which invalidates the record.
+                    let _ = core.BrowserProcessId(&mut browser);
+                    crate::privileged_runtime_windows::record_browser_process(browser);
+                }
+                PrivilegedEnvironment::Joined(owner) => {
+                    // A browser this run's record and exit proof do not
+                    // cover must never host privileged chrome.
+                    let mut browser = 0_u32;
+                    core.BrowserProcessId(&mut browser)?;
+                    if browser == 0
+                        || zephium_engine::privileged_environment_process(owner) != Some(browser)
+                    {
+                        return Err(windows::core::Error::new(
+                            windows::Win32::Foundation::E_ACCESSDENIED,
+                            "privileged WebView2 did not join its registered browser process",
+                        )
+                        .into());
+                    }
+                }
+            }
             Ok(())
         })();
         if let Err(error) = result {
@@ -499,6 +542,58 @@ pub fn set_caption_window_fullscreen(window: &WebviewWindow, fullscreen: bool) {
     caption::set_suppressed(window, caption::Suppression::Window, fullscreen);
 }
 
+pub(crate) fn set_window_fullscreen(window: &WebviewWindow, enter: bool) -> tauri::Result<()> {
+    with_fullscreen_border(
+        enter,
+        || window.set_fullscreen(enter),
+        |suppressed| set_fullscreen_border(window, suppressed),
+    )
+}
+
+fn with_fullscreen_border<E>(
+    enter: bool,
+    change_fullscreen: impl FnOnce() -> Result<(), E>,
+    mut suppress_border: impl FnMut(bool),
+) -> Result<(), E> {
+    if enter {
+        suppress_border(true);
+    }
+    let result = change_fullscreen();
+    // Restore the default on a successful exit or a failed entry.
+    if enter != result.is_ok() {
+        suppress_border(false);
+    }
+    result
+}
+
+fn set_fullscreen_border(window: &WebviewWindow, suppressed: bool) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+
+    const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
+    const DWMWA_COLOR_DEFAULT: u32 = 0xffff_ffff;
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let color = COLORREF(if suppressed {
+        DWMWA_COLOR_NONE
+    } else {
+        DWMWA_COLOR_DEFAULT
+    });
+    // Windows 11 can draw an accent border over a borderless fullscreen window.
+    // Older Windows versions reject this attribute; fullscreen can still proceed.
+    // SAFETY: hwnd identifies the live window and DWM copies the COLORREF.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&color as *const COLORREF).cast(),
+            size_of::<COLORREF>() as u32,
+        )
+    };
+}
+
 // Undecorated windows lose DWM rounding unless asked for explicitly.
 pub fn round_corners(window: &WebviewWindow) {
     use windows::Win32::Graphics::Dwm::{
@@ -538,11 +633,6 @@ fn set_dark_frame(window: &WebviewWindow, dark: bool) {
     };
 }
 
-/// The browser window wears Mica Alt, the backdrop Windows 11 made for tabbed
-/// main windows: it takes the wallpaper's hue without its detail and stays
-/// put while the window is inactive. The frame lays the sky's light over it
-/// on a new tab. Acrylic is a flyout's material, so only the launcher keeps
-/// it, and Windows 10, which has no Mica, falls back to it.
 pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     use crate::material::Material;
     let launcher = window.label() == crate::overlay::PANEL_LABEL;
@@ -558,22 +648,37 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     // Use the fallible native adapter directly; the Tauri effect dispatcher
     // discards the underlying DWM error and can falsely report acrylic.
     let preference = crate::material::preference();
-    let contrast = menus::high_contrast() || preference == crate::material::Preference::None;
-    let result = if contrast {
+    let chosen = crate::material::windows_material(
+        preference,
+        menus::high_contrast(),
+        launcher,
+        windows_version::OsVersion::current().build,
+    );
+    let clear = || {
         let _ = window_vibrancy::clear_tabbed(window);
-        window_vibrancy::clear_acrylic(window).map(|()| Material::None)
-    } else if launcher {
-        window_vibrancy::apply_acrylic(window, Some(tint)).map(|()| Material::Acrylic)
-    } else {
-        // Each backdrop replaces the other, but a Win10 fallback leaves the
-        // accent policy set, which would composite under Mica.
-        let _ = window_vibrancy::clear_acrylic(window);
-        window_vibrancy::apply_tabbed(window, Some(dark))
-            .map(|()| Material::Mica)
-            .or_else(|_| {
-                window_vibrancy::apply_acrylic(window, Some(tint)).map(|()| Material::Acrylic)
-            })
+        let _ = window_vibrancy::clear_mica(window);
+        window_vibrancy::clear_acrylic(window)
     };
+    let cleared = clear();
+    let result = match chosen {
+        Material::None => cleared.map(|()| Material::None),
+        Material::Mica => window_vibrancy::apply_mica(window, Some(dark)).map(|()| Material::Mica),
+        Material::MicaAlt => {
+            window_vibrancy::apply_tabbed(window, Some(dark)).map(|()| Material::MicaAlt)
+        }
+        _ => window_vibrancy::apply_acrylic(window, Some(tint)).map(|()| Material::Acrylic),
+    }
+    .or_else(|error| {
+        let _ = clear();
+        if matches!(chosen, Material::Mica | Material::MicaAlt) {
+            window_vibrancy::apply_acrylic(window, Some(tint)).map(|()| Material::Acrylic)
+        } else {
+            Err(error)
+        }
+    });
+    if result.is_err() {
+        let _ = clear();
+    }
     if let Err(e) = &result {
         crate::write_diagnostic(format_args!("material: window effects unavailable: {e}"));
     }
@@ -614,16 +719,39 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
 
+#[derive(Default)]
+struct ChromeVisibility {
+    hidden: bool,
+    minimized: bool,
+    // The memory target the frame had asked for before the window was
+    // minimized, given back on restore.
+    memory: Option<
+        webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
+    >,
+}
+
+thread_local! {
+    static CHROME_VISIBILITY: std::cell::RefCell<std::collections::HashMap<String, ChromeVisibility>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// Hides or shows the chrome WebView while its window stays on screen, so the
 /// window shows only its material, never a document that is still loading.
 pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
     let applied = Arc::new(AtomicBool::new(false));
     let completed = applied.clone();
+    let label = window.label().to_owned();
     let dispatched = window
         .with_webview(move |webview| {
+            let visible = CHROME_VISIBILITY.with(|views| {
+                let mut views = views.borrow_mut();
+                let view = views.entry(label).or_default();
+                view.hidden = hidden;
+                !view.hidden && !view.minimized
+            });
             // SAFETY: Tauri supplies the live controller for the duration of
             // this UI-thread callback.
-            if unsafe { webview.controller().SetIsVisible(!hidden) }.is_err() {
+            if unsafe { webview.controller().SetIsVisible(visible) }.is_err() {
                 crate::write_diagnostic(format_args!("chrome: WebView2 visibility was refused"));
             } else {
                 completed.store(true, Ordering::Release);
@@ -631,6 +759,63 @@ pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
         })
         .is_ok();
     dispatched && applied.load(Ordering::Acquire)
+}
+
+/// WebView2 keeps a minimized window's chrome painting and its timers
+/// running. Hidden, it stops both, and its memory target drops until restore.
+pub fn set_chrome_minimized(window: &WebviewWindow, minimized: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+    };
+    let label = window.label().to_owned();
+    let _ = window.with_webview(move |webview| {
+        // No borrow is held across WebView2 calls, which can pump messages.
+        let visible = CHROME_VISIBILITY.with(|views| {
+            let mut views = views.borrow_mut();
+            let view = views.entry(label.clone()).or_default();
+            (view.minimized != minimized).then(|| {
+                view.minimized = minimized;
+                !view.hidden && !minimized
+            })
+        });
+        let Some(visible) = visible else {
+            return;
+        };
+        // SAFETY: Tauri supplies the live controller for the duration of this
+        // UI-thread callback.
+        unsafe {
+            let controller = webview.controller();
+            let _ = controller.SetIsVisible(visible);
+            let Ok(memory) = controller
+                .CoreWebView2()
+                .and_then(|core| core.cast::<ICoreWebView2_19>())
+            else {
+                return;
+            };
+            if minimized {
+                let mut level = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL::default();
+                if memory.MemoryUsageTargetLevel(&mut level).is_ok()
+                    && memory
+                        .SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW)
+                        .is_ok()
+                {
+                    CHROME_VISIBILITY.with(|views| {
+                        if let Some(view) = views.borrow_mut().get_mut(&label) {
+                            view.memory = Some(level);
+                        }
+                    });
+                }
+            } else if let Some(level) = CHROME_VISIBILITY.with(|views| {
+                views
+                    .borrow_mut()
+                    .get_mut(&label)
+                    .and_then(|view| view.memory.take())
+            }) {
+                let _ = memory.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
 }
 
 thread_local! {
@@ -655,6 +840,12 @@ pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
         });
         sidebar_edge::watch(&owner, hidden);
     });
+}
+
+/// The column is this wide; the hidden sidebar's card stands round it.
+pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || sidebar_edge::column_width(&owner, width));
 }
 
 pub fn make_chrome(window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
@@ -703,6 +894,15 @@ impl PresentationChrome for ChromeAdapter {
     ) -> ChromePresentationDispatch {
         crate::apply_chrome_presentation(&self.window, presentation, done)
     }
+
+    fn apply_mini_presentation(
+        &self,
+        window: u64,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::mini::apply_presentation(self.window.app_handle(), window, presentation, done)
+    }
 }
 
 pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
@@ -712,3 +912,49 @@ pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
 #[cfg(test)]
 #[path = "windows_startup_tests.rs"]
 mod startup_tests;
+
+#[cfg(test)]
+mod fullscreen_border_tests {
+    use super::with_fullscreen_border;
+    use std::cell::RefCell;
+
+    #[test]
+    fn restores_default_border_when_the_window_is_windowed() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Step {
+            HideBorder,
+            ChangeFullscreen,
+            RestoreBorder,
+        }
+        use Step::*;
+
+        for (enter, result, expected) in [
+            (true, Ok(()), &[HideBorder, ChangeFullscreen][..]),
+            (
+                true,
+                Err(()),
+                &[HideBorder, ChangeFullscreen, RestoreBorder],
+            ),
+            (false, Ok(()), &[ChangeFullscreen, RestoreBorder]),
+            (false, Err(()), &[ChangeFullscreen]),
+        ] {
+            let steps = RefCell::new(Vec::new());
+            let returned = with_fullscreen_border(
+                enter,
+                || {
+                    steps.borrow_mut().push(ChangeFullscreen);
+                    result
+                },
+                |suppressed| {
+                    steps.borrow_mut().push(if suppressed {
+                        HideBorder
+                    } else {
+                        RestoreBorder
+                    });
+                },
+            );
+            assert_eq!(returned, result);
+            assert_eq!(steps.into_inner(), expected);
+        }
+    }
+}

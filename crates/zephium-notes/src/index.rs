@@ -103,6 +103,26 @@ pub struct Page {
 
 impl Index {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        match Self::open_once(path) {
+            Ok(index) => Ok(index),
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                ) =>
+            {
+                // Markdown is authoritative. Preserve the failed cache and
+                // its sidecars for recovery, then let reconciliation rebuild.
+                // Busy, permissions and unknown schemas never take this path.
+                quarantine(path)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                Self::open_once(path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_once(path: &Path) -> rusqlite::Result<Self> {
         if let Ok(meta) = std::fs::symlink_metadata(path) {
             if !meta.file_type().is_file() {
                 return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
@@ -187,6 +207,13 @@ impl Index {
             )?,
             SCHEMA => {}
             _ => return Err(rusqlite::Error::InvalidQuery),
+        }
+        let check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+        if check != "ok" {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                Some("notes index integrity check failed".into()),
+            ));
         }
         Ok(Self { conn })
     }
@@ -519,9 +546,137 @@ impl Index {
     }
 }
 
+fn quarantine(path: &Path) -> std::io::Result<()> {
+    use std::fs;
+    use std::io;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
+    let mut reserved = None;
+    for n in 0..16 {
+        let directory = parent.join(format!(".index-corrupt-{}-{n}", std::process::id()));
+        match builder.create(&directory) {
+            Ok(()) => {
+                reserved = Some(directory);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let directory = reserved.ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))?;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut source = path.as_os_str().to_owned();
+        source.push(suffix);
+        let source = std::path::PathBuf::from(source);
+        match fs::symlink_metadata(&source) {
+            Ok(meta) if meta.file_type().is_file() => {
+                let name = source
+                    .file_name()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+                fs::rename(&source, directory.join(name))?;
+            }
+            Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_index_is_quarantined_and_rebuilt_from_markdown() {
+        let base = tempfile::tempdir().unwrap();
+        let profile = "profile";
+        let parent = base.path().join("notes").join(profile);
+        std::fs::create_dir_all(parent.join("Notes")).unwrap();
+        std::fs::write(
+            parent.join("Notes/Survives.md"),
+            "# Survives\n\nDurable text",
+        )
+        .unwrap();
+        let corrupt = b"not a SQLite index; retain this recovery evidence";
+        std::fs::write(parent.join("index.sqlite"), corrupt).unwrap();
+        let mut library = crate::library::Library::open(base.path(), profile).unwrap();
+        library.reconcile(1).unwrap();
+        let rows = library.index().rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Survives");
+        drop(library);
+        let mut reopened = crate::library::Library::open(base.path(), profile).unwrap();
+        reopened.reconcile(2).unwrap();
+        assert_eq!(reopened.index().rows().unwrap()[0].title, "Survives");
+        assert!(std::fs::read_dir(parent).unwrap().flatten().any(|entry| {
+            std::fs::read(entry.path().join("index.sqlite"))
+                .ok()
+                .as_deref()
+                == Some(corrupt)
+        }));
+    }
+
+    #[test]
+    fn newer_index_schema_is_not_quarantined_or_replaced() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("index.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA user_version=99;").unwrap();
+        drop(connection);
+        assert!(Index::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
+        assert!(std::fs::read_dir(base.path())
+            .unwrap()
+            .flatten()
+            .all(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".index-corrupt-")
+            }));
+    }
+
+    #[test]
+    fn quarantine_preserves_every_index_sidecar_byte() {
+        let base = tempfile::tempdir().unwrap();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            std::fs::write(
+                base.path().join(format!("index.sqlite{suffix}")),
+                format!("evidence{suffix}"),
+            )
+            .unwrap();
+        }
+        quarantine(&base.path().join("index.sqlite")).unwrap();
+        let directory = std::fs::read_dir(base.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            assert_eq!(
+                std::fs::read_to_string(directory.join(format!("index.sqlite{suffix}"))).unwrap(),
+                format!("evidence{suffix}")
+            );
+        }
+    }
 
     pub(crate) fn note(id: &str, path: &str, title: &str, modified: i64) -> Row {
         Row {

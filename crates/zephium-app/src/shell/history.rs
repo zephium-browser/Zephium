@@ -79,7 +79,7 @@ impl Shell {
             HistoryCall::Clear { range } => Some(
                 range
                     .window_seconds()
-                    .map(|window| chrono::Utc::now().timestamp() - window),
+                    .map(|window| jiff::Timestamp::now().as_second() - window),
             ),
             HistoryCall::ClearSince { since } => Some(Some(*since)),
             _ => None,
@@ -136,6 +136,7 @@ impl Shell {
         if self.recently_closed.len() != before {
             self.project_recently_closed_if_changed();
             self.schedule_persist();
+            self.extension_sessions_changed(profile);
         }
     }
 

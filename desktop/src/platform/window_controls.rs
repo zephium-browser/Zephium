@@ -57,6 +57,28 @@ const REST_LIGHT: (f64, f64) = (0.0, 0.13);
 /// centred in it; filling the frame would rest as a larger, taller oval.
 const LEGACY_DISC: f64 = 12.0;
 
+/// Remembers the requested inset across native redraw and focus callbacks.
+#[derive(Default)]
+struct InsetState {
+    in_card: Cell<bool>,
+}
+
+impl InsetState {
+    fn set(&self, in_card: bool, redraw: impl FnOnce()) {
+        // Drawing can synchronously reenter focus/tracking callbacks.
+        self.in_card.set(in_card);
+        redraw();
+    }
+
+    fn refresh<T>(&self, suspended: bool, chrome: Option<&T>, apply: impl FnOnce(&T, bool)) {
+        if !suspended {
+            if let Some(chrome) = chrome {
+                apply(chrome, self.in_card.get());
+            }
+        }
+    }
+}
+
 pub struct Ivars {
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     lit: Cell<bool>,
@@ -66,6 +88,8 @@ pub struct Ivars {
     /// Full screen hands the controls to the menu-bar reveal, where they must
     /// be visible the moment it slides down.
     suspended: Cell<bool>,
+    /// The hidden sidebar's card keeps the controls one card inset inward.
+    inset: InsetState,
     observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
     /// The browser window's chrome, told the moment fullscreen begins or
     /// ends so the room it keeps for the controls follows them at once.
@@ -162,6 +186,7 @@ impl WindowControls {
             lit: Cell::new(false),
             settled: Cell::new(false),
             suspended: Cell::new(false),
+            inset: InsetState::default(),
             observers: RefCell::new(Vec::new()),
             chrome: RefCell::new(None),
         });
@@ -251,6 +276,17 @@ impl WindowControls {
         let Some(window) = self.window() else {
             return;
         };
+        // AppKit can restore its default titlebar layout as a window gains
+        // or loses focus. Reapply the configured inset before reading the
+        // hover rect or fading the controls at their new position.
+        // These notifications can arrive while Tauri is still closing another
+        // window and holds its window table, so use the window at hand rather
+        // than asking Tauri for its handle.
+        self.ivars().inset.refresh(
+            self.ivars().suspended.get(),
+            self.ivars().chrome.borrow().as_ref(),
+            |_, in_card| place_in_card(&window, in_card),
+        );
         let point = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
         let inside = self.hot_rect().is_some_and(|hot| NSPointInRect(point, hot));
         self.light(inside, animate);
@@ -532,7 +568,10 @@ pub fn set_in_card(window: &WebviewWindow, in_card: bool) {
         return;
     };
     // SAFETY: Tao's live NSWindow, borrowed for this main-thread call only.
-    let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    place_in_card(unsafe { &*(pointer as *const NSWindow) }, in_card);
+}
+
+fn place_in_card(ns_window: &NSWindow, in_card: bool) {
     let buttons: Vec<_> = [
         NSWindowButton::CloseButton,
         NSWindowButton::MiniaturizeButton,
@@ -557,7 +596,7 @@ pub fn set_in_card(window: &WebviewWindow, in_card: bool) {
         .find_map(|view| view.downcast_ref::<WindowControls>().map(|c| c.retain()));
     // From Tao's own inset each time, so asking twice moves them once.
     if let Some(controls) = controls.as_ref() {
-        controls.reinset();
+        controls.ivars().inset.set(in_card, || controls.reinset());
         controls.setNeedsDisplay(true);
     }
     if !in_card {
@@ -584,5 +623,67 @@ pub fn set_in_card(window: &WebviewWindow, in_card: bool) {
         controls.setNeedsDisplay(true);
         // SAFETY: the view re-reads its buttons' rects for its hover area.
         let _: () = unsafe { msg_send![&*controls, updateTrackingAreas] };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InsetState;
+
+    #[test]
+    fn focus_refresh_replays_the_latest_card_state() {
+        let inset = InsetState::default();
+        let mut applied = Vec::new();
+        // Initial focus, enter the floating card, then leave it. Gaining and
+        // losing focus must keep replaying the same requested position.
+        for in_card in [false, true, false] {
+            inset.set(in_card, || {});
+            for _ in 0..2 {
+                inset.refresh(false, Some(&"chrome"), |chrome, value| {
+                    applied.push((*chrome, value));
+                });
+            }
+        }
+        assert_eq!(
+            applied,
+            [
+                ("chrome", false),
+                ("chrome", false),
+                ("chrome", true),
+                ("chrome", true),
+                ("chrome", false),
+                ("chrome", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn redraw_reentry_sees_the_new_card_state() {
+        let inset = InsetState::default();
+        let mut applied = Vec::new();
+        for in_card in [true, false] {
+            inset.set(in_card, || {
+                // Model a focus/tracking callback during displayIfNeeded().
+                inset.refresh(false, Some(&()), |_, value| applied.push(value));
+            });
+        }
+        assert_eq!(applied, [true, false]);
+    }
+
+    #[test]
+    fn fullscreen_and_detached_chrome_preserve_the_pending_inset() {
+        let inset = InsetState::default();
+        for in_card in [false, true] {
+            inset.set(in_card, || {});
+            inset.refresh(true, Some(&()), |_, _| {
+                panic!("fullscreen owns the controls")
+            });
+            inset.refresh(false, None::<&()>, |_, _| panic!("chrome is detached"));
+            inset.refresh(true, None::<&()>, |_, _| panic!("chrome is detached"));
+
+            let mut applied = Vec::new();
+            inset.refresh(false, Some(&()), |_, value| applied.push(value));
+            assert_eq!(applied, [in_card]);
+        }
     }
 }

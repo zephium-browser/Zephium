@@ -413,7 +413,8 @@ impl Shell {
                         tab.loading,
                         pinned,
                     )
-                    .map_err(|_| "extension browser tab metadata failed validation")?,
+                    .map_err(|_| "extension browser tab metadata failed validation")?
+                    .with_audio(tab.audio.muted, tab.audio.shown()),
                 );
             }
             ItemKind::Folder { .. } => {

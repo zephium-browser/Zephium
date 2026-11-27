@@ -35,6 +35,8 @@ impl EngineHost {
                 &view.view,
                 &policy,
                 &view.site_scope.pause,
+                &view.site_scope.protection,
+                &view.site_scope.top_document,
             ) else {
                 return false;
             };
@@ -98,6 +100,7 @@ impl EngineHost {
         activity: NavigationActivity,
         url: &str,
         features: NewWindowFeatures,
+        clicked: bool,
     ) -> NewWindowResponse {
         if !features.user_initiated || !permit.allows_target(url) {
             return NewWindowResponse::Deny;
@@ -128,8 +131,7 @@ impl EngineHost {
             let observed = view.view.webview();
             if Retained::as_ptr(&observed).cast::<()>()
                 != Retained::as_ptr(&features.opener.webview).cast::<()>()
-                || !observed
-                    .window()
+                || !crate::platform::imp::home_window(&observed)
                     .is_some_and(|window| window.isVisible() && window.isKeyWindow())
             {
                 return NewWindowResponse::Deny;
@@ -153,11 +155,13 @@ impl EngineHost {
                 return NewWindowResponse::Deny;
             }
         }
-        self.adopt_native_tab(source, permit, activity, url, features, || true)
+        self.adopt_native_tab(source, permit, activity, url, features, clicked, || true)
     }
 
     /// Both callers authenticate their native opener first. Preserve WebView2's
     /// original request (including OAuth state); never replay just its URL.
+    /// `clicked` is the person's click, not an allowed site's own opening.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn adopt_native_tab(
         &mut self,
         source: ItemId,
@@ -165,6 +169,7 @@ impl EngineHost {
         activity: NavigationActivity,
         url: &str,
         features: NewWindowFeatures,
+        clicked: bool,
         opener_current: impl Fn() -> bool,
     ) -> NewWindowResponse {
         let Some(token) = permit.active_token() else {
@@ -182,6 +187,16 @@ impl EngineHost {
         };
         let adoption = self.native_open_authority.adoption(child, active.clone());
         let foreground = features.foreground;
+        self.native_tab_download_ask =
+            self.views
+                .get(&source)
+                .map(|view| super::downloads::SiteAsk {
+                    item: Rc::new(Cell::new(source)),
+                    permit: view.event_permit.clone(),
+                    sink: self.sink.clone(),
+                    site: super::construction::committed_origin(&view.navigation),
+                    opened_by_click: clicked,
+                });
         let built = self.build_view(
             Rc::new(Cell::new(child)),
             partition,
@@ -190,6 +205,7 @@ impl EngineHost {
             EventPermit::bound(&active),
             NativeViewPurpose::NativeTab(features.opener),
         );
+        self.native_tab_download_ask = None;
         let Some(view) = built else {
             self.native_open_authority.release_failed(child, &active);
             return NewWindowResponse::Deny;

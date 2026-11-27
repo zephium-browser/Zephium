@@ -316,6 +316,7 @@ fn newtab_search_cannot_execute_after_its_tab_has_navigated() {
         request_id: "request-1".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example.com".into(),
         context: Box::new(context.clone()),
     });
@@ -326,7 +327,7 @@ fn newtab_search_cannot_execute_after_its_tab_has_navigated() {
         id,
         input: "other.example".into(),
     });
-    let disposition = shell.operation_run_search_action(context, action, false, None);
+    let disposition = shell.operation_run_search_action(context, action, false, None, false);
     assert_eq!(disposition.outcome, OperationOutcome::Rejected);
 }
 
@@ -377,6 +378,7 @@ fn empty_local_scope_stays_pending_until_its_providers_finish() {
         request_id: "first".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "@notes first".into(),
         context: Box::new(context.clone()),
     });
@@ -386,6 +388,7 @@ fn empty_local_scope_stays_pending_until_its_providers_finish() {
         ..context.clone()
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "@notes second".into(),
         context: Box::new(next.clone()),
     });
@@ -436,6 +439,7 @@ fn late_providers_extend_their_own_section_without_reordering_the_list() {
         request_id: "first".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example".into(),
         context: Box::new(context.clone()),
     });
@@ -517,6 +521,7 @@ fn one_talkative_provider_cannot_starve_the_other_sections() {
         request_id: "first".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example".into(),
         context: Box::new(context.clone()),
     });
@@ -568,6 +573,7 @@ fn new_tab_offers_places_to_go_and_leaves_commands_to_the_launcher() {
         request_id: "request-1".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "reload".into(),
         context: Box::new(newtab.clone()),
     });
@@ -589,6 +595,7 @@ fn new_tab_offers_places_to_go_and_leaves_commands_to_the_launcher() {
         ..newtab
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "reload".into(),
         context: Box::new(panel),
     });
@@ -637,6 +644,7 @@ fn history_reaches_the_field_through_the_real_store_and_read_queue() {
         request_id: "request-1".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "notion".into(),
         context: Box::new(context),
     });
@@ -715,4 +723,150 @@ fn recorded_searches_cannot_crowd_visited_pages_out_of_the_list() {
             .map(|result| (&result.kind, &result.title))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn shortcut_writes_and_projections_omit_retired_entries() {
+    use zephium_core::search::ShortcutRegistry;
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    shell.emit = Box::new(move |projection| {
+        if let Projection::UiCommand(command) = projection {
+            sink.lock().unwrap().push(command);
+        }
+    });
+    let mut entries = ShortcutRegistry::default().entries().to_vec();
+    entries[0].enabled = false;
+    let expected = serde_json::to_string(&entries).unwrap();
+    let mut retired = entries[0].clone();
+    retired.id = "npm".into();
+    entries.push(retired);
+    let raw = serde_json::to_string(&entries).unwrap();
+    shell.operation_set_app_setting("search.shortcuts".into(), raw);
+    assert_eq!(
+        store.app_setting("search.shortcuts"),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![format!("preference.search.shortcuts={expected}")]
+    );
+    assert!(shell.search.shortcuts.get("npm").is_none());
+    assert!(!shell.search.shortcuts.entries()[0].enabled);
+    shell.operation_set_app_setting("search.shortcuts".into(), "not json".into());
+    assert_eq!(store.app_setting("search.shortcuts"), Some(expected));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn near_limit_shortcut_write_remains_readable() {
+    use zephium_core::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+    let mut entries: Vec<_> = (0..8)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("custom:near-limit-{index}"),
+                "name": "Near limit",
+                "keywords": [format!("near{index}")],
+                "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                "domain": "example.com",
+                "enabled": false
+            })
+        })
+        .collect();
+    let excess = serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+    let home = entries.last_mut().unwrap()["home_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+    let raw = serde_json::to_string(&entries).unwrap();
+    assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+    let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.operation_set_app_setting("search.shortcuts".into(), raw);
+    let saved = store.app_setting("search.shortcuts").unwrap();
+    assert!(saved.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+    assert_eq!(
+        ShortcutRegistry::from_setting(&saved).unwrap().entries(),
+        registry.entries()
+    );
+    assert_eq!(shell.search.shortcuts.entries(), registry.entries());
+}
+
+#[test]
+fn shortcuts_drive_typed_navigation_and_search_answers_after_settings_reload() {
+    use zephium_core::search::ShortcutRegistry;
+    let store = Arc::new(FakeStore::default());
+    let mut entries = ShortcutRegistry::default().entries().to_vec();
+    entries
+        .iter_mut()
+        .find(|entry| entry.id == "youtube")
+        .unwrap()
+        .keywords = vec!["video".into()];
+    let stored = serde_json::to_string(&entries).unwrap();
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    shell.operation_set_app_setting("search.shortcuts".into(), stored.clone());
+    assert_eq!(store.app_setting("search.shortcuts"), Some(stored));
+    drop(shell);
+    let (seen, emit) = search_sink();
+    let engine = Arc::new(FakeEngine::default());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        emit,
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let id = shell.windows.focused().unwrap().active.unwrap();
+    for (input, query) in [("video cats", "cats"), ("dogs !video", "dogs")] {
+        shell.handle(Command::Navigate {
+            id,
+            input: input.into(),
+        });
+        let expected = format!("https://www.youtube.com/results?search_query={query}");
+        assert!(engine
+            .calls()
+            .iter()
+            .filter_map(|call| {
+                call.strip_prefix(&format!("navigate {id} "))
+                    .or_else(|| call.strip_prefix(&format!("create {id} ")))
+                    .and_then(|rest| rest.split(' ').next())
+            })
+            .any(|url| url == expected));
+        shell.handle(Command::Search(input.into()));
+        let answer = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(answer.shortcut.as_deref(), Some("youtube"));
+        let row = answer
+            .results
+            .iter()
+            .find(|row| row.kind == "search")
+            .unwrap();
+        assert_eq!(row.title, query);
+        assert_eq!(row.detail, "YouTube");
+    }
+    shell.handle(Command::Search("video ".into()));
+    let answer = seen.lock().unwrap().last().unwrap().clone();
+    assert!(
+        matches!(&answer.results[0].action, SearchAction::OpenUrl { url } if url == "https://www.youtube.com/")
+    );
+    shell.operation_set_app_setting("search.shortcuts".into(), "".into());
+    assert!(shell
+        .search
+        .shortcuts
+        .get("youtube")
+        .unwrap()
+        .keywords
+        .contains(&"yt".into()));
+    assert_eq!(store.app_setting("search.engine"), None);
+    let before = shell.search.shortcuts.entries().to_vec();
+    shell.operation_set_app_setting("search.shortcuts".into(), "{bad}".into());
+    assert_eq!(shell.search.shortcuts.entries(), before);
 }

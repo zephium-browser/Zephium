@@ -170,6 +170,9 @@ async fn update(
                 install: entry.install.clone(),
                 enabled: entry.enabled,
                 access: entry.access.clone(),
+                pinned: entry.pinned,
+                native_messaging_granted: fresh.publisher_verified
+                    && entry.native_messaging_granted,
                 ..fresh.clone()
             };
             changed.push((*profile, registry));

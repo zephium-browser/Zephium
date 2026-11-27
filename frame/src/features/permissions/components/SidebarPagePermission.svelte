@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { pagePermissions as permissions } from "$domain/permissions";
+  import * as attention from "$session/attention.svelte";
   import PagePermissionPrompt from "./PagePermissionPrompt.svelte";
 
   let prompt = $derived(permissions.prompt());
+  $effect(() => {
+    if (prompt?.in_sidebar) return attention.hold();
+  });
 
   onMount(() => permissions.hostInSidebar());
 </script>

@@ -81,10 +81,10 @@ function keyOf(token: string): string {
 function parse(accelerator: string, mac: boolean): Parsed | null {
   const text = accelerator.trim();
   if (!text) return null;
-  // "Ctrl++" names the plus key, which shares its cap with "=".
+  // Windows records the typed plus character. macOS keeps its legacy alias.
   const plus = text.endsWith("++");
   const tokens = (plus ? text.slice(0, -2) : text).split("+").filter(Boolean);
-  const last = plus ? "+" : tokens.pop();
+  const last = plus ? (mac ? "=" : "+") : tokens.pop();
   if (last === undefined) return null;
   const modifiers = new Set<Modifier>();
   for (const token of tokens) {
@@ -153,6 +153,8 @@ export function acceleratorFrom(event: KeyboardEvent, mac: boolean): string | nu
 }
 
 const LETTER = /^[a-z]$/iu;
+const KEYPAD_NAVIGATION =
+  /^(?:Arrow(?:Up|Down|Left|Right)|Home|End|PageUp|PageDown|Insert|Delete|Clear|Enter)$/u;
 
 /** A command shortcut as the active Windows layout spells it. WebView2 matches
  *  printable keys by the active layout's virtual key, so their physical QWERTY
@@ -163,7 +165,13 @@ export function keymapAcceleratorFrom(
   mac: boolean,
   windows: boolean,
 ): string | null {
-  const key = windows ? (layoutKey(event.key) ?? event.code) : event.code;
+  if (!windows) return acceleratorFrom(event, mac);
+  if (event.getModifierState("AltGraph")) return null;
+  const key = event.code.startsWith("Numpad")
+    ? KEYPAD_NAVIGATION.test(event.key)
+      ? event.key
+      : event.code
+    : (layoutKey(event.key) ?? event.code);
   return spell(event, mac, key);
 }
 

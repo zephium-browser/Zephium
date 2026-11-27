@@ -6,8 +6,17 @@
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import SegmentedControl from "$shared/ui/SegmentedControl";
-  import { Cancel01Icon, Add01Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import Disclosure from "$shared/ui/Disclosure";
+  import type { MenuEntry } from "$shared/ui/Menu";
+  import {
+    Add01Icon,
+    Cancel01Icon,
+    FullScreenIcon,
+    MoreHorizontalIcon,
+    Search01Icon,
+  } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
+  import { parkCaret } from "$shared/lib/parked-caret";
   import "./tools.css";
   let {
     tool,
@@ -23,7 +32,10 @@
     actions,
     canCompose = false,
     marked = false,
-    closable = true,
+    onexpand,
+    more = [],
+    moreLabel,
+    onmore,
     caption = true,
     scrolls = true,
     children,
@@ -46,8 +58,13 @@
     /** A glyph before the title. Titles stand alone; the dock already shows
      *  which tool this is. */
     marked?: boolean;
-    /** False where the tool offers closing among its own actions. */
-    closable?: boolean;
+    /** Opens the tool as a page of its own, where it has one. */
+    onexpand?: () => void;
+    /** The tool's own entries in its More menu, above opening it as a page
+     *  and closing it. */
+    more?: MenuEntry[];
+    moreLabel?: string;
+    onmore?: (id: string) => void;
     /** A finished tool does not describe itself as a layout study. */
     caption?: boolean;
     /** Set false when the view owns a scroller of its own, so the frame does
@@ -57,12 +74,34 @@
     footer?: Snippet;
   } = $props();
   let meta = $derived(tools[tool]);
+  let menu = $derived<MenuEntry[]>([
+    ...more,
+    ...(more.length ? [{ kind: "separator" as const }] : []),
+    ...(onexpand
+      ? [
+          {
+            kind: "item" as const,
+            id: "frame:expand",
+            label: m.tool_open_full(),
+            icon: FullScreenIcon,
+          },
+        ]
+      : []),
+    { kind: "item", id: "frame:close", label: m.tool_close(), icon: Cancel01Icon },
+  ]);
+  function chose(id: string) {
+    if (id === "frame:expand") onexpand?.();
+    else if (id === "frame:close") onclose();
+    else onmore?.(id);
+  }
   let content: HTMLElement;
   // The field only exists while it is open, so mounting it is opening it, and
   // asking for it is asking to type in it. (`$state` is unavailable here: this
   // component already has a prop called `state`.)
   const takeFocus = (node: HTMLInputElement) => {
     if (searchFocus) node.focus();
+    // A blinking caret keeps WebKit drawing; an idle empty field parks it.
+    return { destroy: parkCaret(node) };
   };
   onMount(() => {
     content.scrollTop = state.scrollTop;
@@ -77,11 +116,29 @@
         icon={Add01Icon}
         label={tool === "notes" ? m.tool_add_note() : m.tool_add_task()}
         onclick={() => edit({ composing: !state.composing })}
-      />{/if}{#if closable}<IconButton
-        icon={Cancel01Icon}
-        label={m.tool_close()}
-        onclick={onclose}
-      />{/if}
+      />{/if}<Disclosure
+      label={moreLabel ?? m.tool_more()}
+      menu
+      align="end"
+      triggerClass="tool-overflow"
+      panelClass="tool-more"
+    >
+      {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
+      {#each menu as entry, index (index)}{#if entry.kind === "separator"}<div
+            class="tool-more-rule"
+            role="separator"
+          ></div>{:else if entry.kind === "item"}<button
+            type="button"
+            role="menuitem"
+            class="ui-menu-item"
+            data-danger={entry.danger || undefined}
+            disabled={entry.disabled}
+            onclick={() => chose(entry.id)}
+            >{#if entry.icon}<span class="ui-menu-icon" aria-hidden="true"
+                ><Icon icon={entry.icon} size={15} /></span
+              >{/if}<span>{entry.label}</span></button
+          >{/if}{/each}
+    </Disclosure>
   </header>
   {#if (searchLabel && searchOpen) || filters}<div
       class="shared-tool-controls"

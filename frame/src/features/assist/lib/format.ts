@@ -21,9 +21,10 @@ export function costLine(cost: PageAssistCostV1): string {
 
 const QUOTED = /[“"]([^”"]*)[”"]/gu;
 
-/** The control a step names, the last thing it quotes: `Search` in `Type “Terax” into “Search”`. */
+/** The control a step names, excluding a cross-site fill's value and source sites. */
 export function controlOf(label: string): string {
-  return [...label.matchAll(QUOTED)].findLast((match) => match[1])?.[1] ?? label;
+  const destination = /^"(?:\\.|[^"\\])*" → ([^\n]*)\n/u.exec(label)?.[1] ?? label;
+  return [...destination.matchAll(QUOTED)].findLast((match) => match[1])?.[1] ?? destination;
 }
 
 /** A step's words, with what it quotes (a control, a value) apart from the verb around it. */

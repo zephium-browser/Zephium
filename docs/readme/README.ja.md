@@ -92,7 +92,7 @@ Work には 25 のスキルが付属しています。旅行の計画、リサ�
 
 - macOS ではネイティブの WebKit、Windows では WebView2 を使うので、ページは OS がすでに最新に保っているエンジンで動きます。
 - 使っていないタブはスリープし、戻ると復帰するので、タブをたくさん開いてもメモリ使用量は低く抑えられます。
-- ネイティブの広告・トラッカーブロッカーが、デフォルトでオンです。Brave の [adblock-rust](https://github.com/brave/adblock-rust) を土台に、EasyList と EasyPrivacy を使っています。リクエストはページが発行する前に止められ、それ以外にページ上で隠したいものは、クリックひとつで非表示にできます。
+- ネイティブの広告・トラッカーブロッカーが、デフォルトでオンです。Brave の [adblock-rust](https://github.com/brave/adblock-rust) を土台に、EasyList、EasyPrivacy、uBlock Origin のフィルターを使っています。リクエストはページが発行する前に止められ、それ以外にページ上で隠したいものは、クリックひとつで非表示にできます。
 
 ### 住み続けられるデザイン
 

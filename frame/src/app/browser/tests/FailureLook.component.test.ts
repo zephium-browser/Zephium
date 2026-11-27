@@ -74,6 +74,8 @@ test("a first load that failed explains itself beside the sidebar", async () => 
     .querySelector("aside.browser-sidebar")!
     .getBoundingClientRect().right;
   expect(card.getBoundingClientRect().left).toBeGreaterThanOrEqual(sidebarEdge);
+  // No new tab is in front, so the sky's glass stays off the explanation.
+  expect(document.querySelector(".sky-light")?.hasAttribute("data-shown") ?? false).toBe(false);
   screen.unmount();
   emitNativeEvent("tabChanged", { ...failed, projection_revision: revision(21), failure: null });
   await render(Shell);

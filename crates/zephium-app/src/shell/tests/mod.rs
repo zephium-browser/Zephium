@@ -26,6 +26,8 @@ use zephium_core::session::{
 };
 use zephium_core::zoom::SavedLevel;
 
+type HeldTabPreview = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
+
 type HeldErasure = (ProfileId, Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>);
 type HeldBlockerUpdate = (
     ProfileId,
@@ -294,13 +296,29 @@ pub(super) fn agent_lifecycle_with_clean(
 
 type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
+thread_local! {
+    static SUSPENDS_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with engines that suspend hidden views as WebView2 does, so a
+/// shared shell test pins the Windows path as well as the macOS one.
+pub(super) fn suspending(test: fn()) {
+    SUSPENDS_HIDDEN.set(true);
+    test();
+}
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    /// Hidden views are really suspended: the desired set is kept, and a
+    /// suspended page cannot answer a discard probe.
+    suspends_hidden: std::sync::atomic::AtomicBool,
+    suspended: Mutex<std::collections::HashSet<ItemId>>,
     automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
+    chrome_raises: Mutex<Vec<ChromeRaise>>,
     proxies: Mutex<Vec<Option<String>>>,
     previews: Mutex<Vec<Option<zephium_core::ports::engine::DropPreview>>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
@@ -323,7 +341,9 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     pub(crate) popup_sites: Mutex<Vec<(ProfileId, Vec<String>)>>,
+    pub(crate) download_sites: Mutex<Vec<DownloadSitesPushed>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    release_spare_calls: std::sync::atomic::AtomicUsize,
     media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -336,6 +356,7 @@ pub(crate) struct FakeEngine {
     reject_navigation_dispatch: std::sync::atomic::AtomicBool,
     reject_discard_dispatch: std::sync::atomic::AtomicBool,
     reject_native_dispatch: std::sync::atomic::AtomicBool,
+    unsupported_chrome_raise: std::sync::atomic::AtomicBool,
     native_favicons: std::sync::atomic::AtomicBool,
     cannot_mute: std::sync::atomic::AtomicBool,
     unsupported_presentation: std::sync::atomic::AtomicBool,
@@ -348,9 +369,30 @@ pub(crate) struct FakeEngine {
     fills_window_for_fullscreen: std::sync::atomic::AtomicBool,
     fullscreen_exits: Mutex<Vec<ItemId>>,
     layout_regions: Mutex<Vec<Option<Rect>>>,
+    tab_preview_completions: Mutex<Vec<HeldTabPreview>>,
+    site_permission_reply: Mutex<Option<Option<Vec<zephium_core::permissions::SitePermission>>>>,
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
     data_reply: Mutex<Option<zephium_core::browsing_data::EngineDataReply>>,
     download_calls: Mutex<Vec<(Partition, zephium_core::downloads::DownloadCall)>>,
+    pub(crate) extension_data_answers: Mutex<
+        Vec<(
+            ProfileId,
+            u64,
+            zephium_core::extension_data::ExtensionDataReply,
+        )>,
+    >,
+    pub(crate) extension_data_changes:
+        Mutex<Vec<(ProfileId, zephium_core::extension_data::ExtensionDataChange)>>,
+    hosts_mini_windows: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChromeRaise {
+    window: WindowId,
+    raised: bool,
+    card: Rect,
+    slide: bool,
+    dispatch: NativeDispatch,
 }
 
 impl FakeEngine {
@@ -365,6 +407,10 @@ impl FakeEngine {
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
+    }
+    fn release_spare_calls(&self) -> usize {
+        self.release_spare_calls
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn warm_spare_calls(&self) -> usize {
         self.warm_spare_calls
@@ -473,6 +519,31 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn site_permissions(
+        &self,
+        _profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        done(
+            self.site_permission_reply
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Some(Vec::new())),
+        );
+    }
+    fn site_permission_snapshot(
+        &self,
+        profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        self.site_permissions(profile, done);
+    }
+    fn capture_tab_preview(&self, id: ItemId, _url: String, done: HeldTabPreview) {
+        self.log(format!("capture-preview {id}"));
+        self.tab_preview_completions.lock().unwrap().push(done);
+    }
+
     fn browsing_data_call(
         &self,
         partition: Partition,
@@ -507,6 +578,19 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, origins.iter().map(ToString::to_string).collect()));
+    }
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        self.download_sites.lock().unwrap().push((
+            profile,
+            sites
+                .iter()
+                .map(|(origin, allowed)| (origin.to_string(), *allowed))
+                .collect(),
+        ));
     }
     fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
         self.automatic_pip
@@ -643,6 +727,29 @@ impl Engine for FakeEngine {
                 .push(request);
         }
         admission
+    }
+    fn answer_web_extension_data(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        reply: zephium_core::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        self.extension_data_answers
+            .lock()
+            .unwrap()
+            .push((profile, request, reply));
+        NativeDispatch::Scheduled
+    }
+    fn web_extension_data_changed(
+        &self,
+        profile: ProfileId,
+        change: zephium_core::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
+        self.extension_data_changes
+            .lock()
+            .unwrap()
+            .push((profile, change));
+        NativeDispatch::Scheduled
     }
     fn settle_extension_browser_request(
         &self,
@@ -787,15 +894,42 @@ impl Engine for FakeEngine {
         self.previews.lock().unwrap().push(preview);
         self.native_admission()
     }
+    fn hosts_mini_windows(&self) -> bool {
+        self.hosts_mini_windows
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn release_window(&self, window: WindowId) -> NativeDispatch {
+        self.log(format!("release@{window}"));
+        self.native_admission()
+    }
+    fn focus_page(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("focus {id}"));
+        NativeDispatch::Scheduled
+    }
     fn raise_chrome(
         &self,
         window: WindowId,
         raised: bool,
-        _card: Rect,
-        _slide: bool,
+        card: Rect,
+        slide: bool,
     ) -> NativeDispatch {
         self.log(format!("raise@{window} {raised}"));
-        self.native_admission()
+        let dispatch = if self
+            .unsupported_chrome_raise
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            NativeDispatch::Unsupported
+        } else {
+            self.native_admission()
+        };
+        self.chrome_raises.lock().unwrap().push(ChromeRaise {
+            window,
+            raised,
+            card,
+            slide,
+            dispatch,
+        });
+        dispatch
     }
     fn hint_stage_motion(
         &self,
@@ -853,6 +987,12 @@ impl Engine for FakeEngine {
         }
         self.native_admission()
     }
+    fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
+        self.log(format!(
+            "store-button {id} {} {:?}",
+            button.extension, button.state
+        ));
+    }
     fn capture(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -868,6 +1008,10 @@ impl Engine for FakeEngine {
         self.log(format!("autofill {id}"));
         self.native_admission()
     }
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("autofill-insecure {id}"));
+        self.native_admission()
+    }
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("discover {id}"));
         self.native_admission()
@@ -881,6 +1025,11 @@ impl Engine for FakeEngine {
             .load(std::sync::atomic::Ordering::Acquire)
     }
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        // A suspended WebView2 does not run the probe's script.
+        assert!(
+            !self.suspended.lock().unwrap().contains(&id),
+            "{id} was probed while still suspended"
+        );
         self.log(format!("probe-discard {id} {}", probe.0));
         true
     }
@@ -899,7 +1048,13 @@ impl Engine for FakeEngine {
             item.map_or_else(|| "all".into(), |id| id.to_string())
         ));
     }
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, _request: u64) {
+        if self
+            .suspends_hidden
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.suspended.lock().unwrap() = ids.iter().copied().collect();
+        }
         let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         ids.sort();
         self.log(format!("dormant {}", ids.join(",")));
@@ -913,6 +1068,10 @@ impl Engine for FakeEngine {
     }
     fn open_external_app(&self, url: &str) -> NativeDispatch {
         self.log(format!("open-app {url}"));
+        self.native_admission()
+    }
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.log(format!("allow-blocked {item} {url}"));
         self.native_admission()
     }
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
@@ -935,6 +1094,16 @@ impl Engine for FakeEngine {
         self.log(format!("http-auth {item} {request} {answer}"));
         self.native_admission()
     }
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        let answer = if allow { "allow" } else { "refuse" };
+        self.log(format!("download-permission {item} {request} {answer}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
@@ -947,6 +1116,18 @@ impl Engine for FakeEngine {
     fn warm_spare(&self, _partition: Partition) {
         self.warm_spare_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn release_spare(&self) {
+        self.release_spare_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn prepare_profile(&self, partition: Partition) {
+        let kind = match partition {
+            Partition::Default(_) => "default",
+            Partition::Persistent(_) => "persistent",
+            Partition::Ephemeral(_) => "ephemeral",
+        };
+        self.log(format!("prepare-profile {kind} {}", partition.profile()));
     }
     fn install_content_rules(
         &self,
@@ -1010,6 +1191,11 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    /// What a site's history names; none refuses the scan.
+    /// The origin scan's answer and whether it finished; none answers an
+    /// empty, finished scan. `site_origins_refused` refuses the scan.
+    pub(crate) site_origins: Mutex<Option<(Vec<String>, bool)>>,
+    pub(crate) site_origins_refused: std::sync::atomic::AtomicBool,
     backup_clears: Mutex<Vec<ProfileId>>,
     backup_clear_result: Mutex<Option<bool>>,
     held_backup_clears: Mutex<Option<Vec<BackupClearCallback>>>,
@@ -1062,6 +1248,8 @@ pub(crate) struct FakeStore {
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
+    amended_titles: Mutex<Vec<(String, String)>>,
+    amend_title_fails: std::sync::atomic::AtomicBool,
     pub(super) recorded_time: Mutex<Vec<(ProfileId, Vec<zephium_core::time::HourTally>)>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -1077,6 +1265,16 @@ pub(crate) struct FakeStore {
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
     pub(crate) popup_sites:
         Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::permissions::PageOrigin>>>,
+    pub(crate) download_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, bool)>>,
+    >,
+    pub(crate) app_link_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
+    >,
+    /// Every durable read of a pop-up, download or app-link list, by list.
+    pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
+    /// Application link writes report failure, as a store that timed out.
+    pub(crate) app_link_writes_fail: std::sync::atomic::AtomicBool,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1092,6 +1290,8 @@ pub(crate) struct FakeStore {
     /// Saved page zoom per profile, and how many times each profile was loaded.
     pub(crate) zoom_saved: Mutex<std::collections::HashMap<ProfileId, Vec<SavedLevel>>>,
     pub(crate) zoom_loads: std::sync::atomic::AtomicUsize,
+    zoom_save_fails: std::sync::atomic::AtomicBool,
+    zoom_save_fail_site: Mutex<Option<String>>,
     /// Tasks `resource_call` lists, and the searches it was asked for.
     pub(super) task_rows: Mutex<
         Vec<(
@@ -1101,6 +1301,14 @@ pub(crate) struct FakeStore {
     >,
     pub(super) task_searches: Mutex<Vec<String>>,
 }
+
+/// The serial of the request the tab shows, as its card would answer.
+pub(crate) fn shown_serial(shell: &Shell, id: ItemId) -> u32 {
+    shell.items.tab(id).map_or(0, |tab| tab.page_request_serial)
+}
+
+/// One list of download decisions the shell handed the engine.
+type DownloadSitesPushed = (ProfileId, Vec<(String, bool)>);
 
 type AvatarWrite = (
     ProfileId,
@@ -1135,6 +1343,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<zephium_core::permissions::PageOrigin>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("popup_sites", profile));
         Some(
             self.popup_sites
                 .lock()
@@ -1155,6 +1367,75 @@ impl Store for FakeStore {
         list.retain(|site| *site != origin);
         if allowed {
             list.push(origin);
+        }
+        true
+    }
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("app_link_sites", profile));
+        Some(
+            self.app_link_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        if self
+            .app_link_writes_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        let mut sites = self.app_link_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|site| *site != (origin.clone(), scheme.clone()));
+        if allowed {
+            list.push((origin, scheme));
+        }
+        true
+    }
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("download_sites", profile));
+        Some(
+            self.download_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        let mut sites = self.download_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|(site, _)| *site != origin);
+        if let Some(allowed) = allowed {
+            list.push((origin, allowed));
         }
         true
     }
@@ -1589,6 +1870,44 @@ impl Store for FakeStore {
                 .collect(),
         )
     }
+    fn extension_history(
+        &self,
+        _profile: ProfileId,
+        request: zephium_core::extension_data::HistoryRequest,
+    ) -> zephium_core::extension_data::HistoryReply {
+        use zephium_core::extension_data::{HistoryEntry, HistoryReply, HistoryRequest};
+        let visits = self.recorded_visits.lock().unwrap();
+        let entry = |url: &str| {
+            let of: Vec<_> = visits.iter().filter(|visit| visit.url == url).collect();
+            of.first().map(|first| HistoryEntry {
+                id: first.id,
+                url: url.to_owned(),
+                title: of.last().map(|last| last.title.clone()).unwrap_or_default(),
+                last_visit: of
+                    .iter()
+                    .map(|visit| visit.visited_at)
+                    .max()
+                    .unwrap_or_default(),
+                visits: of.len() as u32,
+            })
+        };
+        match request {
+            HistoryRequest::Address { url } => {
+                HistoryReply::Entries(entry(&url).into_iter().collect())
+            }
+            HistoryRequest::Search { text, .. } => {
+                let mut urls: Vec<&str> = visits
+                    .iter()
+                    .rev()
+                    .map(|visit| visit.url.as_str())
+                    .filter(|url| url.contains(text.as_str()))
+                    .collect();
+                urls.dedup();
+                HistoryReply::Entries(urls.into_iter().filter_map(entry).collect())
+            }
+            _ => HistoryReply::Failed,
+        }
+    }
     fn history_page(
         &self,
         _profile: ProfileId,
@@ -1659,6 +1978,27 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        if self
+            .site_origins_refused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        let (origins, complete) = self
+            .site_origins
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or((Vec::new(), true));
+        done(origins, complete);
+        true
+    }
     fn discard_session_backup(
         &self,
         profile: ProfileId,
@@ -1702,6 +2042,13 @@ impl Store for FakeStore {
         percent: Option<u16>,
         set_at: i64,
     ) -> bool {
+        if self
+            .zoom_save_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self.zoom_save_fail_site.lock().unwrap().as_ref() == Some(&site)
+        {
+            return false;
+        }
         let mut saved = self.zoom_saved.lock().unwrap();
         let levels = saved.entry(profile).or_default();
         levels.retain(|level| level.site != site);
@@ -1716,6 +2063,16 @@ impl Store for FakeStore {
     }
 
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        if self
+            .amend_title_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.amended_titles
+            .lock()
+            .unwrap()
+            .push((url.clone(), title.clone()));
         let mut visits = self.recorded_visits.lock().unwrap();
         if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
             visit.title = title;
@@ -1978,13 +2335,16 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActionShortcut(_) => {}
         Projection::PagePermissionPrompt(_) => {}
         Projection::WebExtensionAccessRequest(_) => {}
+        Projection::WebExtensionAccessRemoved(_) => {}
+        Projection::WebExtensionStoreClick(_) => {}
         Projection::Favicons(_) => {}
-        Projection::PanelOwner(_) => {}
+        Projection::PanelOwner(_) | Projection::TabSwitcher { .. } => {}
         Projection::UiCommand(_) => {}
         Projection::FindResult(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::HostFullscreen(_) => {}
+        Projection::RaiseWindow => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
@@ -1993,11 +2353,26 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::RecentlyClosed(_) => {}
         Projection::MediaPlayer(_) => {}
         Projection::OpenNote { .. } => {}
+        Projection::MiniOpened(_)
+        | Projection::Mini(_)
+        | Projection::MiniClosed(_)
+        | Projection::ExternalTabsOpened => {}
     }
 }
 
-pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
+pub(super) struct SuccessfulProfileCleanup;
+impl crate::profile_cleanup::ProfileCleanup for SuccessfulProfileCleanup {
+    fn release(&self, _: ProfileId, done: crate::profile_cleanup::CleanupDone) -> bool {
+        done(true);
+        true
+    }
+}
+
+fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
+    engine
+        .suspends_hidden
+        .store(SUSPENDS_HIDDEN.get(), std::sync::atomic::Ordering::Release);
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
         profile: None,
@@ -2017,6 +2392,9 @@ pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Scre
         Arc::new(FakeChrome),
         Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen)
 }
@@ -2087,6 +2465,9 @@ fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen
             apply_projection(&mut sink.lock().unwrap(), p);
         }),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen, icons)
 }
@@ -2111,6 +2492,9 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
         chrome.clone(),
         Box::new(move |projection| apply_projection(&mut sink.lock().unwrap(), projection)),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, chrome, screen)
 }
@@ -2154,6 +2538,9 @@ pub(super) fn setup_with_operation_log_and_failure(
             apply_projection(&mut sink.lock().unwrap(), projection);
         }),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen, operations)
 }
@@ -2297,12 +2684,14 @@ mod export;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_data;
 mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
 mod lookup;
 mod media;
+mod mini;
 #[path = "navigation.rs"]
 mod navigation_tests;
 mod notes;
@@ -2318,8 +2707,10 @@ mod profiles;
 mod projections;
 mod search;
 mod shutdown;
+mod sidebar_card;
 mod site_permissions;
 mod spaces;
+mod tab_preview_tests;
 mod tabs;
 mod time;
 mod view_lifecycle;
@@ -2331,5 +2722,6 @@ mod blocker_sites;
 
 mod webext;
 
+mod recent_tabs;
 #[cfg(target_os = "windows")]
 mod webext_windows;

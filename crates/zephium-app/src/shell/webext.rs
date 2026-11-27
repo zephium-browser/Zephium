@@ -202,7 +202,7 @@ impl Shell {
                     )
                 })
                 .count();
-            if active >= zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+            if active >= zephium_core::extensions::WINDOWS_RUNNING_EXTENSIONS {
                 break;
             }
             self.web_extensions
@@ -287,6 +287,58 @@ impl Shell {
     }
 
     #[cfg(target_os = "windows")]
+    pub(super) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: String) {
+        if !self.web_extension_profile_admitted(profile)
+            || self
+                .windows
+                .focused()
+                .is_none_or(|window| window.profile != profile)
+        {
+            return;
+        }
+        let Some(install) = self
+            .web_extensions
+            .loaded
+            .get(&profile)
+            .and_then(|installs| {
+                installs
+                    .values()
+                    .find(|load| load.extension_id == extension_id)
+            })
+        else {
+            return;
+        };
+        let Some(WebExtensionStatus::Running(loaded)) =
+            self.web_extensions.status.get(&install.install)
+        else {
+            return;
+        };
+        let Some(url) = loaded
+            .options
+            .as_deref()
+            .filter(|url| navigation::extension_document_id(url) == Some(extension_id.as_str()))
+        else {
+            return;
+        };
+        if self.active_browser_page().is_some() && !self.browser_return_ready {
+            if self.browser_after_return.is_none() {
+                self.browser_after_return = Some(Box::new(Command::OpenWebExtensionOptions {
+                    profile,
+                    extension_id,
+                }));
+                let _ = self.operation_show_browser_page(None);
+            }
+            return;
+        }
+        let input = url.as_str().to_owned();
+        let Some((id, mut effects)) = self.open_tab_with_id() else {
+            return;
+        };
+        effects.extend(self.items.navigate(id, &input));
+        self.commit(effects);
+    }
+
+    #[cfg(target_os = "windows")]
     pub(super) fn extension_document_may_close(&self, id: ItemId) -> bool {
         let Some(profile) = self.profile_of_item(id) else {
             return false;
@@ -367,6 +419,38 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// Only the active tab of the focused window, in a profile that can
+    /// install extensions, showing that exact listing.
+    fn store_listing_in_front(&self, tab: ItemId, extension: &str) -> bool {
+        self.web_extension_target(Some(tab))
+            .and_then(|target| target.listing_url)
+            .and_then(|url| url::Url::parse(&url).ok())
+            .is_some_and(|url| super::extension_store::store_listing_id(&url) == Some(extension))
+    }
+
+    pub(super) fn show_store_button(
+        &mut self,
+        tab: ItemId,
+        button: zephium_core::ports::engine::StoreButton,
+    ) {
+        if self.store_listing_in_front(tab, &button.extension) {
+            self.engine.show_store_button(tab, button);
+        }
+    }
+
+    pub(super) fn store_button_clicked(&mut self, tab: ItemId, extension: String) {
+        if self.store_listing_in_front(tab, &extension) {
+            (self.emit)(Projection::WebExtensionStoreClick(
+                zephium_ipc::WebExtensionStoreClickView {
+                    tab_id: tab.to_string(),
+                    extension_id: extension,
+                },
+            ));
+        }
+    }
+}
+
 /// `start_background` asks for one background run after a package changed; a
 /// later apply that clears it changes nothing that is loaded.
 fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
@@ -375,6 +459,7 @@ fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
         && loaded.root == wanted.root
         && loaded.permissions == wanted.permissions
         && loaded.external_native_messaging == wanted.external_native_messaging
+        && loaded.native_messaging_grantable == wanted.native_messaging_grantable
         && loaded.match_patterns == wanted.match_patterns
 }
 
@@ -390,6 +475,7 @@ mod tests {
             root: "/packages/a/1.0-rev".into(),
             permissions: vec!["storage".into()],
             external_native_messaging: false,
+            native_messaging_grantable: false,
             match_patterns: vec!["<all_urls>".into()],
             start_background: true,
         };

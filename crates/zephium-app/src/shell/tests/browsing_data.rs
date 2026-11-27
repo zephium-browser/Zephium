@@ -78,7 +78,7 @@ fn cookies_and_cache_reach_the_engine_for_the_focused_profile_and_range() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, engine, _screen, _queue) = browsed(store);
     let profile = focused_profile(&shell);
-    let before = chrono::Utc::now().timestamp();
+    let before = jiff::Timestamp::now().as_second();
 
     let answer = dispatch(
         &mut shell,
@@ -87,7 +87,7 @@ fn cookies_and_cache_reach_the_engine_for_the_focused_profile_and_range() {
     );
 
     assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
-    let after = chrono::Utc::now().timestamp();
+    let after = jiff::Timestamp::now().as_second();
     let fake = &engine;
     let calls = fake.data_calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
@@ -153,7 +153,7 @@ fn a_ranged_clear_dates_the_download_list_too() {
         panic!("a ranged clear forgets only the downloads inside it");
     };
     assert_eq!(partition.profile(), profile);
-    assert!(since > chrono::Utc::now().timestamp() - 24 * 3600 - 5);
+    assert!(since > jiff::Timestamp::now().as_second() - 24 * 3600 - 5);
 }
 
 #[test]
@@ -341,9 +341,67 @@ fn forgetting_a_listed_site_asks_only_for_that_site() {
         calls[0].1,
         EngineDataCall::ForgetSite {
             site: "example.com".into(),
-            origin: None,
+            origins: Vec::new(),
         }
     );
+}
+
+#[test]
+fn forgetting_a_site_names_the_origins_its_history_and_open_pages_know() {
+    let store = Arc::new(FakeStore::default());
+    *store.site_origins.lock().unwrap() = Some((
+        vec![
+            "https://www.example.com".into(),
+            "http://example.com:8080".into(),
+            "https://shop.example.com".into(),
+        ],
+        true,
+    ));
+    let (mut shell, engine, screen, _queue) = browsed(store);
+    let profile = focused_profile(&shell);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "https://shop.example.com/cart");
+
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        BrowsingDataCall::ForgetSite {
+            site: "example.com".into(),
+        },
+    );
+
+    assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
+    let (_, call) = engine.data_calls.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        call,
+        EngineDataCall::ForgetSite {
+            site: "example.com".into(),
+            origins: vec![
+                "https://shop.example.com".into(),
+                "https://www.example.com".into(),
+                "http://example.com:8080".into(),
+            ],
+        }
+    );
+}
+
+#[test]
+fn a_site_removal_the_engine_could_only_partly_do_says_so() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, _screen, _queue) = browsed(store);
+    let profile = focused_profile(&shell);
+    *engine.data_reply.lock().unwrap() =
+        Some(zephium_core::browsing_data::EngineDataReply::PartlyCleared);
+
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        BrowsingDataCall::ForgetSite {
+            site: "example.com".into(),
+        },
+    );
+
+    assert_eq!(answered(&answer), BrowsingDataResponse::PartlyCleared);
 }
 
 #[test]
@@ -370,7 +428,7 @@ fn forgetting_a_page_reaches_its_whole_site_and_keeps_the_origin() {
             call,
             EngineDataCall::ForgetSite {
                 site: site.into(),
-                origin: Some(origin.into()),
+                origins: vec![origin.into()],
             }
         );
     }
@@ -422,7 +480,7 @@ fn a_four_week_history_clear_reaches_the_store_with_its_date() {
     let (mut shell, _engine, screen, queue) = browsed(store.clone());
     visit(&mut shell, &screen, "visited.example");
     let profile = focused_profile(&shell);
-    let before = chrono::Utc::now().timestamp();
+    let before = jiff::Timestamp::now().as_second();
 
     let answer = dispatch(
         &mut shell,
@@ -432,7 +490,7 @@ fn a_four_week_history_clear_reaches_the_store_with_its_date() {
     drain_reads(&mut shell, store.clone(), queue);
 
     assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
-    let after = chrono::Utc::now().timestamp();
+    let after = jiff::Timestamp::now().as_second();
     let window = 28 * 24 * 3600;
     let clears = store.chat_clears.lock().unwrap().clone();
     let [(cleared, Some(since))] = clears[..] else {
@@ -452,7 +510,7 @@ fn clearing_history_takes_the_closed_tabs_of_the_range_out_of_recently_closed() 
     let recent = visit(&mut shell, &screen, "recent.example");
     shell.handle(Command::Close(old));
     shell.handle(Command::Close(recent));
-    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+    let now_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap();
     for entry in &mut shell.recently_closed {
         entry.closed_at_ms = Some(if entry.url.contains("old.example") {
             now_ms - 3 * 3600 * 1000
@@ -606,4 +664,28 @@ fn site_data_clear_waits_for_backup_disposal_and_preserves_engine_failures() {
             error: BrowsingDataError::Unavailable
         }
     );
+}
+
+#[test]
+fn a_site_removal_whose_origin_scan_stopped_short_or_was_refused_is_partial() {
+    for refused in [false, true] {
+        let store = Arc::new(FakeStore::default());
+        *store.site_origins.lock().unwrap() = Some((vec!["https://www.example.com".into()], false));
+        store
+            .site_origins_refused
+            .store(refused, std::sync::atomic::Ordering::Release);
+        let (mut shell, engine, _screen, _queue) = browsed(store);
+        let profile = focused_profile(&shell);
+
+        let answer = dispatch(
+            &mut shell,
+            profile,
+            BrowsingDataCall::ForgetSite {
+                site: "example.com".into(),
+            },
+        );
+
+        assert_eq!(answered(&answer), BrowsingDataResponse::PartlyCleared);
+        assert_eq!(engine.data_calls.lock().unwrap().len(), 1);
+    }
 }

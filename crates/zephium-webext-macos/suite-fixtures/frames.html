@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Frames come and go</title>
+<script>
+  // Pages add and remove frames all day. What an extension leaves behind
+  // for each removed frame makes every later one slower, so the last frames
+  // take longer than the first.
+  window.churn = async (count = 400, batch = 100) => {
+    const times = [];
+    let start = performance.now();
+    for (let index = 1; index <= count; index++) {
+      const frame = document.createElement("iframe");
+      await new Promise((resolve) => {
+        frame.onload = resolve;
+        frame.src = `/blank.html?frame${index}`;
+        document.body.append(frame);
+      });
+      frame.remove();
+      if (index % batch === 0) {
+        const now = performance.now();
+        times.push(now - start);
+        start = now;
+      }
+    }
+    return times;
+  };
+</script>
+<p>Frames are added and removed here one after another.</p>

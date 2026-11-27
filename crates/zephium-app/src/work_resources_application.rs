@@ -359,6 +359,8 @@ pub(super) struct RetainedWork {
     native_shutdown: Option<RetainedNativeShutdown>,
     /// Where the native gate saw a public first load redirected.
     redirect: Option<zephium_agentic::WorkBrowserRedirect>,
+    /// Where the native view says its first load never reached the site.
+    unreachable: Option<zephium_agentic::WorkBrowserUnreachable>,
 }
 impl RetainedWork {
     /// The newest canvas frame of this resource's page, if the engine hosts one.
@@ -451,6 +453,7 @@ impl RetainedWork {
             unexpected_native: None,
             native_shutdown: None,
             redirect: None,
+            unreachable: None,
         }
     }
 
@@ -625,18 +628,15 @@ impl RetainedWork {
         {
             group.fail();
         }
-        // A lost document whose first load the gate refused as a redirect
-        // was redirected; its owner reads the destination from the slot.
-        let failure = if failure == AgentWorkFailure::ContextLost
-            && self
-                .redirect
+        let failure = named_loss(
+            failure,
+            self.redirect
                 .as_ref()
-                .is_some_and(|redirect| redirect.destination().is_some())
-        {
-            AgentWorkFailure::Redirected
-        } else {
-            failure
-        };
+                .is_some_and(|redirect| redirect.destination().is_some()),
+            self.unreachable
+                .as_ref()
+                .is_some_and(zephium_agentic::WorkBrowserUnreachable::unreachable),
+        );
         self.failure.get_or_insert(failure);
         self.phase = AdmissionPhase::Uncertain;
         self.stopping = true;
@@ -808,6 +808,9 @@ impl RetainedWork {
         Ok(())
     }
 
+    pub(super) fn set_unreachable(&mut self, unreachable: zephium_agentic::WorkBrowserUnreachable) {
+        self.unreachable = Some(unreachable);
+    }
     pub(super) fn set_redirect(&mut self, redirect: zephium_agentic::WorkBrowserRedirect) {
         self.redirect = Some(redirect);
     }
@@ -1861,6 +1864,17 @@ pub(in crate::work_resources) static UNCONFIRMED_TERMINALS: std::sync::atomic::A
 
 const MAX_RECONCILIATIONS: u8 = 4;
 
+/// A lost document whose first load the gate refused as a redirect was
+/// redirected (its owner reads the destination from the slot); one whose
+/// load never reached its site was unreachable. Other losses stay as they are.
+fn named_loss(failure: AgentWorkFailure, redirected: bool, unreachable: bool) -> AgentWorkFailure {
+    match failure {
+        AgentWorkFailure::ContextLost if redirected => AgentWorkFailure::Redirected,
+        AgentWorkFailure::ContextLost if unreachable => AgentWorkFailure::Unreachable,
+        failure => failure,
+    }
+}
+
 /// Half a second, doubling: the last resend leaves within about 15 s of the
 /// first uncertainty, past a Store that is only slow, not one that is gone.
 fn reconciliation_backoff(reconciliations: u8) -> Duration {
@@ -1980,6 +1994,15 @@ impl RetainedWork {
 #[cfg(test)]
 mod group_tests {
     use super::*;
+
+    #[test]
+    fn a_lost_page_is_named_by_what_its_first_load_met() {
+        use AgentWorkFailure::{ContextLost, Deadline, Redirected, Unreachable};
+        assert_eq!(named_loss(ContextLost, false, false), ContextLost);
+        assert_eq!(named_loss(ContextLost, false, true), Unreachable);
+        assert_eq!(named_loss(ContextLost, true, true), Redirected);
+        assert_eq!(named_loss(Deadline, false, true), Deadline);
+    }
 
     #[test]
     fn work_group_accepts_only_its_live_manifest_under_the_original_process_fence() {

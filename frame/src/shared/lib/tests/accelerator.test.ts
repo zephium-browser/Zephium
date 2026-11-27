@@ -13,6 +13,7 @@ const press = (init: Partial<KeyboardEvent>) =>
     altKey: false,
     shiftKey: false,
     metaKey: false,
+    getModifierState: () => false,
     ...init,
   }) as KeyboardEvent;
 
@@ -22,6 +23,7 @@ describe("accelerators", () => {
     expect(acceleratorKeys("Cmd+Option+N", true)).toEqual(["⌥", "⌘", "N"]);
     expect(acceleratorKeys("Ctrl+Shift+Enter", false)).toEqual(["Ctrl", "Shift", "↵"]);
     expect(acceleratorKeys("Ctrl++", false)).toEqual(["Ctrl", "+"]);
+    expect(acceleratorKeys("Cmd++", true)).toEqual(["⌘", "="]);
     expect(acceleratorKeys("Ctrl+é", false)).toEqual(["Ctrl", "é"]);
     expect(acceleratorKeys("Ctrl+Shift+Tab", true)).toEqual(["⌃", "⇧", "Tab"]);
     expect(acceleratorKeys("Ctrl+Alt+KeyK", true)).toEqual(["⌃", "⌥", "K"]);
@@ -109,6 +111,28 @@ describe("accelerators", () => {
     ).toBe("Ctrl+KeyQ");
     expect(
       keymapAcceleratorFrom(press({ code: "MetaLeft", key: "Meta", metaKey: true }), false, true),
+    ).toBeNull();
+  });
+
+  it("keeps Windows keypad digits distinct and ignores AltGraph", () => {
+    expect(
+      keymapAcceleratorFrom(press({ code: "Numpad1", key: "1", ctrlKey: true }), false, true),
+    ).toBe("Ctrl+Numpad1");
+    expect(
+      keymapAcceleratorFrom(press({ code: "Numpad1", key: "End", ctrlKey: true }), false, true),
+    ).toBe("Ctrl+End");
+    expect(
+      keymapAcceleratorFrom(
+        press({
+          code: "KeyQ",
+          key: "@",
+          ctrlKey: true,
+          altKey: true,
+          getModifierState: (modifier) => modifier === "AltGraph",
+        }),
+        false,
+        true,
+      ),
     ).toBeNull();
   });
 

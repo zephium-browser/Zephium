@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { untrack, type Snippet } from "svelte";
-  import { decode, placeSky, SCENES, scene as skyScene, seen, type Scene } from "$shared/sky";
+  import type { Snippet } from "svelte";
+  import { PICTURE, placeSky, scene as skyScene, seen, SkyPrint, type Scene } from "$shared/sky";
 
   let { children, foot }: { children: Snippet; foot?: Snippet } = $props();
 
@@ -11,24 +11,11 @@
   const scene = $derived(skyScene());
   // The horizon sits low enough that the sheet stands over open sky and the
   // clouds have dissolved into the page by its foot.
-  const sky = $derived(placeSky(width, Math.round(height * 0.72)));
-
-  let shown = $state<Scene | null>(seen(untrack(() => scene)) ? untrack(() => scene) : null);
-  let failed = $state<Scene | null>(null);
-  $effect(() => {
-    const wanted = scene;
-    let live = true;
-    void decode(wanted).then(
-      () => {
-        if (live) shown = wanted;
-      },
-      () => {
-        if (live) failed = wanted;
-      },
-    );
-    return () => {
-      live = false;
-    };
+  const horizon = $derived(Math.round(height * 0.72));
+  const sky = $derived(placeSky(width, horizon));
+  let shown = $state<Scene | null>(null);
+  $effect.pre(() => {
+    if (shown === null && seen(scene)) shown = scene;
   });
 </script>
 
@@ -41,17 +28,20 @@
   class="account-gate"
   data-sky={scene}
   data-ready={shown === scene}
-  data-failed={failed === scene}
   bind:clientWidth={width}
   bind:clientHeight={height}
 >
-  <div
-    class="sky"
-    aria-hidden="true"
-    style:background-image={`url("${SCENES[scene]}")`}
-    style:background-size={`${sky.w}px ${sky.h}px`}
-    style:background-position={`${sky.x}px ${sky.y}px`}
-  ></div>
+  <div class="sky" aria-hidden="true">
+    {#if width > 0 && height > 0}<SkyPrint
+        {scene}
+        {width}
+        {height}
+        {sky}
+        {horizon}
+        pictureHorizon={PICTURE.horizon}
+        onready={(printed) => (shown = printed)}
+      />{/if}
+  </div>
   <div class="stage">
     <img
       class="mark"
@@ -100,7 +90,6 @@
   .sky {
     position: absolute;
     inset: 0;
-    background-repeat: no-repeat;
     opacity: 0;
     transition: opacity 700ms var(--ease-out);
   }
@@ -157,7 +146,7 @@
       translate 700ms var(--ease-emphasized);
   }
 
-  .account-gate:is([data-ready="true"], [data-failed="true"]) .mark {
+  .account-gate:is([data-ready="true"]) .mark {
     opacity: 1;
     translate: 0 0;
   }

@@ -25,15 +25,16 @@
   import { WORDMARK } from "$shared/lib/wordmark";
   import { reducedMotion } from "$shared/lib/motion";
   import {
-    decode,
-    FROSTS,
+    PICTURE,
     placeSky,
     placeSkyInWindow,
-    SCENES,
     scene as skyScene,
     seen,
+    skyFrost,
+    SkyPrint,
     type Scene,
   } from "$shared/sky";
+  import { IS_WINDOWS } from "$shared/platform";
   import NewTabAccount from "./NewTabAccount.svelte";
 
   let {
@@ -68,6 +69,9 @@
   // settings keep the corner, so nothing moves when the account is known.
   let showAccount = $derived(!!onaccount && account.available);
   let signInWidth = $state(0);
+  let nameWidth = $state(0);
+  // The name beside the picture only where the page is wide enough to spare it.
+  let named = $derived(width >= 1100);
   let profile = $derived(tabs.profile()?.id ?? null);
   let picture = $derived(newTabImage());
   let useSky = $derived(picture === null);
@@ -177,7 +181,9 @@
     };
   });
   let controls = $derived([
-    ...(showAccount ? [account.signedIn ? 32 : Math.max(32, signInWidth)] : []),
+    ...(showAccount
+      ? [account.signedIn ? (nameWidth > 0 ? nameWidth + 48 : 32) : Math.max(32, signInWidth)]
+      : []),
     ...(oncustomize ? [32] : []),
   ]);
   let page = $derived(
@@ -187,7 +193,42 @@
       wordmark: showWordmark,
     }),
   );
+  // The sky is held quieter behind the name and the time, so they read on
+  // cloud as well as on open sky.
+  let quiet = $derived.by(() => {
+    const top = page.mark.y;
+    const bottom = page.when === null ? top + page.mark.h : page.when + 20;
+    if (bottom <= top) return null;
+    const ry = (bottom - top) * 1.4 + 24;
+    return { x: width / 2, y: (top + bottom) / 2, rx: Math.max(page.mark.w, 320) * 0.85, ry };
+  });
   const at = ({ x, y, w, h }: Box) => `left:${x}px;top:${y}px;width:${w}px;height:${h}px`;
+
+  // On Windows the window's controls come down into the page's top corner on
+  // hover; the account and settings step down out of their way meanwhile, with
+  // the same timing, and back up as they go.
+  let caption = $state({ height: 0, duration: 0 });
+  $effect(() => {
+    if (!IS_WINDOWS) return;
+    const moved = (event: Event) => {
+      const detail = (event as CustomEvent<{ shown?: boolean; height?: number; duration?: number }>)
+        .detail;
+      if (typeof detail?.shown !== "boolean") return;
+      caption = {
+        height: detail.shown ? Math.max(0, Number(detail.height) || 0) : 0,
+        duration: Math.max(0, Number(detail.duration) || 0),
+      };
+    };
+    window.addEventListener("zephium:caption", moved);
+    void commands.captionReplay().catch(() => {});
+    return () => window.removeEventListener("zephium:caption", moved);
+  });
+  // The caption paints its buttons 3px inside its band: the controls stop
+  // just under them, not under the band, so they step down only as far as
+  // they have to.
+  const CAPTION_TUCK = 1;
+  const stepDown = (box: Box) =>
+    caption.height > 0 ? Math.max(0, caption.height - CAPTION_TUCK - box.y) : 0;
 
   // Day over a light page, night over a dark one.
   let scene = $derived(skyScene());
@@ -195,21 +236,8 @@
   // The sky arrives once a session, as the first new tab opens, and is simply
   // there on every one after.
   const arriving = !seen(untrack(() => scene));
+  // The print comes up once it is drawn; until then the page is its paper.
   let shown = $state<Scene | null>(seen(untrack(() => scene)) ? untrack(() => scene) : null);
-  $effect(() => {
-    if (!useSky) return;
-    const wanted = scene;
-    let live = true;
-    // A sky that cannot be decoded leaves the page its own colour; it never
-    // keeps the name and the controls hidden.
-    const reveal = () => {
-      if (live) shown = wanted;
-    };
-    void decode(wanted).then(reveal, reveal);
-    return () => {
-      live = false;
-    };
-  });
 
   // The picture is the page: painted with it, nothing drawn of its own. The
   // page is cut by the notch the field hangs in, so the window's own glass
@@ -319,10 +347,10 @@
   data-scene={scene}
   data-ready={!useSky || shown === scene}
   aria-label={m.new_tab()}
-  style:--sky-frost={useSky ? `url("${FROSTS[scene]}")` : undefined}
-  style:--sky-frost-size={`${sky.w}px ${sky.h}px`}
-  style:--sky-frost-x={`${sky.x - (width - fieldWidth) / 2}px`}
-  style:--sky-frost-y={`${sky.y - page.notch.height}px`}
+  style:--sky-frost={useSky && skyFrost(scene) ? `url("${skyFrost(scene)}")` : undefined}
+  style:--sky-frost-size={`${width}px ${height}px`}
+  style:--sky-frost-x={`${-(width - fieldWidth) / 2}px`}
+  style:--sky-frost-y={`${-page.notch.height}px`}
   bind:clientWidth={width}
   bind:clientHeight={height}
 >
@@ -343,12 +371,18 @@
               />{/if}
           {/await}
         {/key}
-      {:else if useSky}<div
-          class="sky"
-          style:background-image={`url("${SCENES[scene]}")`}
-          style:background-size={`${sky.w}px ${sky.h}px`}
-          style:background-position={`${sky.x}px ${sky.y}px`}
-        ></div>{/if}
+      {:else if useSky && width > 0 && height > 0}<div class="sky">
+          <SkyPrint
+            {scene}
+            {width}
+            {height}
+            {sky}
+            horizon={page.horizon}
+            pictureHorizon={PICTURE.horizon}
+            {quiet}
+            onready={(printed) => (shown = printed)}
+          />
+        </div>{/if}
     </div>{/if}
 
   <!-- Light caught along the edge where the page meets the window, fading
@@ -431,12 +465,22 @@
 
   <!-- Each control a disc of light on the sky, level with the field. -->
   {#if showAccount && onaccount && page.controls[0]}
-    <div class="control" style={at(page.controls[0])}>
-      <NewTabAccount {account} {onaccount} bind:signInWidth />
+    <div
+      class="control"
+      style={at(page.controls[0])}
+      style:translate={`0 ${stepDown(page.controls[0])}px`}
+      style:transition-duration={`${caption.duration}ms`}
+    >
+      <NewTabAccount {account} {onaccount} {named} bind:signInWidth bind:nameWidth />
     </div>
   {/if}
   {#if oncustomize && page.controls.at(-1)}
-    <div class="control" style={at(page.controls.at(-1)!)}>
+    <div
+      class="control"
+      style={at(page.controls.at(-1)!)}
+      style:translate={`0 ${stepDown(page.controls.at(-1)!)}px`}
+      style:transition-duration={`${caption.duration}ms`}
+    >
       <IconButton
         icon={Settings01Icon}
         label={m.settings_customize_newtab()}
@@ -499,6 +543,10 @@
   .newtab {
     --sky-paper: var(--sky-day-paper);
     --sky-shadow: var(--sky-day-shadow);
+    --sky-ink: var(--sky-day-ink);
+    --sky-name: var(--sky-day-name);
+    --sky-type-edge: var(--sky-day-type-edge);
+    --sky-type-halo: var(--sky-day-type-halo);
     --sky-lip: var(--sky-day-lip);
     --disc-fill: var(--sky-day-disc-fill);
     --disc-rim: var(--sky-day-disc-rim);
@@ -520,6 +568,10 @@
   .newtab[data-scene="night"] {
     --sky-paper: var(--sky-night-paper);
     --sky-shadow: var(--sky-night-shadow);
+    --sky-ink: var(--sky-night-ink);
+    --sky-name: var(--sky-night-name);
+    --sky-type-edge: var(--sky-night-type-edge);
+    --sky-type-halo: var(--sky-night-type-halo);
     --sky-lip: var(--sky-night-lip);
     --disc-fill: var(--sky-night-disc-fill);
     --disc-rim: var(--sky-night-disc-rim);
@@ -541,6 +593,10 @@
     --sky-card-edge: var(--color-border);
     --disc-fill: var(--color-surface);
     --sky-shadow: var(--newtab-image-dim);
+    --sky-ink: var(--sky-night-ink);
+    --sky-name: var(--sky-night-name);
+    --sky-type-edge: var(--newtab-image-dim);
+    --sky-type-halo: var(--newtab-image-dim);
     --disc-rim: var(--color-border);
   }
 
@@ -635,7 +691,10 @@
     margin: 0 auto;
     color: var(--sky-ink);
     text-align: center;
-    text-shadow: 0 1px 18px var(--sky-shadow);
+    text-shadow:
+      0 0 1px var(--sky-type-edge),
+      0 1px 5px var(--sky-type-edge),
+      0 1px 18px var(--sky-type-halo);
     pointer-events: none;
   }
 
@@ -694,6 +753,8 @@
   .control {
     position: absolute;
     z-index: 1;
+    transition-property: translate;
+    transition-timing-function: var(--ease-emphasized);
     display: grid;
     place-items: center;
     border-radius: var(--radius-capsule);
@@ -836,7 +897,25 @@
   }
 
   .custom .figure {
-    background: var(--color-surface);
+    background: var(--figure-surface, var(--color-surface));
+    color: var(--color-label-secondary);
+  }
+
+  .custom .figure .foot:not(.late) {
+    color: var(--color-label-secondary);
+  }
+
+  /* A wash, not a live blur: it keeps arbitrary wallpaper legible at no GPU cost. */
+  :global(:root:not([data-material="none"])[data-material]) .newtab.custom {
+    --figure-surface: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  }
+
+  .custom button.figure:hover {
+    background: color-mix(
+      in srgb,
+      var(--color-text) 9%,
+      var(--figure-surface, var(--color-surface))
+    );
   }
 
   /* A narrow pane keeps each figure to its icon and value on one row; the
@@ -907,6 +986,12 @@
   @media (forced-colors: active) {
     .sky {
       display: none;
+    }
+
+    .custom .figure,
+    .custom button.figure:hover {
+      background: Canvas;
+      color: CanvasText;
     }
 
     .name {

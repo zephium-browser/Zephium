@@ -15,6 +15,41 @@ pub(super) struct GrabbedDivider {
 }
 
 impl Shell {
+    pub(super) fn peek_sidebar(&mut self, peek: bool, slide: bool) {
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
+        if peek && (!win.metrics.sidebar_hidden || !self.window_visible) {
+            if win.sidebar_peek {
+                self.peek_sidebar(false, false);
+            }
+            return;
+        }
+        let id = win.id;
+        let card = layout::hidden_card(win.size, win.metrics);
+        if !peek {
+            // Retire replay intent even if native cleanup is refused.
+            self.windows.get_mut(id).unwrap().sidebar_peek = false;
+        }
+        let dispatch = self.engine.raise_chrome(id, peek, card, slide);
+        if peek && dispatch == NativeDispatch::Scheduled {
+            self.windows.get_mut(id).unwrap().sidebar_peek = true;
+        }
+    }
+
+    pub(super) fn refresh_sidebar_peek(&self) {
+        if let Some(win) = self
+            .windows
+            .focused()
+            .filter(|win| win.sidebar_peek && win.metrics.sidebar_hidden && self.window_visible)
+        {
+            let card = layout::hidden_card(win.size, win.metrics);
+            // Repeating the raised target keeps an in-flight native slide;
+            // only its card geometry changes with these admitted metrics.
+            let _ = self.engine.raise_chrome(win.id, true, card, true);
+        }
+    }
+
     pub(super) fn resolve_drop(&self, x: f64, y: f64) -> Option<split::Drop> {
         if self.active_browser_page().is_some() {
             return None;
@@ -32,8 +67,15 @@ impl Shell {
     }
 
     /// A relayout that is one step of a deliberate change of shape, which
-    /// the chrome and the content carry out as a journey.
+    /// the chrome and the content carry out as a journey. mini windows lay
+    /// out with it, since what changed may be their page.
     pub(super) fn relayout_with(&self, travel: bool) -> NativeDispatch {
+        let main = self.relayout_main_with(travel);
+        self.relayout_mini_windows();
+        main
+    }
+
+    fn relayout_main_with(&self, travel: bool) -> NativeDispatch {
         let filling = self.window_filling_fullscreen();
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;
@@ -59,6 +101,7 @@ impl Shell {
         // privileged chrome for exactly the lifetime of the retained sheet.
         // A prompt in the sidebar needs neither: no page view overlaps it.
         let privileged_overlay_active = self.page_permission_modal()
+            || self.chrome_modal
             || self.active_browser_page().is_some()
             || self.focus_covers();
         // `Items` marks a prospective view resident before its CreateView
@@ -102,7 +145,14 @@ impl Shell {
                         tab.has_view()
                             && (tab.url.is_some()
                                 || tab.content == zephium_core::item::TabContent::ExtensionOwned)
-                            && !self.presentation.deferred_first_content_layout.contains(id)
+                            // Verified, the layout that admits the page is
+                            // the one that makes room for it.
+                            && (!self.presentation.deferred_first_content_layout.contains(id)
+                                || self
+                                    .presentation
+                                    .pending_presentations
+                                    .get(id)
+                                    .is_some_and(|pending| pending.chrome_applied))
                     })
                 })
             });

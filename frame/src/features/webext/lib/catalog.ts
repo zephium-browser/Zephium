@@ -1,4 +1,49 @@
 import * as m from "$shared/i18n/messages";
+import icon1Password from "../icons/1password.png";
+import iconAuthenticator from "../icons/authenticator.png";
+import iconBitwarden from "../icons/bitwarden.png";
+import iconColorZilla from "../icons/colorzilla.png";
+import iconDarkReader from "../icons/dark-reader.png";
+import iconDashlane from "../icons/dashlane.png";
+import iconDeepL from "../icons/deepl.png";
+import iconEnhancerForYouTube from "../icons/enhancer-for-youtube.png";
+import iconEnpass from "../icons/enpass.png";
+import iconEvernoteWebClipper from "../icons/evernote-web-clipper.png";
+import iconGoogleDictionary from "../icons/google-dictionary.png";
+import iconGoogleDocsOffline from "../icons/google-docs-offline.png";
+import iconGoogleTranslate from "../icons/google-translate.png";
+import iconGrammarly from "../icons/grammarly.png";
+import iconHypothesis from "../icons/hypothesis.png";
+import iconJSONFormatter from "../icons/json-formatter.png";
+import iconKeePassXCBrowser from "../icons/keepassxc-browser.png";
+import iconKeeper from "../icons/keeper.png";
+import iconLanguageTool from "../icons/languagetool.png";
+import iconLastPass from "../icons/lastpass.png";
+import iconLoom from "../icons/loom.png";
+import iconNordPass from "../icons/nordpass.png";
+import iconNotionWebClipper from "../icons/notion-web-clipper.png";
+import iconOctotree from "../icons/octotree.png";
+import iconOneTab from "../icons/onetab.png";
+import iconProtonPass from "../icons/proton-pass.png";
+import iconRaindropIo from "../icons/raindrop-io.png";
+import iconReactDeveloperTools from "../icons/react-developer-tools.png";
+import iconRefinedGitHub from "../icons/refined-github.png";
+import iconReturnYouTubeDislike from "../icons/return-youtube-dislike.png";
+import iconRoboForm from "../icons/roboform.png";
+import iconSessionBuddy from "../icons/session-buddy.png";
+import iconSimplifyGmail from "../icons/simplify-gmail.png";
+import iconSponsorBlock from "../icons/sponsorblock.png";
+import iconStylus from "../icons/stylus.png";
+import iconTampermonkey from "../icons/tampermonkey.png";
+import iconTodoist from "../icons/todoist.png";
+import iconUnhook from "../icons/unhook.png";
+import iconVideoSpeedController from "../icons/video-speed-controller.png";
+import iconVimium from "../icons/vimium.png";
+import iconViolentmonkey from "../icons/violentmonkey.png";
+import iconVueJsDevtools from "../icons/vue-js-devtools.png";
+import iconWappalyzer from "../icons/wappalyzer.png";
+import iconWaybackMachine from "../icons/wayback-machine.png";
+import iconZoteroConnector from "../icons/zotero-connector.png";
 
 /** Extensions verified to work well in Zephium: in daily use, and in the
  *  real-extension suite (`cargo xtask webext-suite`), which also checks the
@@ -7,7 +52,7 @@ export type CatalogEntry = {
   id: string;
   name: string;
   blurb: () => string;
-  /** The Web Store image path of its icon, fetched by the browser. */
+  /** Its Web Store icon, bundled so the page makes no request for it. */
   icon: string;
 };
 
@@ -21,22 +66,70 @@ export const catalog: CatalogGroup[] = [
     title: m.webext_group_passwords,
     entries: [
       {
-        id: "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
-        name: "1Password",
-        blurb: m.webext_catalog_1password,
-        icon: "DftM3biDXufonobNWlKgO74qdJosSFjMay_Ku9aIinJwwmtp-hv3Psof4nxKp2mjf6Lgu-pHWPAaPXz7Rs3Uwzen",
+        id: "hdokiejnpimakedhajhdlcegeplioahd",
+        name: "LastPass",
+        blurb: m.webext_catalog_lastpass,
+        icon: iconLastPass,
       },
       {
         id: "nngceckbapebfimnlniiiahkandclblb",
         name: "Bitwarden",
         blurb: m.webext_catalog_bitwarden,
-        icon: "J_l8abQyJgx7POjRoDfGaFYWFnYQNpRSy4kH5IlbwSdM-l_gZf2rJlk2NLSQTY8g-U2vrclpb0EZApHyOe6sjzbKcUc",
+        icon: iconBitwarden,
       },
       {
-        id: "hdokiejnpimakedhajhdlcegeplioahd",
-        name: "LastPass",
-        blurb: m.webext_catalog_lastpass,
-        icon: "2E-kdWD96KmPMAR7_XC6d_zWHio7n7skW8-9S5R42ZQvTX-djSt-qbwhuiM5znQ5Iqj9SWuP4fqfycgt_OD9aLWh",
+        id: "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+        name: "1Password",
+        blurb: m.webext_catalog_1password,
+        icon: icon1Password,
+      },
+      {
+        id: "bhghoamapcdpbohphigoooaddinpkbai",
+        name: "Authenticator",
+        blurb: m.webext_catalog_authenticator,
+        icon: iconAuthenticator,
+      },
+      {
+        id: "fdjamakpfbbddfjaooikfcpapjohcfmg",
+        name: "Dashlane",
+        blurb: m.webext_catalog_dashlane,
+        icon: iconDashlane,
+      },
+      {
+        id: "bfogiafebfohielmmehodmfbbebbbpei",
+        name: "Keeper",
+        blurb: m.webext_catalog_keeper,
+        icon: iconKeeper,
+      },
+      {
+        id: "eiaeiblijfjekdanodkjadfinkhbfgcd",
+        name: "NordPass",
+        blurb: m.webext_catalog_nordpass,
+        icon: iconNordPass,
+      },
+      {
+        id: "pnlccmojcmeohlpggmfnbbiapkmbliob",
+        name: "RoboForm",
+        blurb: m.webext_catalog_roboform,
+        icon: iconRoboForm,
+      },
+      {
+        id: "ghmbeldphafepmbegfdlkpapadhbakde",
+        name: "Proton Pass",
+        blurb: m.webext_catalog_proton_pass,
+        icon: iconProtonPass,
+      },
+      {
+        id: "kmcfomidfpdkfieipokbalgegidffkal",
+        name: "Enpass",
+        blurb: m.webext_catalog_enpass,
+        icon: iconEnpass,
+      },
+      {
+        id: "oboonakemofpalcgghocfoadofidjkkk",
+        name: "KeePassXC-Browser",
+        blurb: m.webext_catalog_keepassxc,
+        icon: iconKeePassXCBrowser,
       },
     ],
   },
@@ -47,19 +140,31 @@ export const catalog: CatalogGroup[] = [
         id: "kbfnbcaeplbcioakkpcpgfkobkghlhen",
         name: "Grammarly",
         blurb: m.webext_catalog_grammarly,
-        icon: "Ywdz5mn9q2Mx76DU45LSH-Pv5OGpqk8QAOY3lT1AWScMTZYQtAhqhVjtY5I2JZK530QIycLZooe2a0k3quGqYUaZ",
+        icon: iconGrammarly,
       },
       {
-        id: "cofdbpoegempjloogbagkncekinflcnj",
-        name: "DeepL",
-        blurb: m.webext_catalog_deepl,
-        icon: "iXeQzL_4icUm7QIqYFHfpm13HKecoVh8mbaop8_kqEnUiETbYf4wK0C2haqLYAjePlhOxKLjIHpxhH7ufB4KIcKVrA",
+        id: "aapbdbdomjkkjkaonfhkkikfgjllcleb",
+        name: "Google Translate",
+        blurb: m.webext_catalog_google_translate,
+        icon: iconGoogleTranslate,
       },
       {
         id: "mgijmajocgfcbeboacabfgobmjgjcoja",
         name: "Google Dictionary",
         blurb: m.webext_catalog_google_dictionary,
-        icon: "R2e7I-0MQgxeJ-dkkGfDxL2PWPcR3DTGhttSloJO70ax2N0TEtcT-AlmLcMAJZyHOhhqRTTpuJjO9qVs24DUDIMYVsk",
+        icon: iconGoogleDictionary,
+      },
+      {
+        id: "cofdbpoegempjloogbagkncekinflcnj",
+        name: "DeepL",
+        blurb: m.webext_catalog_deepl,
+        icon: iconDeepL,
+      },
+      {
+        id: "oldceeleldhonbafppcapldpdifcinji",
+        name: "LanguageTool",
+        blurb: m.webext_catalog_languagetool,
+        icon: iconLanguageTool,
       },
     ],
   },
@@ -70,19 +175,37 @@ export const catalog: CatalogGroup[] = [
         id: "eimadpbcbfnmbkopoojfekhnkhdbieeh",
         name: "Dark Reader",
         blurb: m.webext_catalog_dark_reader,
-        icon: "T66wTLk-gpBBGsMm0SDJJ3VaI8YM0Utr8NaGCSANmXOfb84K-9GmyXORLKoslfxtasKtQ4spDCdq_zlp_t3QQ6SI0A",
+        icon: iconDarkReader,
+      },
+      {
+        id: "chphlpgkkbolifaimnlloiipkdnihall",
+        name: "OneTab",
+        blurb: m.webext_catalog_onetab,
+        icon: iconOneTab,
+      },
+      {
+        id: "fpnmgdkabkmnadcjpehmlllkndpkmiak",
+        name: "Wayback Machine",
+        blurb: m.webext_catalog_wayback_machine,
+        icon: iconWaybackMachine,
       },
       {
         id: "dbepggeogbaibhgnhhndojpepiihcmeb",
         name: "Vimium",
         blurb: m.webext_catalog_vimium,
-        icon: "xHL8Vg17H_mzExbnVNQTQpEukXEBf4YEdmvexjSi-JSmIV3v_F5mBCgdIbSq_sGLqbLe-mYnavUufUDudf56MHaUxg",
+        icon: iconVimium,
+      },
+      {
+        id: "edacconmaakjimmfgnblocblbcdcpbko",
+        name: "Session Buddy",
+        blurb: m.webext_catalog_session_buddy,
+        icon: iconSessionBuddy,
       },
       {
         id: "clngdbkpkpeebahjckkjfobafhncgmne",
         name: "Stylus",
         blurb: m.webext_catalog_stylus,
-        icon: "2K8pc_5-2DkPam9b3oAWoITZ7IuIz68A5a8Ssg2_MNNHTPWPOPSBVTFdTmeVu9hi8GJxpKbvTekgwpeyGV6vXyBKH80",
+        icon: iconStylus,
       },
     ],
   },
@@ -90,28 +213,34 @@ export const catalog: CatalogGroup[] = [
     title: m.webext_group_video,
     entries: [
       {
-        id: "mnjggcdmjocbbbhaepdhchncahnbgone",
-        name: "SponsorBlock",
-        blurb: m.webext_catalog_sponsorblock,
-        icon: "oSoXDpjLX_iytl11_ROa1thmFI0xPk9pL8ttEtnFkBI8Cie0Ge8KxVFaokgBRscvUR1cXH4bVeG_C_Fl6kBw3A3_",
+        id: "nffaoalbilbmmfgbnbgppjihopabppdk",
+        name: "Video Speed Controller",
+        blurb: m.webext_catalog_video_speed,
+        icon: iconVideoSpeedController,
       },
       {
         id: "gebbhagfogifgggkldgodflihgfeippi",
         name: "Return YouTube Dislike",
         blurb: m.webext_catalog_ryd,
-        icon: "bVYgRXHiKIDU1EqkGv58alRhXu-SjSqi-I_yZHak8ZvZo_kYxMePoqa3pyIX931tzFkQ3b-EbxT7gSk8M1eOSdpDCQ8",
+        icon: iconReturnYouTubeDislike,
       },
       {
         id: "ponfpcnoihfmfllpaingbgckeeldkhle",
         name: "Enhancer for YouTube",
         blurb: m.webext_catalog_enhancer_youtube,
-        icon: "6PBcKpsoS15e2SUqMi6_KGBHsnvUdaRrRYXkHM3zkn5Zzj8TAEJp1_RtykaCfn1DCmyH9PJOKHrMbmtAOnQqtAU8aLs",
+        icon: iconEnhancerForYouTube,
       },
       {
-        id: "nffaoalbilbmmfgbnbgppjihopabppdk",
-        name: "Video Speed Controller",
-        blurb: m.webext_catalog_video_speed,
-        icon: "5yY1QQ__b0c2ZLmmi6mcdjX-9V3LAgXhgUaZtsICFTjeQV0S6xkVncmV99oEtU-H8WN8dZpWh_cycXSXoyffADsoYg",
+        id: "mnjggcdmjocbbbhaepdhchncahnbgone",
+        name: "SponsorBlock",
+        blurb: m.webext_catalog_sponsorblock,
+        icon: iconSponsorBlock,
+      },
+      {
+        id: "khncfooichmfjbepaaaebmommgaepoid",
+        name: "Unhook",
+        blurb: m.webext_catalog_unhook,
+        icon: iconUnhook,
       },
     ],
   },
@@ -119,28 +248,63 @@ export const catalog: CatalogGroup[] = [
     title: m.webext_group_saving,
     entries: [
       {
-        id: "ldgfbffkinooeloadekpmfoklnobpien",
-        name: "Raindrop.io",
-        blurb: m.webext_catalog_raindrop,
-        icon: "GsyRyzu8R26g2Caw3_AEcZD7opQ2CADN9wOdPdq8-Rr-zBvLgC_BOCQrYUwECEQ-4iub4XOQw36QMyWhyBhMF6Vf",
+        id: "pioclpoplcdbaefihamjohnefbikjilc",
+        name: "Evernote Web Clipper",
+        blurb: m.webext_catalog_evernote,
+        icon: iconEvernoteWebClipper,
       },
       {
         id: "knheggckgoiihginacbkhaalnibhilkk",
         name: "Notion Web Clipper",
         blurb: m.webext_catalog_notion,
-        icon: "vJmcSHco6MjgE6fCMmyb173fOOscaS2mvVESMrB5y8CutzXRT7mSGCHH510UdpqY4Rbh8BWRWHxjigVR5eZOwtc_oa8",
+        icon: iconNotionWebClipper,
       },
       {
-        id: "pioclpoplcdbaefihamjohnefbikjilc",
-        name: "Evernote Web Clipper",
-        blurb: m.webext_catalog_evernote,
-        icon: "SahOY_2p25P1sbFgMKeD-2UqdV4i0LsZ-Jvx9vCzGrjl_bTdgW4m2JvjGSG-nWZdHYuiOj_jb0SSh98G6A_KdIAqHg",
+        id: "ldgfbffkinooeloadekpmfoklnobpien",
+        name: "Raindrop.io",
+        blurb: m.webext_catalog_raindrop,
+        icon: iconRaindropIo,
       },
       {
         id: "ekhagklcjbdpajgpjgmbionohlpdbjgc",
         name: "Zotero Connector",
         blurb: m.webext_catalog_zotero,
-        icon: "HzPUK6_F5Y_uoIGRPkC3tKdP14BQSzW9MhP0eRZBb10bXFUvmBHWbzaa0V4xqU3qG8s0_jsqdWKY3n7x9QC4jh-dZCs",
+        icon: iconZoteroConnector,
+      },
+      {
+        id: "bjfhmglciegochdpefhhlphglcehbmek",
+        name: "Hypothesis",
+        blurb: m.webext_catalog_hypothesis,
+        icon: iconHypothesis,
+      },
+    ],
+  },
+  {
+    title: m.webext_group_productivity,
+    entries: [
+      {
+        id: "ghbmnnjooekpmoecnnnilnnbdlolhkhi",
+        name: "Google Docs Offline",
+        blurb: m.webext_catalog_google_docs_offline,
+        icon: iconGoogleDocsOffline,
+      },
+      {
+        id: "liecbddmkiiihnedobmlmillhodjkdmb",
+        name: "Loom",
+        blurb: m.webext_catalog_loom,
+        icon: iconLoom,
+      },
+      {
+        id: "jldhpllghnbhlbpcmnajkpdmadaolakh",
+        name: "Todoist",
+        blurb: m.webext_catalog_todoist,
+        icon: iconTodoist,
+      },
+      {
+        id: "pbmlfaiicoikhdbjagjbglnbfcbcojpj",
+        name: "Simplify Gmail",
+        blurb: m.webext_catalog_simplify_gmail,
+        icon: iconSimplifyGmail,
       },
     ],
   },
@@ -148,22 +312,58 @@ export const catalog: CatalogGroup[] = [
     title: m.webext_group_developers,
     entries: [
       {
-        id: "hlepfoohegkhhmjieoechaddaejaokhf",
-        name: "Refined GitHub",
-        blurb: m.webext_catalog_refined_github,
-        icon: "4N2wipmBVx1qK0R0E0XdADE31-8IuMylOtO9AyFopOA9i3IQKoCC5L4nYFDy55xpxpk6qKusHuqXyKJqvw8jcJaiqg",
+        id: "dhdgffkkebhmkfjojejmpbldmpobfkfo",
+        name: "Tampermonkey",
+        blurb: m.webext_catalog_tampermonkey,
+        icon: iconTampermonkey,
       },
       {
-        id: "bkhaagjahfmjljalopjnoealnfndnagc",
-        name: "Octotree",
-        blurb: m.webext_catalog_octotree,
-        icon: "wafm5uFaPRSo1RHMbhcdEghFzTPUfYo5GosPmBhkdNuYlGz8WigoAQM-8lulzuhWQBGTbbUyRvfoyIMDypJzuAVZ",
+        id: "fmkadmapgofadopljbjfkapdkoienihi",
+        name: "React Developer Tools",
+        blurb: m.webext_catalog_react_devtools,
+        icon: iconReactDeveloperTools,
+      },
+      {
+        id: "bhlhnicpbhignbdhedgjhgdocnmhomnp",
+        name: "ColorZilla",
+        blurb: m.webext_catalog_colorzilla,
+        icon: iconColorZilla,
+      },
+      {
+        id: "bcjindcccaagfpapjjmafapmmgkkhgoa",
+        name: "JSON Formatter",
+        blurb: m.webext_catalog_json_formatter,
+        icon: iconJSONFormatter,
       },
       {
         id: "gppongmhjkpfnbhagpmjfkannfbllamg",
         name: "Wappalyzer",
         blurb: m.webext_catalog_wappalyzer,
-        icon: "YssvlGeiyyXJhYYV8Fh4aeW_kuQ7zC-ap7kygvyLT59TZwnFWYy-9aHCfXpyKgBEwJhFajvSUFqpjiG_42yfQXIw2Q",
+        icon: iconWappalyzer,
+      },
+      {
+        id: "nhdogjmejiglipccpnnnanhbledajbpd",
+        name: "Vue.js devtools",
+        blurb: m.webext_catalog_vue_devtools,
+        icon: iconVueJsDevtools,
+      },
+      {
+        id: "jinjaccalgkegednnccohejagnlnfdag",
+        name: "Violentmonkey",
+        blurb: m.webext_catalog_violentmonkey,
+        icon: iconViolentmonkey,
+      },
+      {
+        id: "bkhaagjahfmjljalopjnoealnfndnagc",
+        name: "Octotree",
+        blurb: m.webext_catalog_octotree,
+        icon: iconOctotree,
+      },
+      {
+        id: "hlepfoohegkhhmjieoechaddaejaokhf",
+        name: "Refined GitHub",
+        blurb: m.webext_catalog_refined_github,
+        icon: iconRefinedGitHub,
       },
     ],
   },

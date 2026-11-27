@@ -414,3 +414,113 @@ pub enum DeviceEventFilter {
   /// Report all device events regardless of window focus.
   Never,
 }
+
+/// Returns the original OS-session shutdown deadline, if one has been requested.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn system_termination_deadline() -> Option<std::time::Instant> {
+  SYSTEM_TERMINATION.get().and_then(|termination| {
+    *termination
+      .deadline
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+  })
+}
+
+/// Installs the host's orderly shutdown entry point for OS session termination.
+/// The handler runs once on the UI thread. The host must request event-loop exit
+/// after cleanup; native termination waits at most `budget` while dispatching UI work.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn set_system_termination_handler(
+  budget: std::time::Duration,
+  reason: String,
+  request: impl Fn() + Send + Sync + 'static,
+) {
+  #[cfg(all(target_os = "macos", not(test)))]
+  let _ = reason;
+  let _ = SYSTEM_TERMINATION.set(SystemTermination {
+    budget,
+    #[cfg(any(target_os = "windows", test))]
+    reason,
+    request: Box::new(request),
+    deadline: std::sync::Mutex::new(None),
+  });
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) struct SystemTermination {
+  budget: std::time::Duration,
+  #[cfg(any(target_os = "windows", test))]
+  pub(crate) reason: String,
+  request: Box<dyn Fn() + Send + Sync>,
+  deadline: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) static SYSTEM_TERMINATION: std::sync::OnceLock<SystemTermination> =
+  std::sync::OnceLock::new();
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+impl SystemTermination {
+  pub(crate) fn request(&self) -> std::time::Instant {
+    let mut deadline = self
+      .deadline
+      .lock()
+      .unwrap_or_else(|error| error.into_inner());
+    if let Some(deadline) = *deadline {
+      return deadline;
+    }
+    let until = std::time::Instant::now() + self.budget;
+    *deadline = Some(until);
+    drop(deadline);
+    (self.request)();
+    until
+  }
+
+  #[cfg(any(target_os = "windows", test))]
+  pub(crate) fn wait_until(
+    deadline: std::time::Instant,
+    mut settled: impl FnMut() -> bool,
+    mut pump: impl FnMut(std::time::Instant),
+  ) -> bool {
+    while !settled() {
+      if std::time::Instant::now() >= deadline {
+        return false;
+      }
+      pump(deadline);
+    }
+    true
+  }
+}
+
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
+mod system_termination_tests {
+  use super::*;
+  #[test]
+  fn system_termination_enters_coordinator_once_and_waits_with_a_bound() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let called = calls.clone();
+    let termination = SystemTermination {
+      budget: std::time::Duration::from_millis(5),
+      reason: String::new(),
+      request: Box::new(move || {
+        called.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      }),
+      deadline: std::sync::Mutex::new(None),
+    };
+    assert!(termination.reason.is_empty());
+    let deadline = termination.request();
+    assert_eq!(termination.request(), deadline);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let pumped = std::cell::Cell::new(false);
+    assert!(SystemTermination::wait_until(
+      deadline,
+      || pumped.get(),
+      |_| pumped.set(true)
+    ));
+    assert!(!SystemTermination::wait_until(
+      deadline,
+      || false,
+      |_| std::thread::yield_now()
+    ));
+  }
+}

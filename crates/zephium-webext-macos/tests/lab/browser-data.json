@@ -1,0 +1,58 @@
+[
+  {
+    "load": "crates/zephium-webext-macos/tests/lab/browser-data",
+    "compat": true
+  },
+  {
+    "background": true
+  },
+  {
+    "page": "probe.html"
+  },
+  {
+    "sleep": 800
+  },
+  {
+    "eval": "return { sites: (await chrome.topSites.get()).map((site) => [site.url, site.title]), callback: await new Promise((res) => chrome.topSites.get((sites) => res(sites.length))) };",
+    "in": "page"
+  },
+  {
+    "eval": "const r = {}; r.search = (await chrome.history.search({ text: '', startTime: 0 })).map((i) => [i.id, i.url, i.visitCount, typeof i.lastVisitTime, i.typedCount]); r.visits = (await chrome.history.getVisits({ url: 'https://docs.example/guide' })).map((v) => [v.id, v.transition]).slice(0, 2); const visited = new Promise((res) => chrome.history.onVisited.addListener(function l(item) { chrome.history.onVisited.removeListener(l); res(item.url); })); const removed = new Promise((res) => chrome.history.onVisitRemoved.addListener(res)); await new Promise((res) => setTimeout(res, 400)); await chrome.history.addUrl({ url: 'https://added.example/' }); r.visited = await visited; await chrome.history.deleteUrl({ url: 'https://news.example/' }); r.removed = await removed; r.callback = await new Promise((res) => chrome.history.search({ text: 'guide', startTime: 0 }, (items) => res([items.length, chrome.runtime.lastError || null]))); r.badUrl = await chrome.history.addUrl({ url: 'nope' }).catch((e) => e.message); await chrome.history.deleteAll(); r.after = (await chrome.history.search({ text: '', startTime: 0 })).length; return r;",
+    "in": "page",
+    "timeout": 8000
+  },
+  {
+    "eval": "const r = {}; const tree = await chrome.bookmarks.getTree(); r.root = [tree[0].id, tree[0].children.map((n) => [n.id, n.parentId, n.index, n.title, Array.isArray(n.children)])]; r.children = (await chrome.bookmarks.getChildren('4')).map((n) => [n.id, n.url]); r.get = (await chrome.bookmarks.get(['5', '0'])).map((n) => n.id); r.recent = (await chrome.bookmarks.getRecent(1)).map((n) => n.title); r.search = (await chrome.bookmarks.search('docs')).map((n) => n.id); r.searchObject = (await chrome.bookmarks.search({ title: 'News' })).map((n) => n.id); r.subTree = (await chrome.bookmarks.getSubTree('4'))[0].children.length; const heard = []; for (const name of ['onCreated', 'onChanged', 'onMoved', 'onRemoved']) chrome.bookmarks[name].addListener((id, info) => heard.push([name, id])); await new Promise((res) => setTimeout(res, 400)); const made = await chrome.bookmarks.create({ parentId: '4', title: 'Made', url: 'https://made.example/' }); r.made = [made.id, made.parentId, made.index]; r.bar = await chrome.bookmarks.create({ parentId: '1', title: 'x' }).catch((e) => e.message); r.updated = (await chrome.bookmarks.update(made.id, { title: 'Renamed' })).title; r.moved = await chrome.bookmarks.move(made.id, { parentId: '0', index: 0 }).then((n) => [n.parentId, n.index]); r.nonEmpty = await chrome.bookmarks.remove('4').catch((e) => e.message); await chrome.bookmarks.removeTree('4'); r.rootRemove = await chrome.bookmarks.remove('0').catch((e) => e.message); r.missing = await chrome.bookmarks.get('999').catch((e) => e.message); r.callback = await new Promise((res) => chrome.bookmarks.get('6', (nodes) => res(nodes.map((n) => n.title)))); await new Promise((res) => setTimeout(res, 300)); r.heard = heard; return r;",
+    "in": "page",
+    "timeout": 8000
+  },
+  {
+    "eval": "const r = {}; r.closed = (await chrome.sessions.getRecentlyClosed()).map((s) => [s.tab.sessionId, s.tab.url, typeof s.lastModified]); r.one = (await chrome.sessions.getRecentlyClosed({ maxResults: 1 })).length; r.tooMany = await chrome.sessions.getRecentlyClosed({ maxResults: 26 }).catch((e) => e.message); const changed = new Promise((res) => chrome.sessions.onChanged.addListener(() => res('changed'))); await new Promise((res) => setTimeout(res, 400)); r.restored = (await chrome.sessions.restore('s1')).tab.url; r.changed = await changed; r.newest = await new Promise((res) => chrome.sessions.restore((session) => res(session.tab.sessionId))); r.gone = await chrome.sessions.restore('s1').catch((e) => e.message); r.devices = await chrome.sessions.getDevices(); return r;",
+    "in": "page",
+    "timeout": 8000
+  },
+  {
+    "eval": "const r = {}; const sleep = (ms) => new Promise((res) => setTimeout(res, ms)); const created = new Promise((res) => chrome.downloads.onCreated.addListener((item) => res([item.id, item.state, item.url, item.filename]))); const changed = new Promise((res) => chrome.downloads.onChanged.addListener((delta) => { if (delta.state) res([delta.id, delta.state.previous, delta.state.current, delta.exists && delta.exists.current]); })); const erased = new Promise((res) => chrome.downloads.onErased.addListener(res)); await sleep(500); r.listed = (await chrome.downloads.search({})).map((item) => [item.id, item.state, item.filename]); r.id = await chrome.downloads.download({ url: 'https://files.example/report.pdf', filename: 'reports/q3.pdf' }); r.created = await created; r.changed = await changed; r.search = (await chrome.downloads.search({ query: ['q3'], state: 'complete' })).map((item) => item.id); r.badUrl = await chrome.downloads.download({ url: 'file:///etc/hosts' }).catch((e) => e.message); r.open = await chrome.downloads.open(r.id).catch((e) => e.message); r.erase = await chrome.downloads.erase({ id: r.id }); r.erased = await erased; const blob = new Blob(['hello'], { type: 'text/plain' }); r.blob = await chrome.downloads.download({ url: URL.createObjectURL(blob), filename: 'hello.txt' }); r.unknown = await chrome.downloads.pause(999).catch((e) => e.message); return r;",
+    "in": "page",
+    "timeout": 8000
+  },
+  {
+    "sleep": 500
+  },
+  {
+    "eval": "return ((await chrome.storage.local.get('seen')).seen || []).map((s) => [s.name, String(JSON.stringify(s.args[0])).slice(0, 60)]);",
+    "in": "page"
+  },
+  {
+    "load": "crates/zephium-webext-macos/tests/lab/browser-data-optional",
+    "compat": true,
+    "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  {
+    "page": "probe.html"
+  },
+  {
+    "eval": "const r = {}; r.before = await chrome.history.search({ text: '', startTime: 0 }).then(() => 'answered', (e) => e.message); r.granted = await chrome.permissions.request({ permissions: ['history'] }); r.after = await chrome.history.search({ text: '', startTime: 0 }).then((items) => items.length, (e) => e.message); r.removed = await chrome.permissions.remove({ permissions: ['history'] }); r.again = await chrome.history.search({ text: '', startTime: 0 }).then(() => 'answered', (e) => e.message); return r;",
+    "in": "page"
+  }
+]

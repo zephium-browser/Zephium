@@ -18,7 +18,7 @@ import { loadNewTab } from "$features/newtab";
  */
 declare module "vitest/browser" {
   interface BrowserCommands {
-    webkitFootprint: () => Promise<import("../../../../vitest.bench-commands").WebKitFootprint>;
+    webkitFootprint: () => Promise<import("$shared/testing/webkit-footprint").WebKitFootprint>;
   }
 }
 
@@ -26,7 +26,10 @@ const mode = String(import.meta.env.VITE_NEWTAB_COST ?? "");
 vi.mock("$shared/sky", async (original) => {
   const real = await original<Record<string, unknown>>();
   if (import.meta.env.VITE_NEWTAB_COST !== "bare") return real;
-  return { ...real, SCENES: { day: "", night: "" }, decode: () => new Promise<void>(() => {}) };
+  return {
+    ...real,
+    SkyPrint: (await import("./StageStub.svelte")).default,
+  };
 });
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");

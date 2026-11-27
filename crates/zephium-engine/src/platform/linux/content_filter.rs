@@ -121,7 +121,12 @@ pub(crate) fn install_scoped_on_view(
     view: &wry::WebView,
     policy: &NativeContentPolicy,
     pause: &crate::platform::content_pause::ContentPause,
+    protection: &crate::platform::content_protection::ViewProtection,
+    // WebKit attributes each request to its own frame.
+    _top_document: &crate::platform::top_document::TopDocument,
 ) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
+    // A content rule list is on the view whole, or the install fails with it.
+    protection.settle(false);
     let NativeContentPolicy::Declarative { filter, .. } = policy else {
         return Ok(ContentPolicyRegistration::allow_all());
     };
@@ -457,7 +462,7 @@ struct CompileContext<F> {
     _cancellable: webkit2gtk::gio::Cancellable,
     owner_context: glib::MainContext,
     identifier: CString,
-    encoded: Option<Arc<str>>,
+    encoded: Option<Arc<dyn zephium_core::blocker::DeclarativeRuleText>>,
     _bytes: Option<glib::Bytes>,
     artifact_digest: [u8; 32],
     done: Option<F>,
@@ -494,7 +499,7 @@ where
 
 pub(crate) fn compile<F>(
     cache: &Path,
-    encoded: Arc<str>,
+    encoded: Arc<dyn zephium_core::blocker::DeclarativeRuleText>,
     artifact_digest: [u8; 32],
     done: F,
 ) -> ContentPolicyCompilationCancellation
@@ -627,7 +632,9 @@ where
         let encoded = context
             .encoded
             .take()
-            .ok_or(ContentRuleApplyFailure::NativeCompilation)?;
+            .ok_or(ContentRuleApplyFailure::NativeCompilation)?
+            .load()
+            .ok_or(ContentRuleApplyFailure::InvalidArtifact)?;
         context._bytes = Some(glib::Bytes::from_owned(EncodedRules(encoded)));
         let bytes = context
             ._bytes
@@ -966,8 +973,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires Xvfb and WebKitGTK at the supported security floor; Fedora CI materializes and compiles the exact bundled EasyList + EasyPrivacy artifact"]
-    fn exact_bundled_easylist_and_easyprivacy_compile_and_reload_natively() {
+    #[ignore = "requires Xvfb and WebKitGTK at the supported security floor; Fedora CI materializes and compiles the exact bundled filter list artifact"]
+    fn exact_bundled_filter_lists_compile_and_reload_natively() {
         crate::platform::linux::enforce_runtime_security_floor()
             .expect("test runner must use supported WebKitGTK");
         gtk::init().expect("GTK requires an Xvfb/Wayland display for native WebKit tests");

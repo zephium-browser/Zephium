@@ -419,17 +419,6 @@ pub fn check_options(mask: NetworkFilterMask, request: &request::Request) -> boo
 }
 
 #[inline]
-pub fn check_options_without_attribution(
-    mask: NetworkFilterMask,
-    request: &request::Request,
-) -> bool {
-    mask.check_cpt_allowed(&request.request_type)
-        && (!request.is_https || mask.for_https())
-        && (!request.is_http || mask.for_http())
-        && NetworkFilterMask::check_method_allowed(mask, request.method.as_ref())
-}
-
-#[inline]
 pub fn check_included_domains_mapped(
     opt_domains: Option<&[u32]>,
     request: &request::Request,

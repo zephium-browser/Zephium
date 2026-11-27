@@ -1,6 +1,7 @@
 //! Safari keeps bookmarks in a property list and history in a database, both
 //! inside a directory macOS protects: reading them needs Full Disk Access.
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use plist::Value;
@@ -39,7 +40,17 @@ pub(crate) fn source(locations: &Locations) -> Option<Source> {
 /// The favorites bar opens at the top of the import; the menu and the
 /// reading list keep their own folder.
 pub(crate) fn bookmarks(locations: &Locations) -> Result<Vec<ImportNode>, ImportError> {
-    let bytes = std::fs::read(root(locations).join("Bookmarks.plist"))?;
+    let path = root(locations).join("Bookmarks.plist");
+    if std::fs::metadata(&path)?.len() > 32 * 1024 * 1024 {
+        return Err(ImportError::Unreadable);
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err(ImportError::Unreadable);
+    }
     parse_bookmarks(&bytes)
 }
 
@@ -148,6 +159,62 @@ pub(crate) fn history(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn bookmark_stream_cannot_exceed_the_read_limit() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let locations = Locations::scratch(Os::Mac, directory.path());
+        std::fs::create_dir_all(root(&locations)).unwrap();
+        let path = root(&locations).join("Bookmarks.plist");
+        assert!(std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        // A pipe reports zero bytes of metadata but supplies more than the limit.
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let mut bytes =
+                br#"<?xml version="1.0"?><plist version="1.0"><dict/></plist>"#.to_vec();
+            bytes.resize(32 * 1024 * 1024 + 1, b' ');
+            file.write_all(&bytes).unwrap();
+            // A bounded reader closes without consuming the rest of the stream.
+            bytes.fill(b' ');
+            file.write_all(&bytes)
+        });
+        let result = bookmarks(&locations);
+        let tail = writer.join().unwrap();
+        assert!(matches!(result, Err(ImportError::Unreadable)));
+        assert_eq!(tail.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn oversized_bookmarks_are_refused_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let locations = Locations::scratch(Os::Mac, directory.path());
+        std::fs::create_dir_all(root(&locations)).unwrap();
+        let path = root(&locations).join("Bookmarks.plist");
+        let mut bytes = br#"<?xml version="1.0"?><plist version="1.0"><dict/></plist>"#.to_vec();
+        bytes.resize(32 * 1024 * 1024 + 1, b' ');
+        std::fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Metadata remains readable, but opening the contents would fail
+            // with Permission rather than the size refusal below.
+            // A privileged runner can still open it; the size check holds either way.
+            if let Err(error) = std::fs::File::open(&path) {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+        }
+        assert!(matches!(
+            bookmarks(&locations),
+            Err(ImportError::Unreadable)
+        ));
+    }
+
     use super::*;
 
     #[test]

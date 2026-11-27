@@ -23,6 +23,7 @@ test("resuming after a pause starts a fresh time-left estimate", async () => {
     received: "0",
     total: "10000",
     error: null,
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => ({
     kind: call.kind === "list" ? "page" : "updates",
@@ -50,6 +51,11 @@ test("resuming after a pause starts a fresh time-left estimate", async () => {
   entry = { ...entry, revision: "00000005", received: "2000" };
   native.listener?.({ payload: { profile } });
   await expect.poll(() => screen.container.textContent).toContain("8 sec left");
+  time = 603_000;
+  entry = { ...entry, revision: "00000006", received: "10000" };
+  native.listener?.({ payload: { profile } });
+  await expect.element(screen.getByText("9.8 KB of 9.8 KB", { exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
   await screen.unmount();
 });
 vi.mock("$shared/ipc/bindings", async () => {
@@ -82,6 +88,7 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
     received: "10",
     total: "100",
     error: null,
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
@@ -145,6 +152,7 @@ test("a folder the system refused says so once and offers another folder", async
     received: "0",
     total: null,
     error: "permission",
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
@@ -194,6 +202,7 @@ test.each<[DownloadError, string]>([
       received: "10",
       total: "100",
       error,
+      insecure: false,
     };
     native.call.mockImplementation(async (_profile: string, call: DownloadCall) =>
       call.kind === "list"
@@ -236,6 +245,7 @@ test("retry resumes a retained interrupted transfer by ID and keeps cancellation
     received: "10",
     total: "100",
     error: "connection_lost",
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "resume") {
@@ -284,6 +294,7 @@ test("a resumable short response explains retry without presenting a finished co
     received: "10",
     total: "100",
     error: "integrity",
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) =>
     call.kind === "list"
@@ -354,6 +365,7 @@ const base: DownloadView = {
   received: "10",
   total: "100",
   error: null,
+  insecure: false,
 };
 
 test("a receiving download can be paused and then resumed, and a pause is not shown as a problem", async () => {

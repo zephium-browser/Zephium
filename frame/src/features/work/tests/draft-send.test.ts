@@ -55,4 +55,20 @@ describe("a draft's send follows its run", () => {
   test("a draft without a run stays a draft", () => {
     expect(draftSend(projection, undefined)).toEqual({ send: "draft" });
   });
+
+  test.each([
+    ["running", "running", "sending"],
+    ["completed", "succeeded", "sent"],
+    ["completed", "outcome_unknown", "draft"],
+    ["completed", "cancelled", "draft"],
+  ] as const)("a restored draft finds its durable grant (%s, %s)", (status, step, expected) => {
+    const run = finished(sentAs(step), status);
+    const capability = run.spec.nodes[0]!.capability;
+    if (capability.kind === "agent") capability.grant.draft = "draft-artifact";
+    const unrelated = finished(sentAs("succeeded"), "completed");
+    unrelated.id = "unrelated-run";
+    const restored = structuredClone({ ...projection, executions: [run, unrelated] });
+    expect(draftSend(restored, "draft-artifact").send).toBe(expected);
+    expect(draftSend(restored, "another-draft")).toEqual({ send: "draft" });
+  });
 });

@@ -35,12 +35,10 @@ pub enum EngineDataCall {
     /// The sites the profile holds data for.
     Sites,
     /// Everything stored for `site`: its registrable domain or exact host.
-    /// `origin` names the page the request came from, for engines that can
-    /// only reach storage origin by origin; it is always on `site`.
-    ForgetSite {
-        site: String,
-        origin: Option<String>,
-    },
+    /// `origins` are page origins on `site` that Zephium knows of (the page
+    /// the request came from, open tabs, history), for engines that can only
+    /// reach storage origin by origin.
+    ForgetSite { site: String, origins: Vec<String> },
 }
 
 /// A host the engine holds data for.
@@ -64,6 +62,9 @@ pub enum EngineDataFailure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineDataReply {
     Cleared,
+    /// Some of what was asked was removed, and some may remain: a cookie the
+    /// engine would not delete, or origins it could not reach.
+    PartlyCleared,
     Sites {
         sites: Vec<EngineSite>,
         /// The engine can only name sites by some of what it holds.
@@ -152,6 +153,17 @@ pub fn page_origin_host(origin: &str) -> Option<String> {
     (matches!(url.scheme(), "http" | "https") && url.origin().ascii_serialization() == origin)
         .then(|| url.host_str().map(str::to_owned))
         .flatten()
+}
+
+/// Most page origins one site removal names.
+pub const MAX_SITE_ORIGINS: usize = 256;
+
+/// The page origin of `url` when it is a web page on `site`, with its port.
+pub fn site_origin(url: &str, site: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok()?;
+    let host = url.host_str()?;
+    (matches!(url.scheme(), "http" | "https") && host_is_on_site(host, site))
+        .then(|| url.origin().ascii_serialization())
 }
 
 /// Whether `host` is `site` or one of its subdomains.
@@ -279,5 +291,30 @@ mod tests {
         ] {
             assert!(!kinds.is_empty());
         }
+    }
+
+    #[test]
+    fn a_site_origin_keeps_its_port_and_stays_on_the_site() {
+        let on = |url: &str| site_origin(url, "example.com");
+        assert_eq!(
+            on("https://www.example.com/a?b"),
+            Some("https://www.example.com".into())
+        );
+        assert_eq!(
+            on("http://example.com:8080/"),
+            Some("http://example.com:8080".into())
+        );
+        assert_eq!(
+            on("https://example.com:443/"),
+            Some("https://example.com".into())
+        );
+        assert_eq!(on("https://notexample.com/"), None);
+        assert_eq!(on("https://example.com.evil.test/"), None);
+        assert_eq!(on("file:///example.com"), None);
+        assert_eq!(on("not a url"), None);
+        assert_eq!(
+            site_origin("http://[::1]:3000/x", "[::1]"),
+            Some("http://[::1]:3000".into())
+        );
     }
 }

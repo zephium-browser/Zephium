@@ -84,6 +84,12 @@ fn local_v4(address: Ipv4Addr) -> bool {
         || (a == 100 && (64..128).contains(&b))
 }
 
+/// Whether a page at `url` travels unencrypted beyond the person's own
+/// network: plain http to any other host.
+pub fn crosses_network_unencrypted(url: &Url) -> bool {
+    url.scheme() == "http" && !url.host_str().is_some_and(is_local_host)
+}
+
 /// Whether a failed https address may offer the way past its certificate.
 pub fn may_continue(url: &Url) -> bool {
     url.scheme() == "https" && url.host_str().is_some_and(is_local_host)
@@ -185,6 +191,21 @@ impl ProfileCertificateExceptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_http_beyond_the_local_network_crosses_it_unencrypted() {
+        for (url, expected) in [
+            ("http://shop.example/login", true),
+            ("http://203.0.113.7/", true),
+            ("https://shop.example/login", false),
+            ("http://router.lan/", false),
+            ("http://192.168.0.1/", false),
+            ("http://localhost:3000/", false),
+        ] {
+            let url = Url::parse(url).unwrap();
+            assert_eq!(crosses_network_unencrypted(&url), expected, "{url}");
+        }
+    }
 
     fn url(value: &str) -> Url {
         Url::parse(value).unwrap()

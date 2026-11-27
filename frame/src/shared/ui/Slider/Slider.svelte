@@ -97,7 +97,7 @@
   function commit() {
     if (!editing) return;
     editing = false;
-    const parsed = Number(draft.trim());
+    const parsed = draft.trim() ? Number(draft.trim()) : Number.NaN;
     if (Number.isFinite(parsed)) {
       set(parsed);
       oncommit?.(value);

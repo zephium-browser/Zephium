@@ -26,6 +26,7 @@ export class BookmarksSession {
   highlighted = $state<string | null>(null);
 
   private reads = 0;
+  private refreshPending = false;
   private searchTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(profile: string) {
@@ -71,6 +72,10 @@ export class BookmarksSession {
       }
       this.error = response.error;
     }
+    if (this.refreshPending) {
+      this.refreshPending = false;
+      if (response.kind === "listing" || response.kind === "results") await this.refresh();
+    }
   }
 
   open(folder: string | null) {
@@ -115,7 +120,9 @@ export class BookmarksSession {
       this.error = response.error;
       return false;
     }
-    await this.refresh();
+    // A pending navigation still owns the next view; refresh its destination.
+    if (this.loading) this.refreshPending = true;
+    else await this.refresh();
     return response.kind === "saved" ? response.id : null;
   }
 
@@ -185,6 +192,7 @@ export class BookmarksSession {
 
   stop() {
     this.reads += 1;
+    this.refreshPending = false;
     clearTimeout(this.searchTimer);
   }
 }

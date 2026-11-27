@@ -63,6 +63,7 @@ impl Shell {
         // residency, or split topology. A captured divider path cannot cross
         // that boundary; resize/sidebar geometry updates deliberately bypass
         // `commit` and remain draggable through path-based recomputation.
+        self.capture_departed_tab_preview();
         self.drop_divider();
         let mut native = self.apply(effects);
         self.schedule_persist();
@@ -71,6 +72,7 @@ impl Shell {
         // request first would permanently lose the transition.
         native.record(self.relayout());
         self.maintain_views();
+        self.reconcile_recent_tabs();
         self.project_items();
         self.project_private_if_changed();
         self.project_recently_closed_if_changed();
@@ -169,6 +171,7 @@ impl Shell {
                         continue;
                     }
                     self.clear_capacity_status(id);
+                    let url = self.https_first(id, &url).unwrap_or(url);
                     if !self
                         .engine
                         .create_view(id, self.partition_of(id), &url, bounds)
@@ -209,6 +212,7 @@ impl Shell {
                         // that this batch deliberately did not create.
                         continue;
                     }
+                    let url = self.https_first(id, &url).unwrap_or(url);
                     if !self.engine.navigate(id, &url, request) {
                         self.items.navigation_failed(id, request);
                         native.rejected = true;
@@ -217,6 +221,7 @@ impl Shell {
                     }
                 }
                 Effect::Close { id } => {
+                    self.https_first_forget(id);
                     self.record_view_retirement(id);
                     self.zoom.pending.remove(&id);
                     native.record(self.engine.close(id));

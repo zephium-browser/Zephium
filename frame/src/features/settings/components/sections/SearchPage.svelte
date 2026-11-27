@@ -4,10 +4,12 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Select from "$shared/ui/Select";
+  import EngineMark from "$shared/ui/EngineMark";
   import Field from "$shared/ui/Field";
   import Button from "$shared/ui/Button";
   import Switch from "$shared/ui/Switch";
   import { untrack } from "svelte";
+  import SearchShortcuts from "../SearchShortcuts.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let customUrl = $state(untrack(() => preferences.value("search.custom-url")));
@@ -36,6 +38,14 @@
   });
   let saved = $derived(preferences.value("search.custom-url"));
   let engine = $derived(preferences.value("search.engine"));
+
+  async function saveCustomUrl(event: SubmitEvent) {
+    event.preventDefault();
+    if (invalid || preferences.saving()) return;
+    const submitted = customUrl;
+    await preferences.set("search.custom-url", submitted);
+    if (customUrl === submitted && !preferences.saveFailed()) editing = false;
+  }
 </script>
 
 <SettingsGroup title={m.section_search()} description={m.search_local_description()}>
@@ -57,7 +67,9 @@
         { value: "custom", label: m.search_custom(), disabled: !saved },
       ]}
       onchange={(value) => void preferences.set("search.engine", value)}
-    />
+    >
+      {#snippet lead(value)}<EngineMark engine={value} />{/snippet}
+    </Select>
   </SettingsRow>
 
   <SettingsRow
@@ -82,15 +94,7 @@
     title={m.search_custom()}
     description={m.search_custom_description()}
   >
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        if (invalid) return;
-        void preferences.set("search.custom-url", customUrl).then(() => {
-          if (!preferences.saveFailed()) editing = false;
-        });
-      }}
-    >
+    <form onsubmit={saveCustomUrl}>
       <Field
         label={m.search_custom()}
         labelHidden
@@ -109,6 +113,8 @@
     </form>
   </SettingsRow>
 </SettingsGroup>
+
+<SearchShortcuts />
 
 <style>
   form {

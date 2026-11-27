@@ -41,11 +41,24 @@ export class ZoomLevelsSession {
       this.lifetime.signal,
     );
     if (answer.state === "aborted") return false;
-    this.busy = false;
     if (answer.state !== "received" || answer.value.kind !== "levels") {
+      if (call.kind !== "levels") {
+        const refreshed = await observe(
+          Promise.resolve().then(() => commands.zoomCall(this.profile, { kind: "levels" })),
+          TIMEOUT,
+          this.lifetime.signal,
+        );
+        if (refreshed.state === "aborted") return false;
+        if (refreshed.state === "received" && refreshed.value.kind === "levels") {
+          this.loaded = true;
+          this.levels = refreshed.value.levels;
+        }
+      }
+      this.busy = false;
       this.unavailable = true;
       return false;
     }
+    this.busy = false;
     this.unavailable = false;
     this.loaded = true;
     this.levels = answer.value.levels;

@@ -26,13 +26,21 @@ pub(crate) enum UpdateStatus {
     Ready {
         version: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        retry_reason: Option<String>,
+        retry_reason: Option<UpdateRetryReason>,
     },
     ManualInstall {
         version: String,
     },
     Installing,
     Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum UpdateRetryReason {
+    PreviousInstallIncomplete,
+    WorkNotSaved,
+    ActivityCheckFailed,
 }
 
 struct Parked {
@@ -55,6 +63,14 @@ static RELAUNCH_AFTER_EXIT: AtomicBool = AtomicBool::new(false);
 static INSTALL_AFTER_EXIT: Mutex<Option<(Parked, std::path::PathBuf)>> = Mutex::new(None);
 
 const SUPPORTED: bool = !cfg!(debug_assertions) && cfg!(any(target_os = "macos", windows));
+
+fn supported_identity(native_release: bool, identifier: &str) -> bool {
+    native_release && identifier == "app.zephium"
+}
+
+fn supported(app: &tauri::AppHandle) -> bool {
+    supported_identity(SUPPORTED, &app.config().identifier)
+}
 /// The release's highlights, kept from its download for the first launch of it.
 const HIGHLIGHTS: &str = "updates.highlights";
 const MAX_HIGHLIGHTS: usize = 5;
@@ -65,8 +81,8 @@ const NATIVE_FIRST_CHECK: Duration = Duration::from_secs(5 * 60);
 const NATIVE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 impl Updates {
-    fn status(&self) -> UpdateStatus {
-        if !SUPPORTED {
+    fn status(&self, supported: bool) -> UpdateStatus {
+        if !supported {
             return UpdateStatus::Unavailable;
         }
         lock(&self.status).clone().unwrap_or(UpdateStatus::Idle)
@@ -107,7 +123,8 @@ pub(crate) fn update_status(
     caller: WebviewWindow,
     updates: tauri::State<'_, Updates>,
 ) -> Option<UpdateStatus> {
-    authorize(&caller, CallerPolicy::Main, "update_status").then(|| updates.status())
+    authorize(&caller, CallerPolicy::Main, "update_status")
+        .then(|| updates.status(supported(caller.app_handle())))
 }
 
 /// Checks for a newer release and downloads it. Returns the resulting status;
@@ -126,7 +143,7 @@ pub(crate) async fn update_check(
 
 async fn run_check(app: &tauri::AppHandle) -> UpdateStatus {
     let updates = app.state::<Updates>();
-    if let Err(status) = updates.begin_check(SUPPORTED) {
+    if let Err(status) = updates.begin_check(supported(app)) {
         return status;
     }
     let next = match check_and_download(app, &updates).await {
@@ -143,7 +160,7 @@ async fn run_check(app: &tauri::AppHandle) -> UpdateStatus {
 /// Checks on native's own schedule, unless the person turned automatic
 /// checks off, and tells the window what changed.
 pub(crate) fn schedule_native_checks(app: &tauri::AppHandle) {
-    if !SUPPORTED {
+    if !supported(app) {
         return;
     }
     let app = app.clone();
@@ -316,10 +333,9 @@ async fn check_and_download(
     };
     #[cfg(not(target_os = "windows"))]
     let recovered: Option<Artifact> = None;
-    let retry_reason = recovered.as_ref().map(|_| {
-        "The previous update did not finish. Your downloaded update is still ready to install."
-            .to_owned()
-    });
+    let retry_reason = recovered
+        .as_ref()
+        .map(|_| UpdateRetryReason::PreviousInstallIncomplete);
     let artifact = match recovered {
         Some(artifact) => artifact,
         None => artifact::download(&update.download_url, key, update.signature.clone()).await?,
@@ -337,62 +353,79 @@ async fn check_and_download(
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn update_relaunch(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
-    if !authorize(&caller, CallerPolicy::Main, "update_relaunch") {
+    if !authorize(&caller, CallerPolicy::Main, "update_relaunch") || !supported(&app) {
         return false;
     }
     let updates = app.state::<Updates>();
     if shutdown_started(&app) || resource_close::is_closing() {
         return false;
     }
-    let version = {
+    let (version, retry_reason) = {
         let mut status = lock(&updates.status);
-        let Some(UpdateStatus::Ready { version, .. }) = status.as_ref() else {
+        let Some(UpdateStatus::Ready {
+            version,
+            retry_reason,
+        }) = status.as_ref()
+        else {
             return false;
         };
-        let version = version.clone();
+        let ready = (version.clone(), retry_reason.clone());
         *status = Some(UpdateStatus::Installing);
-        version
+        ready
     };
     updates.staged.store(false, Ordering::Release);
     let install_app = app.clone();
-    resource_close::request_with_result(app, move |saved| {
-        let updates = install_app.state::<Updates>();
-        if !saved || shutdown_started(&install_app) {
-            updates.set(UpdateStatus::Ready { version, retry_reason: Some("Your work could not be saved. The update is still ready; try again after saving.".into()) });
-            resource_close::cancel_prepared(&install_app);
-            return;
-        }
-        let Some(parked) = lock(&updates.parked).take() else {
-            updates.set(UpdateStatus::Failed);
-            resource_close::cancel_prepared(&install_app);
-            return;
-        };
-        let worker_app = install_app.clone();
-        let spawned = std::thread::Builder::new()
-            .name("zephium-update-install".into())
-            .spawn(move || {
-                let next_version = parked.update.version.clone();
-                if let Err(error) = stage(parked, &worker_app) {
-                    write_diagnostic(format_args!("updates: install failed: {error}"));
-                    worker_app.state::<Updates>().set(match error {
-                        InstallError::Manual => UpdateStatus::ManualInstall {
-                            version: next_version,
-                        },
-                        InstallError::Failed(_) => UpdateStatus::Failed,
-                    });
-                    resource_close::cancel_prepared(&worker_app);
-                    return;
-                }
-                worker_app
-                    .state::<Updates>()
-                    .staged
-                    .store(true, Ordering::Release);
-                worker_app.exit(0);
+    resource_close::confirm_update_relaunch(app, move |confirmed| {
+        if confirmed != Ok(true) || shutdown_started(&install_app) {
+            install_app.state::<Updates>().set(UpdateStatus::Ready {
+                version,
+                retry_reason: confirmed.err().or(retry_reason),
             });
-        if spawned.is_err() {
-            updates.set(UpdateStatus::Failed);
-            resource_close::cancel_prepared(&install_app);
+            return;
         }
+        let app = install_app.clone();
+        resource_close::request_with_result(app, move |saved| {
+            let updates = install_app.state::<Updates>();
+            if !saved || shutdown_started(&install_app) {
+                updates.set(UpdateStatus::Ready {
+                    version,
+                    retry_reason: Some(UpdateRetryReason::WorkNotSaved),
+                });
+                resource_close::cancel_prepared(&install_app);
+                return;
+            }
+            let Some(parked) = lock(&updates.parked).take() else {
+                updates.set(UpdateStatus::Failed);
+                resource_close::cancel_prepared(&install_app);
+                return;
+            };
+            let worker_app = install_app.clone();
+            let spawned = std::thread::Builder::new()
+                .name("zephium-update-install".into())
+                .spawn(move || {
+                    let next_version = parked.update.version.clone();
+                    if let Err(error) = stage(parked, &worker_app) {
+                        write_diagnostic(format_args!("updates: install failed: {error}"));
+                        worker_app.state::<Updates>().set(match error {
+                            InstallError::Manual => UpdateStatus::ManualInstall {
+                                version: next_version,
+                            },
+                            InstallError::Failed(_) => UpdateStatus::Failed,
+                        });
+                        resource_close::cancel_prepared(&worker_app);
+                        return;
+                    }
+                    worker_app
+                        .state::<Updates>()
+                        .staged
+                        .store(true, Ordering::Release);
+                    worker_app.exit(0);
+                });
+            if spawned.is_err() {
+                updates.set(UpdateStatus::Failed);
+                resource_close::cancel_prepared(&install_app);
+            }
+        });
     });
     true
 }
@@ -434,7 +467,7 @@ impl From<tauri_plugin_updater::Error> for InstallError {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn restore(app: &tauri::AppHandle, directory: &std::path::Path) {
-    if !SUPPORTED {
+    if !supported(app) {
         return;
     }
     let path = directory.join("pending-update");
@@ -531,12 +564,21 @@ fn install_on_quit(app: &tauri::AppHandle) {
     let Some(updates) = app.try_state::<Updates>() else {
         return;
     };
-    if !matches!(updates.status(), UpdateStatus::Ready { .. }) {
+    if !matches!(updates.status(supported(app)), UpdateStatus::Ready { .. }) {
         return;
     }
     let Some(mut parked) = lock(&updates.parked).take() else {
         return;
     };
+    if !app
+        .try_state::<ShutdownCoordinator>()
+        .is_some_and(|shutdown| shutdown.watchdog.begin_install())
+    {
+        write_diagnostic(format_args!(
+            "updates: install on quit postponed because the shutdown deadline expired"
+        ));
+        return;
+    }
     let result = parked
         .artifact
         .verified_bytes()
@@ -550,7 +592,8 @@ fn install_on_quit(app: &tauri::AppHandle) {
 }
 
 /// Called after the WebView2 runtime has been released. On success the
-/// installer takes over and this process exits; it relaunches Zephium itself.
+/// installer takes over; the caller then flushes logs and terminates this
+/// process. The installer relaunches Zephium itself.
 #[cfg(target_os = "windows")]
 pub(crate) fn finish_after_exit(clean: bool) {
     let Some((mut parked, _path)) = lock(&INSTALL_AFTER_EXIT).take() else {
@@ -578,9 +621,12 @@ pub(crate) fn finish_after_exit(clean: bool) {
 #[cfg(target_os = "windows")]
 fn explain_deferred_update() {
     rfd::MessageDialog::new()
-        .set_title("Zephium update postponed")
+        .set_title(menu_text::label("Zephium update postponed"))
         .set_level(rfd::MessageLevel::Warning)
-        .set_description("Zephium could not finish the update safely. The downloaded update has been kept. Open Zephium again to retry from Settings → About.")
+        .set_description(menu_text::message(
+            "native_update_postponed_message",
+            "Zephium could not finish the update safely. The downloaded update has been kept. Open Zephium again to retry from Settings → About.",
+        ))
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
 }
@@ -636,6 +682,59 @@ mod highlight_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_release_production_identity_can_use_the_production_updater() {
+        assert!(supported_identity(true, "app.zephium"));
+        for identifier in [
+            "app.zephium.dev",
+            "app.zephium.protection-qa",
+            "app.zephium.files-qa",
+            "app.zephium.webext-qa",
+            "",
+            "app.zephium.evil",
+        ] {
+            assert!(!supported_identity(true, identifier), "{identifier}");
+        }
+        assert!(!supported_identity(false, "app.zephium"));
+    }
+
+    #[test]
+    fn retry_reasons_are_typed_localization_keys() {
+        for (reason, expected) in [
+            (
+                UpdateRetryReason::PreviousInstallIncomplete,
+                "previousInstallIncomplete",
+            ),
+            (UpdateRetryReason::WorkNotSaved, "workNotSaved"),
+            (
+                UpdateRetryReason::ActivityCheckFailed,
+                "activityCheckFailed",
+            ),
+        ] {
+            let status = UpdateStatus::Ready {
+                version: "1.0.5".into(),
+                retry_reason: Some(reason),
+            };
+            let value = serde_json::to_value(status).unwrap();
+            assert_eq!(value["retry_reason"], expected);
+        }
+    }
+
+    #[test]
+    fn postponed_native_dialog_uses_the_interface_language() {
+        let source = include_str!("updates.rs");
+        let dialog = source
+            .split("fn explain_deferred_update() {")
+            .nth(1)
+            .unwrap()
+            .split("/// Opens the system")
+            .next()
+            .unwrap();
+        assert!(dialog.contains(".set_title(menu_text::label(\"Zephium update postponed\"))"));
+        assert!(dialog.contains(".set_description(menu_text::message("));
+        assert!(dialog.contains("\"native_update_postponed_message\""));
+    }
 
     #[test]
     fn repeat_checks_return_current_state_without_locking_again() {

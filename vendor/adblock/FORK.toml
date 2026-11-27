@@ -1,7 +1,7 @@
 schema = 1
 fork = "Zephium adblock-rust network-policy adapter"
 reviewed_on = "2026-07-25"
-production_status = "release-authenticated EasyList and EasyPrivacy baseline; profile protection remains disabled by default pending native and endurance release gates"
+production_status = "release-authenticated EasyList, EasyPrivacy and uBlock Origin list baseline; profile protection remains disabled by default pending native and endurance release gates"
 
 [upstream]
 repository = "https://github.com/brave/adblock-rust"
@@ -38,6 +38,8 @@ name = "bounded prepared runtime matcher"
 paths = ["src/blocker.rs", "src/engine.rs", "src/regex_manager.rs"]
 invariants = [
   "all regex-backed rules are compiled transactionally on a worker before publication",
+  "a regex past the size limits, alone or merged by the optimizer, is prepared as never matching and counted instead of failing preparation",
+  "admission can test one rule's regex with the same bounded compilation preparation uses",
   "regex count, aggregate bytes, and per-regex pattern budgets are enforced",
   "exact and source-independent prepared matching share the configured per-request filter-check ceiling across every scanned list",
   "prepared match failures distinguish unprepared state, transient unavailability, and candidate-budget exhaustion without allocating",
@@ -60,12 +62,11 @@ paths = [
   "src/filters/fb_network.rs",
   "src/filters/fb_network_builder.rs",
   "src/filters/network.rs",
-  "src/filters/network_matchers.rs",
 ]
 invariants = [
   "source-sensitive rules never become broader blocks when the initiating frame is unknown",
-  "a potentially applicable source-sensitive exception makes a normal generic block fail open",
-  "source-independent exception candidates are classified in one pass and consume the shared budget exactly once",
+  "a source-sensitive exception never applies when the initiating frame is unknown, so a generic block stands",
+  "source-independent exception candidates are scanned in one pass and consume the shared budget exactly once",
   "structurally skipped attribution-sensitive candidates do not consume the source-independent evaluation budget",
   "source-independent important rules retain their documented priority",
   "source-sensitive exceptions remain discoverable by requested-URL tokens or the zero bucket",
@@ -139,6 +140,16 @@ paths = [
 invariants = [
   "ordinary fork validation contains no third-party filter-list or replacement-resource payload",
   "parser, serialization, resource-assembly, and scale coverage use deterministic Zephium-authored invalid-domain vectors",
+]
+
+[[patch_sets]]
+name = "lazy-DFA prepared regexes"
+paths = ["Cargo.toml", "src/regex_manager.rs", "tests/unit/optimizer.rs"]
+invariants = [
+  "prepared regexes never build a fully compiled DFA, whatever regex-automata features the application graph unifies",
+  "prepared regexes keep no capture slots; matching only asks whether a regex matches",
+  "the size limits, match kinds, and byte-oriented non-Unicode syntax are those regex::bytes applies, so the same rules compile, fail, and match",
+  "fork tests build regex-automata with dfa-build, as the desktop graph does, and check the compiled regexes themselves",
 ]
 
 [production_graphs]

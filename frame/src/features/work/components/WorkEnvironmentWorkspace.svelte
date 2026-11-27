@@ -148,6 +148,7 @@
     onnewtab: () => void;
   } = $props();
   const context = untrack(() => new WorkEnvironmentContext(session.profile));
+  const draftSession = untrack(() => workSession(session.profile));
   onMount(() => {
     void context.start();
     return () => context.dispose();
@@ -231,6 +232,7 @@
         objectives: context.objectives,
         media: context.mediaRevisions,
         objects: owned.revisions(),
+        urls: context.urlRevisions,
       },
       openTabs,
       referencesCanvasBlock(session.composer),
@@ -1594,9 +1596,35 @@
     const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
     return execution && artifact ? artifactView(artifact, execution) : undefined;
   }
-  /** What the person made of each draft before it went: kept while the work is open. */
+  /** Review choices stay local; edited words belong to the profile's Work session. */
   const drafts = new SvelteMap<string, DraftEdit>();
-  const editDraft = (id: string, edit: DraftEdit) => drafts.set(id, { ...drafts.get(id), ...edit });
+  const editDraft = (id: string, edit: DraftEdit) => {
+    if (edit.body === undefined) {
+      drafts.set(id, { ...drafts.get(id), ...edit });
+      return;
+    }
+    const reference = draftArtifact(id);
+    if (!reference) return;
+    const current = draftSession;
+    const projection =
+      current.projection?.work.id === reference.objective
+        ? current.projection
+        : context.objectives.get(reference.objective);
+    if (!projection) return;
+    const execution = projection.executions.find((entry) => entry.id === reference.execution);
+    const data =
+      current.artifactDraft(reference.artifact, reference.objective)?.data ??
+      execution?.user_artifacts?.find((entry) => entry.artifact === reference.artifact)
+        ?.edited_data ??
+      execution?.artifacts.find((entry) => entry.id === reference.artifact)?.data;
+    if (data?.kind === "draft")
+      current.editArtifact(
+        reference.execution,
+        reference.artifact,
+        { ...data, body: edit.body },
+        projection,
+      );
+  };
   /** The draft's artifact and the run that made it, from the element that shows it. */
   function draftArtifact(id: string) {
     const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
@@ -1605,10 +1633,24 @@
   /** What the person made of a draft, with where its send stands read from the run it started. */
   function drafted(id: string): DraftEdit | undefined {
     const edit = drafts.get(id);
-    const projection = objectiveSession?.projection;
-    if (!edit?.run || !projection) return edit;
-    const run = projection.executions.find((entry) => entry.id === edit.run);
-    return { ...edit, ...draftSend(projection, run) };
+    const reference = draftArtifact(id);
+    if (!reference) return edit;
+    const current = draftSession;
+    const projection =
+      current?.projection?.work.id === reference.objective
+        ? current.projection
+        : context.objectives.get(reference.objective);
+    if (!projection) return edit;
+    const data =
+      current.artifactDraft(reference.artifact, reference.objective)?.data ??
+      projection.executions
+        .find((entry) => entry.id === reference.execution)
+        ?.user_artifacts?.find((entry) => entry.artifact === reference.artifact)?.edited_data;
+    return {
+      ...edit,
+      ...(data?.kind === "draft" ? { body: data.body } : {}),
+      ...draftSend(projection, reference.artifact),
+    };
   }
   /** The words that ask the run to send a draft, so the app's Confirm stands before it goes. */
   function draftRequest(view: DraftView): string {
@@ -1638,22 +1680,19 @@
     const projection = current?.projection;
     if (view?.kind !== "draft" || !reference || !current || !projection) return;
     if (busy || activeExecution || drafted(id)?.send === "sending") return;
-    const body = (drafts.get(id)?.body ?? view.body).trim();
+    const body = (drafted(id)?.body ?? view.body).trim();
     if (!body) return;
     const original = projection.executions
       .find((entry) => entry.id === reference.execution)
       ?.artifacts.find((entry) => entry.id === reference.artifact);
     if (original?.data.kind !== "draft") return;
-    if (body !== view.body) {
+    if (current.artifactDraft(reference.artifact) || body !== view.body) {
       current.editArtifact(reference.execution, reference.artifact, { ...original.data, body });
       if (!(await current.saveArtifact(reference.artifact))) return;
     }
-    const before = new Set(current.projection?.executions.map((entry) => entry.id));
-    const started = await current.continueWith(draftRequest(view), null, {
+    await current.continueWith(draftRequest(view), null, {
       draft: reference.artifact,
     });
-    const run = current.projection?.executions.find((entry) => !before.has(entry.id));
-    if (started && run) editDraft(id, { run: run.id });
   }
   const boardActions: BoardActions = {
     send: (id) => void sendDraft(id),
@@ -1930,6 +1969,16 @@
     if (current) untrack(() => context.update(current, focused ?? undefined));
   });
   $effect(() => {
+    const urls = (snapshot?.elements ?? []).flatMap((element) => {
+      const reference = element.reference;
+      if (reference.kind === "link") return [reference.url];
+      if (reference.kind !== "browser") return [];
+      const tab = tabs.find((tab) => tab.id === reference.tab);
+      return tab ? [tab.url ?? ""] : [];
+    });
+    untrack(() => context.trackUrls(urls));
+  });
+  $effect(() => {
     const current = session;
     untrack(() => current.snapshot?.id);
     return () => objectiveSession?.stopObserving();
@@ -2142,13 +2191,14 @@
     const current = objectiveSession;
     if (runningObjective && current) {
       const context = contextSel;
-      session.composer = "";
+      const submitted = await session.prepareComposer();
+      if (!submitted || submitted.text.trim() !== text) return;
       openTabs = false;
-      // Words typed while the agent works steer it now; if it cannot take
-      // them mid-step, they go next.
+      // Only native admission permits clearing these durable words.
       if (activeExecution) {
-        if (!(await current.steer(text))) current.enqueue(text);
-      } else await current.continueWith(text, context);
+        if (!(await current.steer(text))) return;
+      } else if (!(await current.continueWith(text, context))) return;
+      await session.clearComposer(submitted);
       return;
     }
     await createObjective();
@@ -2159,8 +2209,11 @@
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
     if (!current) return;
+    const composer = session.objectiveSubmission?.composer ?? (await session.prepareComposer());
+    if (!composer || !composer.text.trim()) return;
     const submission = session.objectiveSubmission ?? {
-      objective: session.composer.trim(),
+      objective: composer.text.trim(),
+      composer,
       command: commandId(),
       attached: false,
       context: contextSel,
@@ -2231,7 +2284,7 @@
       if (!(await current.open(objectiveId))) return;
       const basis = current.projection?.work;
       if (current.selected !== objectiveId || basis?.id !== objectiveId) return;
-      session.composer = "";
+      await session.clearComposer(submission.composer);
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
       openTabs = false;
@@ -2538,7 +2591,12 @@
           canvasRef?.focusCard(pageEntries.get(card)?.part ?? card);
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
-        onsteered={() => (session.composer = "")}
+        prepareDraft={async () => {
+          const submitted = await session.prepareComposer();
+          return submitted
+            ? { text: submitted.text, clear: () => session.clearComposer(submitted) }
+            : null;
+        }}
         {human}
         onopenstep={openStep}
       />{/snippet}</LazyView
@@ -3019,7 +3077,29 @@
     >
   {/if}
   <div class="bar-dock" bind:clientHeight={dockHeight}>
-    {#if blockSaveFailed}<p role="alert">{m.resource_conflict()}</p>{/if}
+    {#if blockSaveFailed || owned.failed}<p role="alert">{m.resource_conflict()}</p>{/if}
+    {#if session.composerFailure}
+      <div role="alert">
+        <p>
+          {session.composerFailure === "conflict"
+            ? m.resource_conflict()
+            : m.resource_save_failed()}
+        </p>
+        {#if session.composerFailure === "conflict"}
+          <p>{m.resource_overwrite_explanation()}</p>
+          <Button size="compact" onclick={() => void session.resolveComposer("load")}
+            >{m.resource_load_saved()}</Button
+          >
+          <Button size="compact" onclick={() => void session.resolveComposer("replace")}
+            >{m.resource_confirm_replace()}</Button
+          >
+        {:else}
+          <Button size="compact" onclick={() => void session.resolveComposer("retry")}
+            >{m.surface_retry()}</Button
+          >
+        {/if}
+      </div>
+    {/if}
     {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
         bind:surface={composerSurface}

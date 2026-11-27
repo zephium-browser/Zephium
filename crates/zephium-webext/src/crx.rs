@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::ExtensionId;
 
-pub const MAX_CRX_SIZE: usize = 128 * 1024 * 1024;
+pub const MAX_CRX_SIZE: usize = 256 * 1024 * 1024;
 pub const MAX_HEADER_SIZE: usize = 256 * 1024;
 
 const MAGIC: &[u8; 4] = b"Cr24";

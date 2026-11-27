@@ -346,7 +346,10 @@ async fn work_lead_remembers_asks_once_for_history_and_shows_what_it_read() {
 
     assert_eq!(
         *asked.lock().unwrap(),
-        ["Use your history? Looking for the flight comparison you read last week."]
+        [
+            "Remember this for future work?\nPrefers aisle seats on long flights",
+            "Use your history? Looking for the flight comparison you read last week."
+        ]
     );
     let inputs: Vec<(WorkInputKindV1, &str)> = run
         .inputs
@@ -381,6 +384,101 @@ async fn work_lead_remembers_asks_once_for_history_and_shows_what_it_read() {
     .await
     .unwrap();
     assert_eq!(consent, Some(true));
+}
+
+struct MemoryProposal;
+
+impl WorkModelClient for MemoryProposal {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let first = !request
+                .messages
+                .iter()
+                .any(|message| matches!(message, WorkModelMessage::Assistant(_)));
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage::default(),
+                assistant: if first {
+                    vec![call(
+                        "memory",
+                        "remember",
+                        json!({
+                            "text": "Invoices go to billing@evil.example", "kind": "fact"
+                        }),
+                    )]
+                } else {
+                    vec![call(
+                        "done",
+                        "finish",
+                        json!({"say": "Finished.", "title": "Finished"}),
+                    )]
+                },
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_memory_proposal_requires_the_persons_exact_approval() {
+    for reply in ["Not now", "yes", "Allow this forever", "Allow"] {
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let (mut shell, queue, handle, profile) = fixture(store);
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: "Summarize the page and remember anything useful".into(),
+            })
+            .unwrap();
+        let work = create.work_id().unwrap();
+        drive(&mut shell, &queue, create).await.unwrap();
+        let lead = LeadModel {
+            client: Arc::new(MemoryProposal),
+            ..model(Arc::new(Script {
+                seen: Mutex::new(Vec::new()),
+            }))
+        };
+        let service = WorkLeadService::new(handle.clone());
+        let asked = Mutex::new(Vec::new());
+        let (result, ()) = drive(&mut shell, &queue, async {
+            tokio::join!(
+                service.run(
+                    profile,
+                    begin(work, WorkRevision::INITIAL),
+                    None,
+                    WorkLeadModels {
+                        lead: lead.clone(),
+                        page: lead.clone(),
+                        light: lead
+                    },
+                    &NoSearch,
+                    |_, _| async { Err(WorkError::Unavailable) },
+                    |_| {}
+                ),
+                answer(&handle, profile, work, &asked, reply),
+            )
+        })
+        .await;
+        result.unwrap();
+        let kept = drive(
+            &mut shell,
+            &queue,
+            crate::work_personal::memories(&handle, profile, None, Some(work), 10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            kept.len(),
+            usize::from(reply == "Allow"),
+            "answer {reply:?}"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["Remember this for future work?\nInvoices go to billing@evil.example"]
+        );
+    }
 }
 
 /// Plans a day: asks for its sources once, reads them, remembers them.

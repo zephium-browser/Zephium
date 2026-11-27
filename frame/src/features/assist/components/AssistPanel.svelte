@@ -7,14 +7,12 @@
   import { events } from "$shared/ipc/native-events";
   import * as m from "$shared/i18n/messages";
   import IconButton from "$shared/ui/IconButton";
-  import Icon from "$shared/ui/Icon";
-  import Menu from "$shared/ui/Menu";
+  import type { MenuEntry } from "$shared/ui/Menu";
   import { AssistSession } from "../lib/assist-session.svelte";
   import {
     Cancel01Icon,
     Clock01Icon,
     Delete02Icon,
-    MoreHorizontalIcon,
     PaintBoardIcon,
     PencilEdit02Icon,
     Settings02Icon,
@@ -29,8 +27,10 @@
     ToolHostProps & {
       caption?: boolean;
       scrolls?: boolean;
-      closable?: boolean;
       actions?: Snippet;
+      more?: MenuEntry[];
+      moreLabel?: string;
+      onmore?: (id: string) => void;
       footer?: Snippet;
       children?: Snippet;
     }
@@ -138,17 +138,28 @@
 </script>
 
 <!-- Escape steps back from a sheet, then closes the panel; the composer takes it first to stop. -->
-<div
-  class="assist-host"
-  data-assist
-  role="presentation"
+<svelte:window
   onkeydown={(event) => {
-    if (event.key !== "Escape" || event.defaultPrevented) return;
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+    if (session?.picking) {
+      event.preventDefault();
+      session.cancelPick();
+      return;
+    }
     if (view !== "thread") view = "thread";
     else viewProps.onclose();
   }}
->
-  <Frame {...viewProps} caption={false} scrolls={false} closable={false}>
+/>
+
+<div class="assist-host" data-assist role="presentation">
+  <Frame
+    {...viewProps}
+    caption={false}
+    scrolls={false}
+    more={entries}
+    moreLabel={m.assist_more()}
+    onmore={choose}
+  >
     {#snippet actions()}
       <IconButton
         icon={PencilEdit02Icon}
@@ -160,15 +171,6 @@
           composer?.focus();
         }}
       />
-      <Menu
-        label={m.assist_more()}
-        {entries}
-        align="end"
-        triggerClass="assist-more"
-        onselect={choose}
-      >
-        {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
-      </Menu>
     {/snippet}
     {#if session}
       {#if view === "history"}<HistoryView {session} onback={() => (view = "thread")} />
@@ -195,35 +197,9 @@
     display: contents;
   }
 
-  .assist-host :global(.assist-more) {
-    display: grid;
-    place-items: center;
-    inline-size: 28px;
-    block-size: 28px;
-    padding: 0;
-    border: 0;
-    border-radius: var(--radius-control);
-    background: transparent;
-    color: var(--color-muted);
-    cursor: default;
-    transition:
-      background-color var(--motion-instant) var(--ease-smooth),
-      color var(--motion-instant) var(--ease-smooth);
-  }
-
-  .assist-host :global(.assist-more:hover),
-  .assist-host :global(.assist-more[data-state="open"]) {
-    background: var(--color-fill-hover);
-    color: var(--color-text);
-  }
-
   /* While one of the panel's menus is open, the column beside it steps back,
      as it does under the sidebar's own panels. */
   :global(.browser-sidebar:has(.assist-host [aria-expanded="true"]) [data-under-panel]) {
     opacity: 0.18;
-  }
-
-  .assist-host :global(.assist-more:focus-visible) {
-    outline: 2px solid var(--color-ring);
   }
 </style>

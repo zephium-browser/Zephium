@@ -49,7 +49,8 @@
       cleared = true;
       open = false;
     } else {
-      failure = outcome;
+      // Some data left behind is a clear to try again.
+      failure = outcome === "partial" ? "failed" : outcome;
     }
   }
 </script>

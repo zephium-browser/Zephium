@@ -5,7 +5,12 @@ import "$styles/global.css";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { acceleratorKeys } from "$shared/lib/accelerator";
 import { IS_MAC } from "$shared/platform";
-import type { AccountReplyV1, Material, WorkModelsV1 } from "$shared/ipc/bindings";
+import type {
+  AccountReplyV1,
+  Material,
+  WorkLocalServerV1,
+  WorkModelsV1,
+} from "$shared/ipc/bindings";
 import { browserImport, type ImportAdapter, type ImportJob } from "$domain/browser-import";
 import { fakeTabs } from "./onboarding-tabs.svelte";
 import OnboardingApp from "../OnboardingApp.svelte";
@@ -17,7 +22,9 @@ const native = vi.hoisted(() => ({
   finished: 0,
   endpoint: null as string | null,
   opens: true,
+  modelFailure: null as "fault" | "invoke" | null,
   material: "none" as Material,
+  discovery: null as Promise<WorkLocalServerV1[]> | null,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -44,12 +51,12 @@ vi.mock("$shared/ipc/bindings", async () => {
         fault: null,
         retry_after: null,
       }) as unknown as AccountReplyV1,
-    workLocalServers: async () => [
-      { kind: "ollama", base: "http://localhost:11434/v1", models: 3 },
-    ],
+    workLocalServers: async () =>
+      native.discovery ?? [{ kind: "ollama", base: "http://localhost:11434/v1", models: 3 }],
     workSetModelEndpoint: async (_profile: string, base: string | null) => {
       native.endpoint = base;
-      return {} as WorkModelsV1;
+      if (native.modelFailure === "invoke") throw new Error("unavailable");
+      return { fault: native.modelFailure === "fault" ? "unavailable" : null } as WorkModelsV1;
     },
     onboardingPlayIntro: async () => {
       native.intro++;
@@ -128,6 +135,8 @@ beforeEach(async () => {
   native.finished = 0;
   native.endpoint = null;
   native.opens = true;
+  native.modelFailure = null;
+  native.discovery = null;
   native.material = "none";
   fakeTabs.reset();
   browserImport.provide(importer);
@@ -366,3 +375,87 @@ test("whatever was chosen, the browser opens on a new tab", { timeout: 30_000 },
   await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
   expect(fakeTabs.opened()).toBe(1);
 });
+
+for (const failure of ["fault", "invoke"] as const) {
+  test(
+    `local model ${failure} failure keeps onboarding open for retry`,
+    { timeout: 30_000 },
+    async () => {
+      native.modelFailure = failure;
+      fakeTabs.showPage("https://example.com/");
+      render(OnboardingApp);
+      await formed();
+      await page.getByRole("button", { name: /Get started/u }).click();
+      for (let step = 0; step < 4; step++) await next();
+      await page.getByRole("radio", { name: /A local model/u }).click();
+      await next();
+      await page.getByRole("button", { name: /Start browsing/u }).click();
+      await expect
+        .element(page.getByText("The local model could not be saved. Try again."))
+        .toBeVisible();
+      expect(native.finished).toBe(0);
+      expect(fakeTabs.opened()).toBe(0);
+      await expect
+        .poll(() => document.querySelector(".onboarding")?.getAttribute("data-leaving"))
+        .toBe("false");
+      native.modelFailure = null;
+      await page.getByRole("button", { name: /Start browsing/u }).click();
+      await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
+      expect(fakeTabs.opened()).toBe(1);
+    },
+  );
+}
+
+for (const result of ["found", "empty", "failed"] as const) {
+  test(`local choice waits for ${result} discovery`, { timeout: 30_000 }, async () => {
+    let resolve!: (servers: WorkLocalServerV1[]) => void;
+    let reject!: (error: Error) => void;
+    native.discovery = new Promise<WorkLocalServerV1[]>((done, failed) => {
+      resolve = done;
+      reject = failed;
+    });
+    render(OnboardingApp);
+    await formed();
+    await page.getByRole("button", { name: /Get started/u }).click();
+    for (let step = 0; step < 4; step++) await next();
+    await expect.element(page.getByRole("status")).toHaveTextContent("Looking for local models…");
+    await expect.element(page.getByRole("status")).toBeVisible();
+    await page.getByRole("radio", { name: /A local model/u }).click();
+    await expect.element(page.getByRole("button", { name: /^Continue/u })).toBeDisabled();
+    await expect.element(page.getByRole("button", { name: "Skip setup" })).toBeDisabled();
+    for (const name of [/^Continue/u, "Skip setup"]) {
+      await expect
+        .element(page.getByRole("button", { name }))
+        .toHaveAccessibleDescription("Looking for local models…");
+    }
+    await userEvent.keyboard("{Enter}");
+    expect(document.querySelector(".onboarding")?.getAttribute("data-step")).toBe("ai");
+    expect(native.finished).toBe(0);
+    if (result === "failed") reject(new Error("discovery failed"));
+    else
+      resolve(
+        result === "found"
+          ? [{ kind: "ollama", base: "http://localhost:11434/v1", models: 3 }]
+          : [],
+      );
+    await expect.element(page.getByRole("button", { name: /^Continue/u })).toBeEnabled();
+    await expect.element(page.getByText("Looking for local models…")).not.toBeInTheDocument();
+    for (const name of [/^Continue/u, "Skip setup"]) {
+      await expect
+        .element(page.getByRole("button", { name }))
+        .not.toHaveAttribute("aria-describedby");
+    }
+    await next();
+    await page.getByRole("button", { name: /Start browsing/u }).click();
+    if (result === "found") {
+      await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
+      expect(native.endpoint).toBe("http://localhost:11434/v1");
+    } else {
+      await expect
+        .element(page.getByText("The local model could not be saved. Try again."))
+        .toBeVisible();
+      expect(native.finished).toBe(0);
+      expect(native.endpoint).toBeNull();
+    }
+  });
+}

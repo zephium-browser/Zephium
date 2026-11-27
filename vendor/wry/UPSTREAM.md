@@ -54,15 +54,18 @@ Its security-relevant deltas currently enforce these invariants:
   the adapter prevents a second attacker-sized Rust allocation and stops body
   streaming at the limit. `native_admission.rs` additionally allows at most 32
   asynchronous custom-protocol requests per WebView (per verified WebKitGTK
-  context on Linux); on macOS the bound is per scheme of each WebView, so IPC
-  and assets never hold each other back. Every accepted request carries a
-  unique non-cloneable RAII permit through response, cancellation, timeout, or
-  teardown. On macOS a request past the bound waits, in arrival order within
-  its scheme, in a main-thread wait list of at most 512 tasks and starts as a
-  permit is released; a stopped task leaves the list, and teardown clears it.
-  Only a request past both bounds (and, on other platforms, past the in-flight
-  bound) completes synchronously with an empty 503 response and never acquires
-  a native deferral. Teardown seals and drains accounting, and late permit drops
+  context on Linux); on macOS and Windows the bound is per scheme of each
+  WebView, so IPC and assets never hold each other back. Every accepted request
+  carries a unique non-cloneable RAII permit through response, cancellation,
+  timeout, or teardown. On macOS and Windows a request past the bound waits, in
+  arrival order within its scheme, in a main-thread wait list of at most 512
+  requests and starts as a permit is released; a stopped macOS task leaves the
+  list, and teardown clears it. On Windows a waiting request holds its WebView2
+  deferral, and teardown or a full list completes it exactly once with an empty
+  503. Only a request past both bounds (and, on Linux, past the in-flight bound)
+  is refused with an empty 503 response; on macOS and Linux the refusal is
+  synchronous and acquires no native deferral. Teardown seals and drains
+  accounting, and late permit drops
   cannot underflow or reopen it. Zephium's page-evaluation integration accepts
   primitive-only contracts: fixed-size discard and favicon results and one
   explicitly bounded HTML string. Page objects and attacker-controlled object
@@ -229,6 +232,22 @@ SaveAsUIShowing cancellation registration because document Save As is distinct
 from DownloadStarting. Privileged/agent defaults remain unchanged. See the
 [application qualification record](../../docs/native-links-implementation.md).
 
+### Navigation source frame and context-menu download marker (macOS, 2026-11-05)
+
+`AppleNavigationAction.source` carries `AppleNavigationSource`: whether the
+action's `sourceFrame` is the main frame, and that frame's security-origin
+scheme, host and port. Scheme and host are read with `ORIGIN_PART_LIMIT`
+(512 UTF-16 units / UTF-8 bytes); one that does not fit is reported empty, never
+truncated, so the host can tell a frame it cannot name from the main frame and
+refuse it. `source` is `None` when WebKit names no source frame. The struct
+holds strings, so `AppleNavigationAction` is `Clone` and no longer `Copy`.
+
+`context_menu_download_in_progress()` is true while the native download handler
+runs for a download started from WebKit's own context menu
+(`_webView:contextMenuDidCreateDownload:`), marked by a scoped thread-local
+guard that restores the previous value on drop. The host uses it to tell a
+download the person chose from one a page started.
+
 ### Page dialogs and failure categories (macOS)
 
 `alert`, `confirm` and `prompt` show as an `NSAlert` sheet on the view's window,
@@ -252,7 +271,24 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 not reported as one, so the failure lands on the document the person asked for
 and the host can show its own explanation. The handler's `FailedDocument` says
 when that error document replaced the shown page, with the address from Wry's
-in-flight navigation record; macOS always reports `Kept`.
+in-flight navigation record.
+
+On macOS, `WebKitErrorDomain` 104 (a content rule blocked the frame load) maps
+to `NavigationFailure::Blocked`, and its `FailedDocument` is `Refused { url }`:
+the address the error's `NSURLErrorFailingURLErrorKey` names, bounded like
+every page URL. The view's own URL is still the previous page at that point,
+so the host must not name the refusal by it. Other macOS failures report
+`Kept`.
+
+### macOS https-first navigation policy (2026-11-05)
+
+`AppleHttpsUpgrade` and the builder's `with_https_upgrade` set WebKit's
+`WKWebpagePreferences.preferredHTTPSNavigationPolicy` on the view's default
+page preferences: `AutomaticFallback` tries plain http addresses over https and
+falls back to http when that fails; `UserMediatedFallback` asks first. The
+setter is called only where the preferences respond to it (macOS 15.2 and
+later); earlier systems keep WebKit's own upgrades of known https hosts. Other
+platforms ignore the attribute. Without the builder call nothing changes.
 
 ### Independent Windows controller initialization (2026-10-27)
 
@@ -290,3 +326,35 @@ a pointer-to-`usize` cast, preserving that comparison under the inherited Rust
 or dereferenced from the integer, and the admission policy is unchanged.
 The dependency graph and locked upstream versions remain unchanged. Strict
 standalone validation uses the manifest's default MSRV with no lint overrides.
+
+### Returning media to its page (macOS)
+
+`with_media_return_handler` answers the private `WKUIDelegatePrivate` selector
+`_webViewFullscreenMayReturnToInline:`. The picture-in-picture window's return
+button sends it, and WebKit then waits for the page to become visible before
+it takes the video back, so without a handler that brings the page on screen
+the button does nothing for a background tab. A missing handler keeps
+upstream's no-op; a panic is contained. Like the other private selectors it
+must be reviewed during upstream rebases.
+
+- Programmatic WebKit navigation records retain their `WKNavigation` objects
+  until terminal settlement or proven policy refusal is superseded. A refused
+  attempt that never starts releases its registry slot before a later owned
+  load. Unstarted attempts without a policy refusal keep their attribution so
+  overlapping and reentrant loads cannot exchange URLs. Action callbacks have
+  no navigation identity: URL correlation is used only when unambiguous; nested
+  or same-address ambiguity remains conservatively retained.
+
+- macOS script-dialog suppression is scoped to a committed main-frame
+  document generation. Same-document history/hash changes do not reopen
+  dialogs. A later document clears suppression; an old sheet's completion
+  cannot silence its replacement. The fork explicitly enables AppKit NSCell
+  and block2 APIs used by the suppression checkbox and sheet completion,
+  including in its independent dependency graph.
+
+- Native page navigation URLs use a 256 KiB allocation ceiling in both UTF-16
+  units and UTF-8 bytes, synchronized with Zephium's domain navigation bound.
+  Unreadable/oversized native main-frame and new-window addresses report a
+  metadata-free refusal instead of silently disappearing. WebKit identifies
+  child-frame refusals separately; these never manufacture a whole-tab
+  navigation failure or a partial URL/native identity.

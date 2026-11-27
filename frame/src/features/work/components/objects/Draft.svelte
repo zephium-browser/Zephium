@@ -93,6 +93,7 @@
       aria-label={where}
       bind:value={text}
       use:fit={!centre}
+      oninput={(event) => actions.write?.(object.id, event.currentTarget.value)}
       onblur={keep}
       onkeydown={(event) => {
         if (event.key === "Escape") (event.currentTarget as HTMLTextAreaElement).blur();

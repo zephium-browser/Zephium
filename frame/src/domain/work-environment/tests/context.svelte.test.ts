@@ -210,6 +210,21 @@ test("note labels resolve only attached IDs without starting an objective", asyn
   context.dispose();
 });
 
+test("an attached URL's revision is the SHA-256 Rust recomputes, and leaves with the URL", async () => {
+  const { WorkEnvironmentContext } = await import("../context.svelte");
+  const url = "https://outlook.live.com/mail/0/inbox/id/AQQkADAwATM0MDAAMS1hYmQ5";
+  const context = new WorkEnvironmentContext(profile);
+  context.trackUrls([url]);
+  await vi.waitFor(() =>
+    expect(context.urlRevisions.get(url)).toBe(
+      "0694dabf6871fb107ac842abba5f084b2a54d906ca6e854fcb80af0aa5702ea0",
+    ),
+  );
+  context.trackUrls([]);
+  expect(context.urlRevisions.size).toBe(0);
+  context.dispose();
+});
+
 test("an attached work's page frames arrive with its projection, not with the session", async () => {
   const { WorkEnvironmentContext } = await import("../context.svelte");
   const projection = {

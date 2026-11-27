@@ -21,6 +21,11 @@
     armed = false;
   });
   $effect(() => {
+    if (installed === null || !webext.isRemovalAsked(installed.id)) return;
+    armed = true;
+    webext.settleRemovalAsk();
+  });
+  $effect(() => {
     if (!armed) return;
     const timer = setTimeout(() => (armed = false), 3000);
     return () => clearTimeout(timer);

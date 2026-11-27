@@ -9,8 +9,8 @@ import { saasScene, tripScene, type BoardScene } from "./board-fixtures";
 
 const current = vi.hoisted(() => ({ scene: null as BoardScene | null }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     faviconProbe: async () => true,
     runCommand: vi.fn(async () => ({ accepted: true, operation_id: null })),
     workCall: vi.fn(async (profile: string, call: WorkCallV1) => {

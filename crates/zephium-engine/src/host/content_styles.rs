@@ -6,8 +6,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sha2::{Digest, Sha256};
-use zephium_core::blocker::{BlockerSite, ContentRuleDigest};
+use zephium_core::blocker::{
+    BlockerSite, ContentRuleDigest, NetworkDecision, NetworkRequest, NetworkRequestPolicy,
+    NetworkRequestSourceKind, NetworkResourceType,
+};
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ports::engine::NavigationBlockReason;
 
 use super::dispatch::with_document_style;
 use super::permits::EventPermit;
@@ -16,18 +20,61 @@ use super::EngineHost;
 pub(super) type SitePreferencesSlot =
     Rc<RefCell<Option<Arc<zephium_core::blocker::PreparedBlockerSites>>>>;
 
+/// What judges a profile's pages and frames before they load.
+pub(super) type NavigationSlot = Rc<RefCell<NavigationGuard>>;
+/// Whether a view refuses a page, or a frame (`true`), before it loads.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) type NavigationJudge = dyn Fn(&str, bool) -> bool;
+type Policy = Arc<dyn NetworkRequestPolicy>;
+
+#[derive(Default)]
+pub(super) struct NavigationGuard {
+    /// uBlock Origin's badware list.
+    pub(super) badware: Option<Policy>,
+    /// The lists' own `$document` rules, where the engine does not apply
+    /// them itself (WebView2; WebKit's content rules do).
+    pub(super) lists: Option<Policy>,
+    /// Hosts the person opened anyway, until the app quits.
+    pub(super) allowed: std::collections::HashSet<String>,
+}
+
+/// Where a new view first goes: the address it was opened for or, when the
+/// lists refuse that, a blank page under the explanation, with the reason.
+/// The view is then never built on a navigation it must cancel.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(super) fn first_navigation(
+    preferences: SitePreferencesSlot,
+    navigation: NavigationSlot,
+    url: &str,
+) -> (&str, Option<NavigationBlockReason>) {
+    match ViewSiteScope::new(preferences, navigation, url).blocks_navigation(url, false) {
+        Some(reason) => ("about:blank", Some(reason)),
+        None => (url, None),
+    }
+}
+
 pub(super) struct ViewSiteScope {
     preferences: SitePreferencesSlot,
+    navigation: NavigationSlot,
     target: RefCell<String>,
     pub(super) pause: crate::platform::content_pause::ContentPause,
+    pub(super) protection: crate::platform::content_protection::ViewProtection,
+    pub(super) top_document: crate::platform::top_document::TopDocument,
 }
 
 impl ViewSiteScope {
-    pub(super) fn new(preferences: SitePreferencesSlot, url: &str) -> Rc<Self> {
+    pub(super) fn new(
+        preferences: SitePreferencesSlot,
+        navigation: NavigationSlot,
+        url: &str,
+    ) -> Rc<Self> {
         let scope = Rc::new(Self {
             preferences,
+            navigation,
             target: RefCell::new(url.to_owned()),
             pause: Default::default(),
+            protection: Default::default(),
+            top_document: Default::default(),
         });
         scope.refresh();
         scope
@@ -36,17 +83,103 @@ impl ViewSiteScope {
         self.target.replace(url.to_owned());
         self.refresh();
     }
+    /// Only Windows judges requests against the main document; WebKit names
+    /// each request's own frame.
+    pub(super) fn committed(&self, url: &str) {
+        #[cfg(target_os = "windows")]
+        self.top_document.committed(url);
+        #[cfg(not(target_os = "windows"))]
+        let _ = url;
+    }
     pub(super) fn refresh(&self) {
-        let paused = {
-            let preferences = self.preferences.borrow();
-            match preferences.as_ref() {
-                None => true,
-                Some(preferences) => BlockerSite::from_url(&self.target.borrow())
-                    .and_then(|site| preferences.get(&site))
-                    .is_some_and(|entry| entry.paused),
-            }
-        };
+        let paused = self.paused_at(&self.target.borrow());
         self.pause.set(paused);
+    }
+    fn explicitly_paused_at(&self, url: &str) -> bool {
+        self.preferences
+            .borrow()
+            .as_ref()
+            .is_some_and(|preferences| {
+                BlockerSite::from_url(url)
+                    .and_then(|site| preferences.get(&site))
+                    .is_some_and(|entry| entry.paused)
+            })
+    }
+    fn paused_at(&self, url: &str) -> bool {
+        match self.preferences.borrow().as_ref() {
+            None => true,
+            Some(preferences) => BlockerSite::from_url(url)
+                .and_then(|site| preferences.get(&site))
+                .is_some_and(|entry| entry.paused),
+        }
+    }
+    /// Why the lists refuse a page, or a frame of the view's page, before it
+    /// loads. A site with protection paused is not judged, nor a host the
+    /// person opened anyway.
+    pub(super) fn blocks_navigation(
+        &self,
+        url: &str,
+        frame: bool,
+    ) -> Option<NavigationBlockReason> {
+        let (badware, lists) = {
+            let guard = self.navigation.borrow();
+            if url::Url::parse(url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                .is_some_and(|host| guard.allowed.contains(&host))
+            {
+                return None;
+            }
+            (guard.badware.clone(), guard.lists.clone())
+        };
+        if badware.is_none() && lists.is_none() {
+            return None;
+        }
+        let page = self.target.borrow().clone();
+        let (source, kind) = if frame {
+            (page.as_str(), NetworkResourceType::Subdocument)
+        } else {
+            (url, NetworkResourceType::Document)
+        };
+        // Unlike page styles, unknown site preferences pause nothing here: a
+        // scam page is refused even before the person's choices have loaded.
+        if self.explicitly_paused_at(source) {
+            return None;
+        }
+        // A frame is judged against the top page, which need not be the
+        // document that embeds it: that is an approximation, never exact.
+        let request = if frame {
+            NetworkRequest::top_level_approximation(
+                url,
+                source,
+                "GET",
+                kind,
+                NetworkRequestSourceKind::Document,
+            )?
+        } else {
+            NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)?
+        };
+        let refuses = |policy: &Option<Policy>| {
+            policy
+                .as_ref()
+                .is_some_and(|policy| policy.decide(&request) == NetworkDecision::Block)
+        };
+        if refuses(&badware) {
+            Some(NavigationBlockReason::Badware)
+        } else if refuses(&lists) {
+            Some(NavigationBlockReason::FilterLists)
+        } else {
+            None
+        }
+    }
+    /// Opens the host of `url` in this view's profile until the app quits.
+    pub(super) fn allow_navigation(&self, url: &str) {
+        if let Some(host) = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        {
+            self.navigation.borrow_mut().allowed.insert(host);
+        }
     }
 }
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
@@ -262,6 +395,8 @@ impl EngineHost {
             spare.view.site_scope.refresh();
         }
         self.refresh_profile_document_styles(profile);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.refresh_profile_scriptlets(profile);
         true
     }
     pub(super) fn refresh_profile_document_styles(&mut self, profile: ProfileId) {
@@ -674,6 +809,157 @@ fn decode_identity(text: &str) -> Option<DocumentIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Judged = (
+        String,
+        Option<String>,
+        NetworkResourceType,
+        zephium_core::blocker::NetworkAttribution,
+    );
+    struct Refuses(Mutex<Vec<Judged>>);
+
+    impl NetworkRequestPolicy for Refuses {
+        fn decide(&self, request: &NetworkRequest<'_>) -> NetworkDecision {
+            self.0.lock().unwrap().push((
+                request.url().to_owned(),
+                request.source_url().map(str::to_owned),
+                request.resource_type(),
+                request.attribution(),
+            ));
+            if request.url().contains("scam") {
+                NetworkDecision::Block
+            } else {
+                NetworkDecision::Allow
+            }
+        }
+    }
+
+    #[test]
+    fn navigations_are_judged_by_the_profile_policy_except_on_a_paused_site() {
+        let paused = BlockerSite::from_url("https://paused.example/").unwrap();
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(
+            zephium_core::blocker::PreparedBlockerSites::new(1, [(paused, true, Arc::from(""))]),
+        ));
+        let navigation: NavigationSlot = Rc::default();
+        let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            None
+        );
+        let policy = Arc::new(Refuses(Mutex::default()));
+        navigation.borrow_mut().badware = Some(policy.clone());
+        let badware = Some(NavigationBlockReason::Badware);
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            badware
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/ad", true),
+            badware
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://fine.example/", false),
+            None
+        );
+        assert_eq!(
+            policy.0.lock().unwrap()[..2],
+            [
+                (
+                    "https://scam.example/".to_owned(),
+                    Some("https://scam.example/".to_owned()),
+                    NetworkResourceType::Document,
+                    zephium_core::blocker::NetworkAttribution::Exact,
+                ),
+                (
+                    "https://scam.example/ad".to_owned(),
+                    Some("https://news.example/".to_owned()),
+                    NetworkResourceType::Subdocument,
+                    zephium_core::blocker::NetworkAttribution::TopLevelApproximation,
+                ),
+            ]
+        );
+        scope.navigating("https://paused.example/");
+        // A paused page loads any frame; leaving it is judged as usual.
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/ad", true),
+            None
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            badware
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://paused.example/scam", false),
+            None
+        );
+        scope.allow_navigation("https://SCAM.example/elsewhere");
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_view_opened_at_a_refused_address_starts_blank_and_says_why() {
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(
+            zephium_core::blocker::PreparedBlockerSites::new(1, std::iter::empty()),
+        ));
+        let navigation: NavigationSlot = Rc::default();
+        let first = |url| first_navigation(preferences.clone(), navigation.clone(), url);
+        assert_eq!(
+            first("https://scam.example/"),
+            ("https://scam.example/", None)
+        );
+        navigation.borrow_mut().badware = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            first("https://scam.example/"),
+            ("about:blank", Some(NavigationBlockReason::Badware))
+        );
+        assert_eq!(
+            first("https://fine.example/"),
+            ("https://fine.example/", None)
+        );
+        // Opened anyway: the host loads as asked.
+        navigation
+            .borrow_mut()
+            .allowed
+            .insert("scam.example".to_owned());
+        assert_eq!(
+            first("https://scam.example/"),
+            ("https://scam.example/", None)
+        );
+    }
+
+    #[test]
+    fn unknown_site_preferences_do_not_pause_the_navigation_check() {
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(None));
+        let navigation: NavigationSlot = Rc::default();
+        let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
+        navigation.borrow_mut().badware = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            Some(NavigationBlockReason::Badware)
+        );
+    }
+
+    #[test]
+    fn the_badware_list_names_a_page_before_the_other_lists() {
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(
+            zephium_core::blocker::PreparedBlockerSites::new(1, std::iter::empty()),
+        ));
+        let navigation: NavigationSlot = Rc::default();
+        let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
+        navigation.borrow_mut().lists = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            Some(NavigationBlockReason::FilterLists)
+        );
+        navigation.borrow_mut().badware = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            Some(NavigationBlockReason::Badware)
+        );
+    }
     #[test]
     fn reuse_does_not_encode_the_subscription_payload() {
         let plan = zephium_core::blocker::DocumentStylePlan {

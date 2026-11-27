@@ -13,17 +13,24 @@
   let source = $state<PageSourceView | null | undefined>(undefined);
   let copied = $state(false);
   let reset: ReturnType<typeof setTimeout> | undefined;
+  let lifetime = 0;
 
   $effect(() => {
     const asked = tab;
+    let active = true;
     source = undefined;
     copied = false;
     void commands
       .pageSource(asked)
       .catch(() => null)
       .then((found) => {
-        if (asked === tab) source = found;
+        if (active) source = found;
       });
+    return () => {
+      active = false;
+      lifetime += 1;
+      clearTimeout(reset);
+    };
   });
 
   let lines = $derived(source ? sourceLines(source.text) : null);
@@ -32,11 +39,13 @@
 
   async function copy() {
     if (!source) return;
+    const asked = lifetime;
     try {
       await navigator.clipboard.writeText(source.text);
     } catch {
       return;
     }
+    if (asked !== lifetime) return;
     copied = true;
     clearTimeout(reset);
     reset = setTimeout(() => (copied = false), 1600);

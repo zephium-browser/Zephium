@@ -683,6 +683,144 @@ fn a_zoom_made_in_the_page_is_remembered_like_a_command() {
 }
 
 #[test]
+fn failed_site_zoom_save_reconciles_gestures_and_commands_to_the_retained_level() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "github.com");
+    let profile = shell.profile_of_item(id).unwrap();
+    for (scale, command) in [(1.5, false), (1.0, false), (1.1, true)] {
+        let retained = shell.zoom_percent_for(profile, Some("github.com"));
+        store
+            .zoom_save_fails
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let before = saved(&store, profile);
+        if command {
+            shell.handle(Command::Run("zoom.in".into()));
+            settle_last(&mut shell, &engine, id);
+        } else {
+            gesture(&mut shell, id, scale);
+        }
+        assert_eq!(saved(&store, profile), before);
+        assert_eq!(shell.items.tab(id).unwrap().zoom, scale);
+        assert_eq!(
+            engine.last_zoom_request().1,
+            zephium_core::zoom::scale(retained)
+        );
+        settle_last(&mut shell, &engine, id);
+        assert_eq!(
+            shell.items.tab(id).unwrap().zoom,
+            zephium_core::zoom::scale(retained)
+        );
+        store
+            .zoom_save_fails
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if command {
+            shell.handle(Command::Run("zoom.in".into()));
+            settle_last(&mut shell, &engine, id);
+        } else {
+            gesture(&mut shell, id, scale);
+        }
+        let expected = if scale == 1.0 {
+            vec![]
+        } else {
+            vec![("github.com".to_owned(), zephium_core::zoom::percent(scale))]
+        };
+        assert_eq!(saved(&store, profile), expected);
+    }
+}
+
+#[test]
+fn repeating_reset_retries_a_failed_site_zoom_deletion() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "github.com");
+    gesture(&mut shell, id, 1.5);
+    let profile = shell.profile_of_item(id).unwrap();
+    store
+        .zoom_save_fails
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Run("zoom.reset".into()));
+    settle_last(&mut shell, &engine, id);
+    assert_eq!(saved(&store, profile), [("github.com".into(), 150)]);
+    settle_last(&mut shell, &engine, id);
+    store
+        .zoom_save_fails
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Run("zoom.reset".into()));
+    settle_last(&mut shell, &engine, id);
+    assert!(saved(&store, profile).is_empty());
+}
+
+#[test]
+fn repeating_a_pending_reset_does_not_forget_the_site_before_settlement() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "github.com");
+    gesture(&mut shell, id, 1.5);
+    let profile = shell.profile_of_item(id).unwrap();
+    shell.handle(Command::Run("zoom.reset".into()));
+    shell.handle(Command::Run("zoom.reset".into()));
+    assert_eq!(saved(&store, profile), [("github.com".into(), 150)]);
+    let (_, _, request) = engine.last_zoom_request();
+    shell.handle(Command::Engine(EngineEvent::ZoomSettled {
+        id,
+        request,
+        applied_scale: 1.5,
+        succeeded: false,
+    }));
+    assert_eq!(saved(&store, profile), [("github.com".into(), 150)]);
+    assert_eq!(shell.items.tab(id).unwrap().zoom, 1.5);
+}
+
+#[test]
+fn settings_report_failed_resets_and_keep_successful_partial_resets() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "github.com");
+    gesture(&mut shell, id, 1.5);
+    let profile = shell.profile_of_item(id).unwrap();
+    let other = open_and_browse(&mut shell, &screen, "other.example");
+    gesture(&mut shell, other, 1.25);
+    *store.zoom_save_fail_site.lock().unwrap() = Some("github.com".into());
+    for call in [
+        ZoomCall::Forget {
+            site: "github.com".into(),
+        },
+        ZoomCall::ForgetAll,
+    ] {
+        assert_eq!(
+            zoom_call(&mut shell, profile, call),
+            ZoomResponse::Error {
+                error: ZoomError::Unavailable
+            }
+        );
+    }
+    assert_eq!(
+        listed(zoom_call(&mut shell, profile, ZoomCall::Levels)),
+        [("github.com".into(), 150)]
+    );
+    assert_eq!(saved(&store, profile), [("github.com".into(), 150)]);
+    assert!(matches!(
+        zoom_call(
+            &mut shell,
+            profile,
+            ZoomCall::Forget {
+                site: "missing.example".into()
+            }
+        ),
+        ZoomResponse::Levels { .. }
+    ));
+}
+
+#[test]
 fn a_zoom_made_in_the_page_replaces_a_request_in_flight() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

@@ -37,4 +37,5 @@ test("rows are the platform's kinds that were decided, used or changed, in its o
     "popups",
   ]);
   expect(shownKinds(kinds, some("notifications"))).toEqual([]);
+  expect(shownKinds([...kinds, "app_links"], some("app_links", "camera"))).toEqual(["camera"]);
 });

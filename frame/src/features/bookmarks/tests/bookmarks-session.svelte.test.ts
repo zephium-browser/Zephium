@@ -15,10 +15,14 @@ const view = (id: string, title: string, url: string | null = null): BookmarkVie
   children: 0,
   parent: null,
 });
-const listing = (folder: string | null, items: BookmarkView[]): BookmarkResponse => ({
+const listing = (
+  folder: string | null,
+  items: BookmarkView[],
+  title = "Folder",
+): BookmarkResponse => ({
   kind: "listing",
   folder,
-  path: folder ? [{ id: folder, title: "Folder" }] : [],
+  path: folder ? [{ id: folder, title }] : [],
   items,
 });
 
@@ -28,6 +32,53 @@ beforeEach(() => {
 });
 
 describe("bookmarks session", () => {
+  it("preserves a navigation error instead of refreshing the previous folder", async () => {
+    const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
+    const session = new BookmarksSession("profile");
+    let destination!: (value: BookmarkResponse) => void;
+    native.call.mockResolvedValueOnce(listing("A", []));
+    await session.open("A");
+    native.call.mockReturnValueOnce(new Promise((resolve) => (destination = resolve)));
+    const navigation = session.open("B");
+    native.call.mockResolvedValueOnce({ kind: "saved", id: "1" });
+    await session.rename("1", "Renamed");
+    destination({ kind: "error", error: "unavailable" });
+    await navigation;
+    expect(session.error).toBe("unavailable");
+    expect(native.call).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes the destination after a write settles during folder navigation", async () => {
+    const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
+    const session = new BookmarksSession("profile");
+    let finish!: (value: BookmarkResponse) => void;
+    let destination!: (value: BookmarkResponse) => void;
+    let destinationReads = 0;
+    native.call.mockImplementation((_profile: string, call: { kind: string; folder?: string }) => {
+      if (call.kind === "rename") return new Promise((resolve) => (finish = resolve));
+      if (call.folder === "B" && destinationReads++ === 0)
+        return new Promise((resolve) => (destination = resolve));
+      return Promise.resolve(
+        call.folder === "B" ? listing("B", [], "Fresh") : listing("A", [view("B", "Before")]),
+      );
+    });
+    await session.open("A");
+    const write = session.rename("B", "Fresh");
+    const navigation = session.open("B");
+    finish({ kind: "saved", id: "B" });
+    await write;
+    expect(
+      native.call.mock.calls
+        .filter(([, call]) => call.kind === "list")
+        .map(([, call]) => call.folder),
+    ).toEqual(["A", "B"]);
+    destination(listing("B", [], "Before"));
+    await navigation;
+    expect(session.folder).toBe("B");
+    expect(session.path[0]?.title).toBe("Fresh");
+    expect(destinationReads).toBe(2);
+  });
+
   it("ignores a prior search reply as soon as the query changes", async () => {
     vi.useFakeTimers();
     const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");

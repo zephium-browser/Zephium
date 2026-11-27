@@ -50,7 +50,7 @@ impl Keys {
     pub const fn on(self, platform: Platform) -> Option<&'static str> {
         match platform {
             Platform::Mac => self.mac,
-            Platform::Other => self.other,
+            Platform::Windows | Platform::Other => self.other,
         }
     }
 }
@@ -136,6 +136,27 @@ pub const REGISTRY: &[CommandSpec] = &[
         "New Private Window",
         Keys::same("CmdOrCtrl+Shift+N"),
         Group::File,
+    ),
+    // Opens the launcher for a page of its own in a mini window.
+    command(
+        "window.newMini",
+        "New Mini Window",
+        Keys::same("CmdOrCtrl+Shift+M"),
+        Group::File,
+    ),
+    // Keys a mini window answers while it is in front. Elsewhere they do
+    // nothing, so they stay out of the menus.
+    command(
+        "mini.openInMain",
+        "Open Mini Window in Zephium",
+        Keys::same("CmdOrCtrl+O"),
+        Group::Keys,
+    ),
+    command(
+        "mini.keepOnTop",
+        "Keep Mini Window on Top",
+        Keys::NONE,
+        Group::Keys,
     ),
     command(
         "window.closePrivate",
@@ -360,30 +381,40 @@ pub const REGISTRY: &[CommandSpec] = &[
     command(
         "tab.next",
         "Next Tab",
-        Keys::same("Ctrl+Tab"),
+        Keys::same("Ctrl+PageDown"),
         Group::Window,
     ),
     command(
         "tab.previous",
         "Previous Tab",
-        Keys::same("Ctrl+Shift+Tab"),
+        Keys::same("Ctrl+PageUp"),
         Group::Window,
+    ),
+    command(
+        "tab.recent.next",
+        "Next Recent Tab",
+        Keys::same("Ctrl+Tab"),
+        Group::Keys,
+    ),
+    command(
+        "tab.recent.previous",
+        "Previous Recent Tab",
+        Keys::same("Ctrl+Shift+Tab"),
+        Group::Keys,
     ),
     alternate(
         "tab.next.alt",
         "Next Tab (Alternate)",
-        split("CmdOrCtrl+Shift+]", "Ctrl+PageDown"),
+        mac_only("CmdOrCtrl+Shift+]"),
         "tab.next",
     ),
     alternate(
         "tab.previous.alt",
         "Previous Tab (Alternate)",
-        split("CmdOrCtrl+Shift+[", "Ctrl+PageUp"),
+        mac_only("CmdOrCtrl+Shift+["),
         "tab.previous",
     ),
-    // The same walk down the sidebar as Ctrl+Tab, on the arrows that point
-    // along it. Ctrl+Alt stays clear of text: only letters and digits are
-    // AltGr's.
+    // The same walk down the sidebar, using arrows so Ctrl+Alt stays clear of text.
     command(
         "tab.above",
         "Select Tab Above",
@@ -571,6 +602,19 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::Keys,
     ),
     command(
+        "profile.next",
+        "Next Profile",
+        // Ctrl+P prints on Windows, so the other platform gets a function key.
+        split("Ctrl+Cmd+P", "F9"),
+        Group::Keys,
+    ),
+    command(
+        "profile.previous",
+        "Previous Profile",
+        split("Ctrl+Cmd+Shift+P", "Shift+F9"),
+        Group::Keys,
+    ),
+    command(
         "work.pane.close",
         "Close Pane",
         Keys::same("Escape"),
@@ -742,7 +786,7 @@ fn validate_binding_on(
 mod tests {
     use super::*;
 
-    const PLATFORMS: [Platform; 2] = [Platform::Mac, Platform::Other];
+    const PLATFORMS: [Platform; 3] = [Platform::Mac, Platform::Windows, Platform::Other];
 
     #[test]
     fn ids_are_unique() {
@@ -902,6 +946,20 @@ mod tests {
     }
 
     #[test]
+    fn recent_and_sidebar_walks_have_distinct_defaults_on_both_platforms() {
+        for platform in [Platform::Mac, Platform::Other] {
+            let keys = bound_to(platform);
+            assert_eq!(keys.get("Ctrl+Tab").copied(), Some("tab.recent.next"));
+            assert_eq!(
+                keys.get("Ctrl+Shift+Tab").copied(),
+                Some("tab.recent.previous")
+            );
+            assert_eq!(keys.get("Ctrl+PageDown").copied(), Some("tab.next"));
+            assert_eq!(keys.get("Ctrl+PageUp").copied(), Some("tab.previous"));
+        }
+    }
+
+    #[test]
     fn windows_and_linux_answer_chromes_keys() {
         let keys = bound_to(Platform::Other);
         for (text, id) in [
@@ -916,8 +974,8 @@ mod tests {
             ("Alt+Left", "nav.back.alt"),
             ("Alt+Right", "nav.forward.alt"),
             ("Alt+Home", "nav.home"),
-            ("Ctrl+PageUp", "tab.previous.alt"),
-            ("Ctrl+PageDown", "tab.next.alt"),
+            ("Ctrl+PageUp", "tab.previous"),
+            ("Ctrl+PageDown", "tab.next"),
             ("Ctrl+Shift+Delete", "settings.clearData"),
             ("Ctrl+H", "tool.history"),
             ("Ctrl+J", "tool.downloads"),

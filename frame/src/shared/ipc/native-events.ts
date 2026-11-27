@@ -23,6 +23,7 @@ import type {
   ImportJobView,
   ItemsChanged,
   KeymapChanged,
+  MiniView,
   LayoutChanged,
   MediaPlayerChanged,
   OperationProcessed,
@@ -35,11 +36,13 @@ import type {
   VoiceLevels,
   SwipeScroll,
   WebExtensionAccessRequested,
+  WebExtensionStoreClicked,
 } from "./bindings";
 
 type PayloadEvent<T> = { payload: T };
 type Listener<T> = (event: PayloadEvent<T>) => void;
 type PresentationTab = { tab: TabChanged; active: string | null };
+type MiniPresentation = { tab: TabChanged };
 
 function scopedEvent<T>(name: string) {
   return {
@@ -64,6 +67,8 @@ export const nativeEventNames = {
   pageAssistChanged: "zephium:page-assist-changed",
   accountChanged: "zephium:account-changed",
   panelState: "zephium:panel-state",
+  mini: "zephium:mini",
+  miniPresentation: "zephium:mini-presentation",
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
   resourceChanged: "zephium:resource-changed",
@@ -79,6 +84,7 @@ export const nativeEventNames = {
   extensionActionShortcut: "zephium:extension-action-shortcut",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
   webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionStoreClicked: "zephium:web-extension-store-click",
   webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
@@ -120,6 +126,8 @@ export const events = {
   notesChanged: scopedEvent<NoteChanges>(nativeEventNames.notesChanged),
   downloadsChanged: scopedEvent<DownloadsChanged>(nativeEventNames.downloadsChanged),
   panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
+  mini: scopedEvent<MiniView>(nativeEventNames.mini),
+  miniPresentation: scopedEvent<MiniPresentation>(nativeEventNames.miniPresentation),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
     nativeEventNames.browserCredentialCapabilityChanged,
   ),
@@ -137,6 +145,9 @@ export const events = {
   ),
   webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
     nativeEventNames.webExtensionAccessRequested,
+  ),
+  webExtensionStoreClicked: scopedEvent<WebExtensionStoreClicked>(
+    nativeEventNames.webExtensionStoreClicked,
   ),
   /** The path of an extension package dropped on the browser. */
   webExtensionDropped: scopedEvent<string>(nativeEventNames.webExtensionDropped),

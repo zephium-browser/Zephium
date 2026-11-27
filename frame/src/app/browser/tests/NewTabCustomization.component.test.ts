@@ -26,6 +26,9 @@ const native = vi.hoisted(() => ({
   blocked: vi.fn(),
   time: vi.fn(),
 }));
+
+// The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: native.profile, kind: "default", name: "Alex" }) },
 }));
@@ -33,9 +36,9 @@ vi.mock("$shared/sky", async (original) => {
   const real = await original<typeof import("$shared/sky")>();
   return {
     ...real,
-    decode: (scene: import("$shared/sky").Scene) => {
+    prepareSky: (scene: import("$shared/sky").Scene) => {
       native.decode(scene);
-      return real.decode(scene);
+      return real.prepareSky(scene);
     },
   };
 });
@@ -107,6 +110,7 @@ afterEach(() => {
   preferences.dispose();
   retryImage();
   delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.material;
 });
 async function tab() {
   const { default: NewTab } = await loadNewTab();
@@ -165,7 +169,7 @@ test("a custom background uses one sized local image, no sky decode or frost, an
   await expect.poll(() => ntp.container.querySelector("img")?.naturalWidth ?? 0).toBeGreaterThan(0);
   expect(native.decode).not.toHaveBeenCalled();
   expect(native.media).toHaveBeenCalledTimes(1);
-  expect(native.media.mock.calls[0]).toEqual([native.profile, digest, 1600]);
+  expect(native.media.mock.calls[0]).toEqual([native.profile, digest, 2400]);
   expect(ntp.container.querySelector(".sky")).toBeNull();
   expect(
     ntp.container.querySelector<HTMLElement>(".newtab")!.style.getPropertyValue("--sky-frost"),
@@ -182,6 +186,116 @@ test("a custom background uses one sized local image, no sky decode or frost, an
   expect(preferences.value("ui.newtab-image")).toBe("");
   expect(preferences.value("ui.newtab-dim")).toBe("false");
 });
+
+test.each(["light", "dark"])(
+  "custom-image figures follow the native material in %s",
+  async (theme) => {
+    native.settings = { "ui.newtab-background": "image", "ui.newtab-image": digest };
+    document.documentElement.dataset.theme = theme;
+    await preferences.init();
+    const ntp = await tab();
+    await expect
+      .poll(() => ntp.container.querySelector("img")?.naturalWidth ?? 0)
+      .toBeGreaterThan(0);
+    const figures = [...ntp.container.querySelectorAll<HTMLElement>(".figure")];
+    expect(figures).toHaveLength(3);
+    const paint = document.createElement("canvas").getContext("2d")!;
+    for (const material of [
+      null,
+      "none",
+      "vibrancy",
+      "liquid_glass",
+      "acrylic",
+      "mica",
+      "mica_alt",
+    ]) {
+      if (material === null) delete document.documentElement.dataset.material;
+      else document.documentElement.dataset.material = material;
+      const translucent = material !== null && material !== "none";
+      for (const figure of figures) {
+        const style = getComputedStyle(figure);
+        expect(style.backdropFilter, material ?? "bootstrap").toBe("none");
+        const alpha = () => {
+          paint.clearRect(0, 0, 1, 1);
+          paint.fillStyle = getComputedStyle(figure).backgroundColor;
+          paint.fillRect(0, 0, 1, 1);
+          return paint.getImageData(0, 0, 1, 1).data[3]!;
+        };
+        if (translucent) {
+          await expect.poll(alpha).toBeLessThan(255);
+          expect(alpha()).toBeGreaterThan(0);
+        } else await expect.poll(alpha).toBe(255);
+        expect(style.transitionProperty).not.toContain("backdrop-filter");
+      }
+    }
+    document.documentElement.dataset.material = "liquid_glass";
+    const button = ntp.container.querySelector<HTMLButtonElement>("button.figure")!;
+    // WebKit's Tab skips buttons by default, so focus it as the keyboard would.
+    button.focus({ focusVisible: true } as FocusOptions);
+    expect(document.activeElement).toBe(button);
+    expect(button.matches(":focus-visible")).toBe(true);
+    expect(getComputedStyle(button).outlineStyle).toBe("solid");
+    await page.elementLocator(ntp.container).screenshot({
+      path: `../../../../../target/newtab/custom-figures-${theme}.png`,
+    });
+    await preferences.set("ui.newtab-background", "sky");
+    await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
+    for (const figure of figures) expect(getComputedStyle(figure).backdropFilter).toBe("none");
+  },
+);
+
+test.each(["light", "dark"])(
+  "custom-image figures stay readable on extreme wallpaper in %s",
+  async (theme) => {
+    native.settings = { "ui.newtab-background": "image", "ui.newtab-image": digest };
+    const wallpaper = theme === "dark" ? [255, 255, 255] : [0, 0, 0];
+    native.media.mockReturnValue(
+      `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><rect width="1600" height="900" fill="${theme === "dark" ? "white" : "black"}"/></svg>`)}`,
+    );
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.dataset.material = "liquid_glass";
+    await preferences.init();
+    const ntp = await tab();
+    await expect
+      .poll(() => ntp.container.querySelector("img")?.naturalWidth ?? 0)
+      .toBeGreaterThan(0);
+    const paint = document.createElement("canvas").getContext("2d")!;
+    const rgba = (color: string) => {
+      paint.clearRect(0, 0, 1, 1);
+      paint.fillStyle = color;
+      paint.fillRect(0, 0, 1, 1);
+      return [...paint.getImageData(0, 0, 1, 1).data];
+    };
+    const over = (front: number[], back: number[]) => {
+      const alpha = front[3]! / 255;
+      return front
+        .slice(0, 3)
+        .map((channel, index) => channel * alpha + back[index]! * (1 - alpha));
+    };
+    const luminance = (rgb: number[]) => {
+      const linear = rgb.map((channel) => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722;
+    };
+    const figures = [...ntp.container.querySelectorAll<HTMLElement>(".figure")];
+    expect(figures).toHaveLength(3);
+    for (const figure of figures) {
+      for (const text of figure.querySelectorAll<HTMLElement>(".name, .value, .foot")) {
+        await expect
+          .poll(() => {
+            const background = over(rgba(getComputedStyle(figure).backgroundColor), wallpaper);
+            const foreground = over(rgba(getComputedStyle(text).color), background);
+            const first = luminance(background);
+            const second = luminance(foreground);
+            return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+          })
+          .toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  },
+);
 
 test("native image import commits only the admitted digest, and cancellation keeps the sky", async () => {
   await preferences.init();
@@ -226,7 +340,7 @@ test("a missing or broken image silently restores the sky, including its materia
   expect(newTabImage()).toBeNull();
   expect(ntp.container.querySelector("[role=alert]")).toBeNull();
   expect(ntp.container.querySelector("img")).toBeNull();
-  expect(native.decode).toHaveBeenCalled();
+  await expect.poll(() => ntp.container.querySelector(".sky canvas")).not.toBeNull();
 });
 
 test("settings follow the existing dark and light surfaces", async () => {
@@ -241,4 +355,17 @@ test("settings follow the existing dark and light surfaces", async () => {
       .elementLocator(settings.container)
       .screenshot({ path: `../../../../../target/newtab/customization-${theme}.png` });
   }
+});
+
+test("a later new tab shows its printed sky as it first appears", async () => {
+  await preferences.init();
+  const first = await tab();
+  await expect
+    .poll(() => first.container.querySelector<HTMLElement>(".newtab")!.dataset.ready)
+    .toBe("true");
+  first.unmount();
+
+  const next = await tab();
+  expect(next.container.querySelector<HTMLElement>(".newtab")!.dataset.ready).toBe("true");
+  await expect.poll(() => next.container.querySelector(".sky canvas")).not.toBeNull();
 });

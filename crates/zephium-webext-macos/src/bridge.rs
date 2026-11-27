@@ -8,13 +8,11 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_foundation::{NSError, NSString};
-use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionPermission, WKWebExtensionPermissionClipboardWrite,
-};
+use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionPermission};
 use serde_json::Value;
 
 use crate::runtime::Shared;
-use crate::{error, json, offscreen, LogLevel};
+use crate::{api, data, error, idle, json, notifications, offscreen, privacy, LogLevel};
 
 pub(crate) const APPLICATION: &str = "app.zephium.webext";
 
@@ -55,7 +53,9 @@ pub(crate) fn handle(
         );
         return;
     }
-    if message.get("api").and_then(Value::as_str) == Some("offscreen.create") {
+    if message.get("api").and_then(Value::as_str) == Some("offscreen.create")
+        && declares(context, "offscreen")
+    {
         let url = message
             .get("url")
             .and_then(Value::as_str)
@@ -78,7 +78,78 @@ pub(crate) fn handle(
         );
         return;
     }
+    if message.get("api").and_then(Value::as_str) == Some("permissions.request") {
+        let reply = reply.copy();
+        api::request(
+            shared,
+            context,
+            &message,
+            Box::new(move |result| respond(&reply, result)),
+        );
+        return;
+    }
+    let id = extension(context);
+    if let Some(api) = message
+        .get("api")
+        .and_then(Value::as_str)
+        .filter(|api| data::handles(api))
+    {
+        let reply = reply.copy();
+        data::request(
+            shared,
+            &id,
+            api,
+            &message,
+            Box::new(move |result| respond(&reply, result)),
+        );
+        return;
+    }
+    let gate = |permission: &str| {
+        if api::granted(shared, &id, permission) {
+            Ok(())
+        } else {
+            Err(format!(
+                "The extension doesn't have the '{permission}' permission."
+            ))
+        }
+    };
+    let interval = message.get("interval").and_then(Value::as_u64);
     let result = match message.get("api").and_then(Value::as_str) {
+        Some("permissions.state") => Ok(api::state(shared, context)),
+        Some("permissions.remove") => Ok(api::remove(shared, context, &message)),
+        Some("idle.query") => gate("idle").map(|()| Value::from(idle::query(interval))),
+        Some("idle.watch") => gate("idle").map(|()| {
+            idle::watch(shared, &id, interval);
+            Value::Null
+        }),
+        Some("notifications.create") => gate("notifications").and_then(|()| {
+            let name = unsafe { context.webExtension().displayName() }
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            notifications::create(shared, &id, &name, &message)
+        }),
+        Some("notifications.update") => gate("notifications").and_then(|()| {
+            let name = unsafe { context.webExtension().displayName() }
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            notifications::update(shared, &id, &name, &message)
+        }),
+        Some("notifications.clear") => gate("notifications").map(|()| {
+            let target = message
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Value::Bool(notifications::clear(shared, &id, target))
+        }),
+        Some("notifications.getAll") => {
+            gate("notifications").map(|()| notifications::all(shared, &id))
+        }
+        Some("notifications.permission") => Ok(Value::from(notifications::permission())),
+        Some("privacy.get") => gate("privacy").and_then(|()| privacy::get(shared, &id, &message)),
+        Some("privacy.set") => gate("privacy").and_then(|()| privacy::set(shared, &id, &message)),
+        Some("privacy.clear") => {
+            gate("privacy").and_then(|()| privacy::clear(shared, &id, &message))
+        }
         Some("log") => {
             let level = match message.get("level").and_then(Value::as_str) {
                 Some("error") => LogLevel::Error,
@@ -101,12 +172,17 @@ pub(crate) fn handle(
             }
             crate::worker_gone(shared, &id);
             crate::lifetime::started(shared, &id);
+            crate::background::started(shared, context);
             Ok(Value::Null)
         }
         Some("offscreen.close") => Ok(Value::Bool(offscreen::close(shared, &extension(context)))),
+        Some("runtime.contexts") => Ok(contexts(shared, context)),
         Some("offscreen.has") => Ok(Value::Bool(offscreen::has(shared, &extension(context)))),
         Some("clipboard.write")
-            if permitted(context, unsafe { WKWebExtensionPermissionClipboardWrite }) =>
+            if permitted(
+                crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite"),
+                |permission| unsafe { context.hasPermission(permission) },
+            ) =>
         {
             let text = message
                 .get("text")
@@ -124,17 +200,13 @@ pub(crate) fn handle(
                 .map(|text| text.to_string());
             Ok(text.map_or(Value::Null, Value::String))
         }
-        Some("notify") => {
-            let title = message
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            shared.log(context, LogLevel::Info, &format!("notification: {title}"));
-            Ok(Value::Null)
-        }
         Some(api) => Err(format!("{api} is not supported")),
         None => Err("missing api".to_owned()),
     };
+    respond(reply, result);
+}
+
+fn respond(reply: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>, result: Result<Value, String>) {
     match result {
         Ok(value) => {
             let object = json::to_object(&value);
@@ -147,15 +219,67 @@ pub(crate) fn handle(
     }
 }
 
+/// `runtime.getContexts` from what the browser knows: the background, the
+/// offscreen document and the extension's pages shown in tabs. Popups and
+/// frames inside web pages aren't listed.
+fn contexts(shared: &Rc<Shared>, context: &WKWebExtensionContext) -> Value {
+    let id = extension(context);
+    let origin = format!("{}://{id}", crate::runtime::SCHEME);
+    let entry = |kind: &str, url: Option<String>, tab: i64, window: i64| {
+        serde_json::json!({
+            "contextType": kind,
+            "contextId": format!("{kind}:{}:{tab}", url.as_deref().unwrap_or_default()),
+            "tabId": tab,
+            "windowId": window,
+            "frameId": if tab >= 0 { 0 } else { -1 },
+            "documentUrl": url,
+            "documentOrigin": url.as_ref().map(|_| origin.clone()),
+            "incognito": false,
+        })
+    };
+    let mut found = Vec::new();
+    if unsafe { context.webExtension().hasBackgroundContent() } {
+        let worker = unsafe { context.webExtension().manifest() };
+        let worker = json::from_object(Some(&worker));
+        let script = worker["background"]["service_worker"]
+            .as_str()
+            .map(str::to_owned);
+        found.push(entry(
+            "BACKGROUND",
+            script.map(|s| format!("{origin}/{}", s.trim_start_matches('/'))),
+            -1,
+            -1,
+        ));
+    }
+    if let Some(url) = offscreen::url(shared, &id) {
+        found.push(entry("OFFSCREEN_DOCUMENT", Some(url), -1, -1));
+    }
+    let graph = shared.graph.borrow();
+    for window in &graph.windows {
+        for tab in window.tabs() {
+            let url = tab
+                .webview()
+                .and_then(|view| unsafe { view.URL() })
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string())
+                .filter(|url| url.starts_with(&format!("{origin}/")));
+            if let Some(url) = url {
+                found.push(entry("TAB", Some(url), tab.id() as i64, window.id() as i64));
+            }
+        }
+    }
+    Value::Array(found)
+}
+
 fn extension(context: &WKWebExtensionContext) -> String {
     unsafe { context.uniqueIdentifier() }.to_string()
 }
 
 fn permitted(
-    context: &WKWebExtensionContext,
     permission: Option<&WKWebExtensionPermission>,
+    has_permission: impl FnOnce(&WKWebExtensionPermission) -> bool,
 ) -> bool {
-    permission.is_some_and(|permission| unsafe { context.hasPermission(permission) })
+    permission.is_some_and(has_permission)
 }
 
 /// Whether the manifest asks for `permission`, for permissions WebKit
@@ -171,4 +295,23 @@ fn declares(context: &WKWebExtensionContext, permission: &str) -> bool {
                 .iter()
                 .any(|entry| entry.as_str() == Some(permission))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_clipboard_write_permission_denies_without_querying_context() {
+        crate::without_webkit_string(c"WKWebExtensionPermissionClipboardWrite", || {
+            assert!(!permitted(
+                crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite"),
+                |_| panic!("an unresolved permission must not query a WebKit context"),
+            ));
+        });
+        if let Some(permission) = crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite") {
+            assert!(permitted(Some(permission), |_| true));
+            assert!(!permitted(Some(permission), |_| false));
+        }
+    }
 }

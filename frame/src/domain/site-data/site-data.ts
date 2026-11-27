@@ -15,8 +15,9 @@ export type ClearKinds = {
   downloads: boolean;
 };
 
-/** `private` means the window keeps nothing to clear. */
-export type ClearOutcome = "cleared" | "private" | "failed";
+/** `private` means the window keeps nothing to clear; `partial` that some of
+ *  a site's data could not be removed. */
+export type ClearOutcome = "cleared" | "partial" | "private" | "failed";
 
 export type SiteList = {
   sites: SiteDataView[];
@@ -34,6 +35,7 @@ async function call(profile: string, request: BrowsingDataCall): Promise<Browsin
 
 function outcome(response: BrowsingDataResponse): ClearOutcome {
   if (response.kind === "cleared") return "cleared";
+  if (response.kind === "partly_cleared") return "partial";
   return response.kind === "error" && response.error === "private" ? "private" : "failed";
 }
 

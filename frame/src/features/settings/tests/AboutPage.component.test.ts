@@ -13,9 +13,11 @@ import AboutPage from "../components/sections/AboutPage.svelte";
 const REPORT = vi.hoisted(() => "Zephium diagnostics\nApp: Zephium 1.0.1\nLog: 2 lines");
 
 const native = vi.hoisted(() => ({
+  os: "macOS 26.1.0" as string | null,
   status: { state: "upToDate" } as UpdateStatus,
   check: vi.fn(async (): Promise<UpdateStatus> => ({ state: "ready", version: "1.0.2" })),
   relaunch: vi.fn(async () => true),
+  appRelaunch: vi.fn(async () => true),
   openUrl: vi.fn(async () => ({ accepted: true, operation_id: null })),
   softwareUpdate: vi.fn(async () => true),
   report: vi.fn(async (): Promise<string | null> => REPORT),
@@ -25,10 +27,12 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
-    aboutInfo: async () => ({ version: "1.0.1", os: "macOS 26.1.0", arch: "aarch64" }),
+    aboutInfo: async () =>
+      native.os === null ? null : { version: "1.0.1", os: native.os, arch: "aarch64" },
     updateStatus: async () => native.status,
     updateCheck: native.check,
     updateRelaunch: native.relaunch,
+    appRelaunch: native.appRelaunch,
     browserOpenUrl: native.openUrl,
     openSoftwareUpdate: native.softwareUpdate,
     diagnosticsReport: native.report,
@@ -49,6 +53,7 @@ vi.mock("$domain/preferences", () => ({
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  native.os = "macOS 26.1.0";
   await runtime.init();
 });
 afterEach(() => {
@@ -106,6 +111,7 @@ test("a system behind on security updates is explained where the rail sends peop
   native.status = { state: "upToDate" };
   emitNativeEvent("runtimeStatusChanged", {
     restart_required: false,
+    restart_reason: null,
     session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: [
@@ -137,17 +143,44 @@ test("manual installation opens the exact release instead of retrying an impossi
   expect(screen.getByRole("button", { name: "Relaunch to update" }).query()).toBeNull();
 });
 
-test("a postponed update remains ready with its failure explained", async () => {
+test.each([
+  ["activityCheckFailed", "Couldn’t check for active downloads. Try again."],
+  [
+    "previousInstallIncomplete",
+    "The previous update did not finish. Your downloaded update is still ready to install.",
+  ],
+  [
+    "workNotSaved",
+    "Your work could not be saved. The update is still ready; try again after saving.",
+  ],
+] as const)("a ready update localizes retry reason %s", async (reason, message) => {
   native.status = {
     state: "ready",
     version: "1.0.2",
-    retry_reason:
-      "The previous update did not finish. Your downloaded update is still ready to install.",
+    retry_reason: reason,
   };
   const screen = await render(AboutPage);
-  await expect.element(screen.getByText(native.status.retry_reason!)).toBeVisible();
+  await expect.element(screen.getByText(message)).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Relaunch to update" })).toBeEnabled();
 });
+
+test.each(["macOS 26.1.0", "Windows 11", null])(
+  "automatic update installation uses native OS %s instead of the user agent",
+  async (os) => {
+    native.status = { state: "upToDate" };
+    native.os = os;
+    const screen = await render(AboutPage);
+    await expect
+      .element(
+        screen.getByText(
+          os?.startsWith("macOS")
+            ? "New versions download in the background and install when you relaunch or quit."
+            : "New versions download in the background and install when you relaunch.",
+        ),
+      )
+      .toBeVisible();
+  },
+);
 
 test("the links open Zephium's own pages in a tab", async () => {
   native.status = { state: "upToDate" };
@@ -249,4 +282,23 @@ test("the log folder opens from About, and settings search finds both actions", 
   expect(searchSettings("bug report").map((result) => result.target)).toContain(
     "about.diagnostics",
   );
+});
+
+test("a restart the runtime waits on is offered in About, even without updates", async () => {
+  native.status = { state: "unavailable" };
+  emitNativeEvent("runtimeStatusChanged", {
+    restart_required: true,
+    restart_reason: "runtime_update",
+    session_set_aside: false,
+    user_content_degraded_scope_count: 0,
+    security_advisories: [],
+  });
+  const screen = await render(AboutPage);
+  await expect.element(screen.getByText("Restart needed")).toBeVisible();
+  await expect
+    .element(screen.getByText("A newer WebView2 is installed.", { exact: false }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Restart to finish updating" }).click();
+  expect(native.appRelaunch).toHaveBeenCalledOnce();
+  expect(native.relaunch).not.toHaveBeenCalled();
 });

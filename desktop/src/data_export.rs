@@ -93,8 +93,44 @@ pub(crate) async fn export_browser_data(
     let Some(path) = picked.and_then(|picked| picked.into_path().ok()) else {
         return ExportOutcomeView::Cancelled;
     };
-    match tokio::task::spawn_blocking(move || std::fs::write(path, text)).await {
+    match tokio::task::spawn_blocking(move || write_export(&path, text.as_bytes())).await {
         Ok(Ok(())) => ExportOutcomeView::Saved,
         _ => ExportOutcomeView::Failed,
+    }
+}
+
+fn write_export(path: &std::path::Path, mut bytes: impl std::io::Read) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing export directory"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut bytes, &mut file)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Read};
+
+    #[test]
+    fn failed_export_write_preserves_the_original() {
+        struct Failed;
+        impl Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected failure"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.html");
+        std::fs::write(&path, b"original").unwrap();
+        let bytes = (&b"partial"[..]).chain(Failed);
+        assert!(write_export(&path, bytes).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        write_export(&path, &b"replacement"[..]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
     }
 }

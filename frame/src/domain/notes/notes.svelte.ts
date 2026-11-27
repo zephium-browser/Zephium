@@ -406,8 +406,9 @@ export class NoteSession {
     if (this.note?.id === id) return true;
     if (!(await this.close())) return false;
     const epoch = this.#epoch;
+    const document = this.#document;
     const result = await this.#call({ kind: "get", id });
-    if (epoch !== this.#epoch) return false;
+    if (epoch !== this.#epoch || document !== this.#document) return false;
     if (result.kind !== "record") {
       // Shown in place of the note, so choosing it is never a silent no-op.
       const summary = this.items.find((item) => item.id === id) ?? null;

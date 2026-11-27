@@ -142,6 +142,43 @@ fn switching_shows_the_other_profile_and_returns_to_where_it_left() {
 }
 
 #[test]
+fn a_profile_tombstone_clears_only_that_profiles_destination_entries() {
+    let destination = "https://start.example/";
+    let (mut shell, _, screen, _) = browsed();
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: destination.into(),
+    });
+    shell.handle(Command::Open);
+    let personal_tab = active_id(&screen);
+    commit_url(&mut shell, personal_tab, destination);
+    present_committed(&mut shell, personal_tab, destination);
+    let personal = window_profile(&shell);
+    let work = create(&mut shell, "Work");
+    shell.handle_operation(Command::SwitchProfile(work));
+    let work_tab = active_id(&screen);
+    assert_eq!(shell.profile_of_item(work_tab), Some(work));
+    commit_url(&mut shell, work_tab, destination);
+    present_committed(&mut shell, work_tab, destination);
+    shell.handle_operation(Command::SwitchProfile(personal));
+    assert_eq!(window_profile(&shell), personal);
+    assert!(shell.new_tab_destinations.contains_key(&personal_tab));
+    assert!(shell.new_tab_destinations.contains_key(&work_tab));
+
+    shell.apply_profile_tombstone(work);
+
+    assert!(shell.items.tab(work_tab).is_none());
+    assert!(!shell.new_tab_destinations.contains_key(&work_tab));
+    assert_eq!(
+        shell
+            .new_tab_destinations
+            .get(&personal_tab)
+            .map(url::Url::as_str),
+        Some(destination)
+    );
+}
+
+#[test]
 fn switching_from_a_private_window_leaves_private_first() {
     let (mut shell, _engine, _screen, _store) = browsed();
     let personal = window_profile(&shell);
@@ -242,4 +279,99 @@ fn creating_from_the_sidebar_also_switches_to_the_new_profile() {
         shell.profiles_view().unwrap().current,
         Some(school.to_string())
     );
+}
+
+#[test]
+fn next_and_previous_profile_cycle_the_roster() {
+    let (mut shell, _engine, _screen, _store) = browsed();
+    let first = window_profile(&shell);
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), first);
+    let second = create(&mut shell, "Studio");
+    let third = create(&mut shell, "School");
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), second);
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), third);
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), first);
+    shell.handle(Command::Run("profile.previous".into()));
+    assert_eq!(window_profile(&shell), third);
+    shell.handle(Command::Run("profile.previous".into()));
+    assert_eq!(window_profile(&shell), second);
+    shell.handle(Command::Run("profile.previous".into()));
+    assert_eq!(window_profile(&shell), first);
+}
+
+#[test]
+fn profile_steps_accumulate_while_browser_return_is_pending() {
+    let (mut shell, _engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let first = window_profile(&shell);
+    let second = create(&mut shell, "Studio");
+    let third = create(&mut shell, "School");
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://example.com/".into(),
+    }));
+    present_committed(&mut shell, page, "https://example.com/");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+
+    for target in [second, third] {
+        let result = shell.handle_operation(Command::Run("profile.next".into()));
+        assert_eq!(result.outcome, OperationOutcome::Deferred);
+        assert_eq!(window_profile(&shell), first);
+        assert!(matches!(
+            shell.browser_after_return.as_deref(),
+            Some(Command::SwitchProfile(queued)) if *queued == target
+        ));
+    }
+
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+    assert_eq!(window_profile(&shell), third);
+    assert_eq!(shell.active_browser_page(), None);
+    assert!(shell.browser_after_return.is_none());
+}
+
+#[test]
+fn profile_steps_require_a_focused_window() {
+    let (mut shell, _engine, _screen) = setup();
+    for forward in [true, false] {
+        let result = shell.operation_step_profile(forward);
+        assert_eq!(result.outcome, OperationOutcome::Rejected);
+        assert_eq!(result.reason, OperationReason::NoFocusedWindow);
+    }
+}
+
+#[test]
+fn profile_steps_reject_an_unrostered_current_profile() {
+    let (mut shell, _engine, _screen, _store) = browsed();
+    let current = window_profile(&shell);
+    shell.profiles.remove(current).unwrap();
+    for forward in [true, false] {
+        let result = shell.operation_step_profile(forward);
+        assert_eq!(result.outcome, OperationOutcome::Rejected);
+        assert_eq!(result.reason, OperationReason::InvalidScope);
+        assert_eq!(window_profile(&shell), current);
+    }
+}
+
+#[test]
+fn profile_steps_leave_private_without_cycling_through_incognito() {
+    let (mut shell, _engine, _screen, _store) = browsed();
+    let first = window_profile(&shell);
+    let second = create(&mut shell, "Studio");
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(shell.private_shown());
+    shell.handle(Command::Run("profile.next".into()));
+    assert!(!shell.private_shown());
+    assert_eq!(window_profile(&shell), second);
+    shell.handle(Command::Run("profile.previous".into()));
+    assert_eq!(window_profile(&shell), first);
 }

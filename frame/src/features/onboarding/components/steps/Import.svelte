@@ -1,4 +1,5 @@
 <script lang="ts">
+  import EngineMark from "$shared/ui/EngineMark";
   import { Globe02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { browserImport, type ImportKind } from "$domain/browser-import";
@@ -24,6 +25,7 @@
   );
   let available = $derived(browserImport.available());
   let job = $derived(browserImport.current());
+  let refused = $derived(browserImport.startFailure());
   let nothingFound = $derived(browserImport.found()?.length === 0);
   let failure = $derived(job?.kinds.find((entry) => entry.state === "failed") ?? null);
   let jobBrowser = $derived(sources.find((candidate) => candidate.id === job?.source)?.name ?? "");
@@ -144,6 +146,8 @@
           >{m.onb_import_allow()}</Button
         >
       {/if}
+    {:else if job?.finished && job.kinds.some((entry) => entry.state === "partial")}
+      <span class="reading">{m.import_kind_partial()}</span>
     {:else if job?.finished && !job.cancelled && job.kinds.every((entry) => entry.total === 0)}
       <span class="reading">{m.import_kind_none()}</span>
     {:else if job?.finished}
@@ -183,6 +187,7 @@
           size="compact"
           shape="capsule"
           disabled={!available || offered.length === 0 || source.running}
+          pending={browserImport.busy()}
           onclick={() => void browserImport.start(source.id, source.profiles[0]?.id ?? "", offered)}
           >{m.onb_import_action()}</Button
         >
@@ -193,6 +198,9 @@
     <p class="note">{m.onb_import_none()}</p>
   {/if}
   {#if hint}<p class="note">{hint}</p>{/if}
+  {#if refused && (job || source?.id === refused.id)}
+    <p class="note start-error" role="alert">{m.import_start_failed({ browser: refused.name })}</p>
+  {/if}
 
   <div class="search">
     <p class="label" aria-hidden="true">{m.onb_search_with()}</p>
@@ -210,7 +218,8 @@
           role="radio"
           aria-checked={engine === id}
           disabled={preferences.saving()}
-          onclick={() => void preferences.set("search.engine", id)}>{label}</button
+          onclick={() => void preferences.set("search.engine", id)}
+          ><EngineMark engine={id} size={14} />{label}</button
         >
       {/each}
     </div>
@@ -270,9 +279,13 @@
 
   .engines button {
     position: relative;
+    display: inline-flex;
     flex: 1 1 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     block-size: 30px;
-    padding: 0 13px;
+    padding: 0 9px;
     border: 0;
     border-radius: var(--radius-capsule);
     background: none;
@@ -291,6 +304,22 @@
 
   .engines button[aria-checked="true"] {
     color: var(--color-text);
+  }
+
+  /* The chosen engine's mark is in colour; the others wait in grey. */
+  .engines button :global(.engine-mark) {
+    transition:
+      filter var(--motion-fast) var(--ease-out),
+      opacity var(--motion-fast) var(--ease-out);
+  }
+
+  .engines button:not([aria-checked="true"]) :global(.engine-mark) {
+    opacity: 0.6;
+    filter: grayscale(1);
+  }
+
+  .engines button:not([aria-checked="true"]):hover :global(.engine-mark) {
+    opacity: 0.85;
   }
 
   .engines button:focus-visible {
@@ -446,6 +475,10 @@
     margin: -12px 0 0;
     color: var(--color-faint);
     line-height: 1.45;
+  }
+
+  .note.start-error {
+    color: var(--color-danger);
   }
 
   @keyframes lift {

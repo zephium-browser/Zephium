@@ -25,12 +25,14 @@ const extension: WebExtensionView = {
   state: "starting",
   error: null,
   warnings: [],
+  limitations: [],
   access: "all",
   sites: [],
   site_scoped: false,
   has_options: false,
   held_update: null,
   sideloaded: false,
+  pinned: false,
 };
 
 test("startup preparation failure becomes visible and retry retains the displayed installation", async () => {

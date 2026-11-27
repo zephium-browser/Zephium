@@ -1,10 +1,8 @@
 //! UI-thread-owned pause signal shared by overlapping registration cohorts.
 
-#[cfg(any(not(target_os = "windows"), test))]
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
-#[cfg(any(not(target_os = "windows"), test))]
 use std::rc::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,7 +19,6 @@ struct Inner {
     callbacks: RefCell<Vec<ApplyPause>>,
 }
 
-#[cfg(any(not(target_os = "windows"), test))]
 pub(crate) struct PauseRegistration {
     owner: Weak<Inner>,
     callback: ApplyPause,
@@ -56,7 +53,6 @@ impl ContentPause {
         }
     }
 
-    #[cfg(any(not(target_os = "windows"), test))]
     pub(crate) fn register(&self, callback: impl Fn(bool) + 'static) -> Option<PauseRegistration> {
         let alive = Rc::new(Cell::new(true));
         let active = alive.clone();
@@ -81,7 +77,6 @@ impl ContentPause {
     }
 }
 
-#[cfg(any(not(target_os = "windows"), test))]
 impl Drop for PauseRegistration {
     fn drop(&mut self) {
         self.alive.set(false);

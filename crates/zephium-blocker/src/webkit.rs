@@ -78,6 +78,20 @@ pub(crate) fn simplify_canonical_host_boundary(pattern: &str) -> Option<String> 
     Some(format!("{PREFIX}{host}[^A-Za-z0-9_.%-]"))
 }
 
+/// A trailing `^` becomes `([^A-Za-z0-9_.%-].*)?$`: the pattern then ends
+/// the URL or is followed by a separator. That is the same as two patterns
+/// without `.*`, the pattern ending the URL and the pattern followed by a
+/// separator anywhere, so a rule with no other `.*` need not get an automaton
+/// of its own.
+pub(crate) fn split_separator_end(pattern: &str) -> Option<[String; 2]> {
+    const SUFFIX: &str = "([^A-Za-z0-9_.%-].*)?$";
+    let stem = pattern.strip_suffix(SUFFIX)?;
+    if stem.is_empty() || stem.contains(".*") || stem.ends_with('\\') {
+        return None;
+    }
+    Some([format!("{stem}$"), format!("{stem}[^A-Za-z0-9_.%-]")])
+}
+
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
@@ -133,6 +147,48 @@ mod boundary_tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_separator_end_splits_into_two_rules_that_match_the_same_urls() {
+        for pattern in [
+            r"^[^:]+:(//)?([^/]+\.)?ads\.example/path([^A-Za-z0-9_.%-].*)?$",
+            r"/banner/ad([^A-Za-z0-9_.%-].*)?$",
+            r"\?type=placement([^A-Za-z0-9_.%-].*)?$",
+        ] {
+            let [at_end, before_separator] = split_separator_end(pattern).unwrap();
+            assert!(!at_end.contains(".*") && !before_separator.contains(".*"));
+            let original = regex::Regex::new(pattern).unwrap();
+            let split = [
+                regex::Regex::new(&at_end).unwrap(),
+                regex::Regex::new(&before_separator).unwrap(),
+            ];
+            for stem in [
+                "https://ads.example/path",
+                "https://sub.ads.example/path",
+                "https://x.test/banner/ad",
+                "https://x.test/p?type=placement",
+            ] {
+                for tail in [
+                    "", "/", "?q=1", ":80", "x", "-", "_", ".", "%", "a/b", "/x.js",
+                ] {
+                    let url = format!("{stem}{tail}");
+                    assert_eq!(
+                        original.is_match(&url),
+                        split.iter().any(|regex| regex.is_match(&url)),
+                        "{pattern} on {url}"
+                    );
+                }
+            }
+        }
+        for pattern in [
+            r"/a.*/b([^A-Za-z0-9_.%-].*)?$",
+            r"([^A-Za-z0-9_.%-].*)?$",
+            r"/a\([^A-Za-z0-9_.%-].*)?$",
+            r"/ad([^A-Za-z0-9_.%-])?$",
+        ] {
+            assert_eq!(split_separator_end(pattern), None, "{pattern}");
         }
     }
 }

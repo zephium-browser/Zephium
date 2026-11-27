@@ -1,10 +1,15 @@
 //! Renderer memory per page, for the rule that puts heavy hidden pages to
 //! sleep. One asynchronous query per profile, only when the shell asks.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use webview2_com::GetProcessExtendedInfosCompletedHandler;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Environment, ICoreWebView2Environment13, ICoreWebView2FrameInfo,
-    ICoreWebView2FrameInfo2, ICoreWebView2ProcessExtendedInfoCollection, ICoreWebView2_20,
+    ICoreWebView2, ICoreWebView2Environment, ICoreWebView2Environment13, ICoreWebView2Environment8,
+    ICoreWebView2FrameInfo, ICoreWebView2FrameInfo2, ICoreWebView2ProcessExtendedInfoCollection,
+    ICoreWebView2_2, ICoreWebView2_20, COREWEBVIEW2_PROCESS_KIND_GPU,
     COREWEBVIEW2_PROCESS_KIND_RENDERER,
 };
 use windows::Win32::Foundation::CloseHandle;
@@ -14,6 +19,16 @@ use windows::Win32::System::ProcessStatus::{
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_core::Interface;
 use wry::WebViewExtWindows;
+
+thread_local! {
+    // Environments whose GPU process ended and has not been listed again.
+    // Asking one of them for its processes' frames while the GPU process
+    // restarts can fault inside WebView2 and take the browser down.
+    static GPU_RESTARTING: RefCell<HashMap<usize, Instant>> = RefCell::new(HashMap::new());
+}
+// A restart takes a fraction of a second. After repeated crashes WebView2
+// may stop starting a GPU process at all, so the wait is bounded.
+const GPU_RESTART_WAIT: Duration = Duration::from_secs(10);
 
 const PROCESS_LIMIT: u32 = 1_024;
 const FRAME_LIMIT: usize = 4_096;
@@ -36,6 +51,15 @@ pub(crate) fn sample_renderers(
     environment: &ICoreWebView2Environment,
     done: impl FnOnce(Vec<(u64, Vec<u32>)>) + 'static,
 ) -> bool {
+    if let Some(identity) = identity(environment) {
+        let exited = GPU_RESTARTING.with(|restarting| restarting.borrow().get(&identity).copied());
+        if let Some(exited) = exited {
+            if exited.elapsed() < GPU_RESTART_WAIT && !gpu_listed(environment) {
+                return false;
+            }
+            GPU_RESTARTING.with(|restarting| restarting.borrow_mut().remove(&identity));
+        }
+    }
     let Ok(environment) = environment.cast::<ICoreWebView2Environment13>() else {
         return false;
     };
@@ -50,6 +74,48 @@ pub(crate) fn sample_renderers(
         }));
     // SAFETY: the environment's own UI thread; the handler owns its state.
     unsafe { environment.GetProcessExtendedInfos(&handler) }.is_ok()
+}
+
+/// Notes that `core`'s environment lost its GPU process; it is not sampled
+/// again until a GPU process is listed for it, or the wait runs out.
+pub(crate) fn gpu_process_exited(core: &ICoreWebView2) {
+    // SAFETY: the sender's live core on its UI thread.
+    let environment = core
+        .cast::<ICoreWebView2_2>()
+        .and_then(|core| unsafe { core.Environment() });
+    if let Some(identity) = environment.ok().as_ref().and_then(identity) {
+        GPU_RESTARTING.with(|restarting| restarting.borrow_mut().insert(identity, Instant::now()));
+    }
+}
+
+/// The environment's COM identity, the same whichever interface names it.
+fn identity(environment: &ICoreWebView2Environment) -> Option<usize> {
+    let unknown = environment.cast::<windows_core::IUnknown>().ok()?;
+    Some(unknown.as_raw() as usize)
+}
+
+/// Whether the environment lists a GPU process now. The plain process list
+/// carries no frames and stays safe to read while one restarts.
+fn gpu_listed(environment: &ICoreWebView2Environment) -> bool {
+    let Ok(environment) = environment.cast::<ICoreWebView2Environment8>() else {
+        return false;
+    };
+    // SAFETY: a synchronous, read-only query on the environment's UI thread.
+    let Ok(infos) = (unsafe { environment.GetProcessInfos() }) else {
+        return false;
+    };
+    let mut count = 0_u32;
+    if unsafe { infos.Count(&mut count) }.is_err() {
+        return false;
+    }
+    (0..count.min(PROCESS_LIMIT)).any(|index| {
+        let mut kind = Default::default();
+        // SAFETY: index is below the collection's own count.
+        unsafe { infos.GetValueAtIndex(index) }
+            .and_then(|info| unsafe { info.Kind(&mut kind) })
+            .is_ok()
+            && kind == COREWEBVIEW2_PROCESS_KIND_GPU
+    })
 }
 
 fn renderers(infos: &ICoreWebView2ProcessExtendedInfoCollection) -> Vec<(u64, Vec<u32>)> {

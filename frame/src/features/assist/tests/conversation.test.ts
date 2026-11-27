@@ -1,7 +1,23 @@
 import { expect, test } from "vitest";
+import { render } from "svelte/server";
 import type { PageAssistChangedV1, PageAssistEventV1 } from "$shared/ipc/bindings";
+import StepsBlock from "../components/blocks/StepsBlock.svelte";
 import { EMPTY, fold, latestReply, open, replyText, type Conversation } from "../lib/conversation";
 import { parse } from "../lib/markdown";
+
+test("typing approval renders the complete value and sites as text", () => {
+  const value = `private  "quoted" <script>text</script> ${"x".repeat(180)} tail`;
+  const label = `${JSON.stringify(value)} → Type into "Message"\nexample.com → ycombinator.com`;
+  const { body } = render(StepsBlock, {
+    props: {
+      steps: [{ index: 0, label, category: "type", state: "confirm", reason: null }],
+      site: "ycombinator.com",
+      ondecide: () => {},
+    },
+  });
+  expect(body).toContain(label.replaceAll("<", "&lt;"));
+  expect(body).not.toContain("<script>");
+});
 
 const event = (seq: number, reply: number, kind: PageAssistEventV1): PageAssistChangedV1 => ({
   space: "s",

@@ -31,6 +31,10 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub page_request: Option<PageRequestView>,
+    /// Names the request shown, for its answer.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request_serial: Option<u32>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]
@@ -125,6 +129,8 @@ pub enum PageRequestView {
         host: Option<String>,
         site: Option<String>,
     },
+    /// The native address was unreadable or too long. Dismissal only.
+    NavigationRefused { embedded: bool },
     /// The site, or its proxy, asks to sign in. Never carries the server's
     /// own text.
     HttpAuth {
@@ -137,6 +143,18 @@ pub enum PageRequestView {
         /// The last username or password was wrong.
         retry: bool,
     },
+    /// The site wants to save a file. `allowed` says the site may already
+    /// download and only this unclicked download is asked about.
+    Download {
+        request: u32,
+        site: String,
+        filename: String,
+        allowed: bool,
+        unclicked: bool,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; `host` is the
+    /// page's host.
+    InsecureAutofill { host: String },
     /// The page stopped responding: wait for it, or reload it.
     Unresponsive,
 }
@@ -184,6 +202,10 @@ pub struct TabFailure {
     /// they may continue past it. Never true for a public name.
     #[serde(default)]
     pub can_continue: bool,
+    /// For a page the filter lists refused, why.
+    #[serde(default)]
+    #[specta(optional)]
+    pub blocked: Option<TabBlockReason>,
     /// The page that was showing is gone; the failure stands in its place
     /// until another page opens, even while one loads.
     #[serde(default)]
@@ -212,7 +234,21 @@ pub enum TabFailureReason {
     Insecure,
     /// The page's process ended and it could not be brought back on its own.
     Crashed,
+    /// The profile's browser engine can be trusted again only after Zephium
+    /// restarts; every tab in it says so.
+    RestartRequired,
+    /// The filter lists refused the page; `blocked` says why.
+    Blocked,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -414,6 +450,8 @@ pub enum SitePermissionKindView {
     LocalFonts,
     AutomaticDownloads,
     Popups,
+    Downloads,
+    AppLinks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -429,6 +467,8 @@ pub struct SitePermissionView {
     pub origin: String,
     pub kind: SitePermissionKindView,
     pub decision: SitePermissionDecisionView,
+    /// The kind of application link, for `app_links`.
+    pub scheme: Option<String>,
 }
 
 /// The focused profile's saved site decisions.
@@ -450,6 +490,22 @@ pub struct WebExtensionAccessRequestView {
     pub request: String,
     pub extension_id: String,
     pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+/// A person clicked the install button the browser showed on the Web Store
+/// listing in `tab_id`, which is still the active tab of the focused window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionStoreClickView {
+    pub tab_id: String,
+    pub extension_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRemovalView {
+    pub profile_id: String,
+    pub extension_id: String,
     pub permissions: Vec<String>,
     pub patterns: Vec<String>,
 }
@@ -689,7 +745,51 @@ impl PanelLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TabSwitcherAction {
+    Step {
+        reverse: bool,
+    },
+    Select {
+        index: u32,
+    },
+    Commit,
+    Cancel,
+    Close,
+    /// Leaves the switcher for a new tab in its window.
+    NewTab,
+    /// Leaves the switcher for this tab, whatever is selected by then.
+    Activate {
+        tab_id: String,
+    },
+    /// Closes this tab, whatever is selected by then, and stays open.
+    CloseTab {
+        tab_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherEntry {
+    pub tab_id: String,
+    pub title: String,
+    pub url_host: String,
+    pub favicon: Option<IconRef>,
+    pub preview_url: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherState {
+    pub session_id: String,
+    pub window_id: String,
+    pub entries: Vec<TabSwitcherEntry>,
+    pub selected: u32,
+    pub keyboard: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PanelState {
+    pub switcher: Option<TabSwitcherState>,
     pub window_id: Option<String>,
     pub revision: String,
     pub session_id: String,
@@ -703,6 +803,8 @@ pub struct PanelState {
     pub seed: Option<String>,
     /// The tab whose address is being edited; it is no destination of its own.
     pub seed_tab: Option<String>,
+    /// An address chosen in this presentation opens in a new mini window.
+    pub mini: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -716,6 +818,9 @@ pub struct SearchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    #[serde(default)]
+    #[specta(optional)]
+    pub shortcut: Option<String>,
     pub pending: bool,
     pub context: Option<SearchContext>,
     pub query: String,
@@ -785,6 +890,7 @@ impl HistoryRange {
 pub const MAX_HISTORY_PAGE_LIMIT: u16 = 200;
 pub const MAX_HISTORY_QUERY_BYTES: usize = 512;
 pub const MAX_HISTORY_FORGET_URLS: usize = 100;
+const MAX_HISTORY_URL_BYTES: usize = 8 * 1024;
 
 impl HistoryCall {
     pub fn validate(&self) -> bool {
@@ -805,9 +911,13 @@ impl HistoryCall {
             Self::Forget { urls } => {
                 !urls.is_empty()
                     && urls.len() <= MAX_HISTORY_FORGET_URLS
-                    && urls
-                        .iter()
-                        .all(|url| zephium_core::navigation::is_allowed_str(url))
+                    && urls.iter().all(|url| {
+                        url.len() <= MAX_HISTORY_URL_BYTES
+                            && url::Url::parse(url).is_ok_and(|target| {
+                                target.as_str().len() <= MAX_HISTORY_URL_BYTES
+                                    && zephium_core::navigation::is_allowed(&target)
+                            })
+                    })
             }
             Self::Clear { .. } | Self::ClosedTabs => true,
             Self::ClearSince { since } => *since > 0,
@@ -942,6 +1052,9 @@ pub struct SiteDataView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrowsingDataResponse {
     Cleared,
+    /// Removed, but some of the site's data may remain: the engine would not
+    /// delete everything, or could not reach every place it is kept.
+    PartlyCleared,
     Sites {
         sites: Vec<SiteDataView>,
         /// The engine can only name sites by some of what it holds: sites
@@ -1197,6 +1310,47 @@ pub enum WorkFolderAdmitV1 {
     Refused { not_a_folder: bool },
 }
 
+/// A mini window's chrome: its window and the one page in it, if any yet.
+/// The page's URL and title are untrusted and only ever shown as text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub tab: Option<TabView>,
+    /// Where "Open in Zephium" can put the page: its profile's spaces, in
+    /// sidebar order.
+    pub spaces: Vec<MiniSpaceView>,
+    /// The space "Open in Zephium" uses unless the person picks another.
+    pub space: Option<String>,
+    /// The window stays above other applications' windows.
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniSpaceView {
+    pub id: String,
+    pub name: String,
+}
+
+/// The shell made a mini window; the desktop builds its native window with
+/// this content size.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniOpenedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The shell let a mini window go. `reveal_main` brings the main window
+/// forward because the page just moved into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniClosedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub reveal_main: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,
@@ -1237,6 +1391,8 @@ pub enum OperationOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum OperationReason {
     MutationApplied,
+    /// The address went to a mini window, so the main window stays behind.
+    OpenedInMini,
     StateUnchanged,
     InvalidScope,
     NoFocusedWindow,
@@ -1299,6 +1455,8 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// Why a restart is required; none while it is not.
+    pub restart_reason: Option<RuntimeRestartReason>,
     /// The saved session could not be restored this launch: its bytes were
     /// kept in a file and the browser started with fresh tabs.
     pub session_set_aside: bool,
@@ -1308,9 +1466,18 @@ pub struct RuntimeStatus {
     /// extension, profile, or native failure identity crosses this privileged
     /// projection.
     pub user_content_degraded_scope_count: u16,
-    /// Canonically ordered closed-vocabulary set. Rust emits at most five
+    /// Canonically ordered closed-vocabulary set. Rust emits at most six
     /// entries and privileged chrome must replace, never append, projections.
     pub security_advisories: Vec<RuntimeSecurityAdvisory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRestartReason {
+    /// A newer browser runtime is installed; only a restart adopts it.
+    RuntimeUpdate,
+    /// A profile's browser engine can be trusted again only after a restart.
+    Profile,
 }
 
 /// Non-fatal, process-local classification produced before native WebView
@@ -1321,6 +1488,7 @@ pub enum RuntimeSecurityAdvisoryKind {
     ReviewOverdue,
     UpdateRecommended,
     UnreviewedRuntime,
+    CleanupOverdue,
 }
 
 /// Fixed destination of the recommended maintenance action. No page or
@@ -1656,6 +1824,10 @@ pub enum Projection {
     WorkEnvironmentChanged(work::WorkEnvironmentChangedV1),
     WorkChanged(work::WorkChangedV1),
     PanelOwner(PanelOwner),
+    TabSwitcher {
+        session: u64,
+        state: Option<TabSwitcherState>,
+    },
     Items(ItemsState),
     Tab(TabView),
     Favicons(FaviconsView),
@@ -1664,6 +1836,8 @@ pub enum Projection {
     ExtensionActionShortcut(ExtensionActionShortcutView),
     PagePermissionPrompt(PagePermissionPromptView),
     WebExtensionAccessRequest(WebExtensionAccessRequestView),
+    WebExtensionAccessRemoved(WebExtensionAccessRemovalView),
+    WebExtensionStoreClick(WebExtensionStoreClickView),
     UiCommand(String),
     FindResult(FindResultView),
     Search(SearchResults),
@@ -1676,6 +1850,9 @@ pub enum Projection {
     /// should itself be fullscreen until this turns false. Only engines that
     /// present fullscreen inside the browser window send it.
     HostFullscreen(bool),
+    /// The browser window should come to the front, as the person asked for
+    /// one of its pages from outside it.
+    RaiseWindow,
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),
@@ -1686,6 +1863,12 @@ pub enum Projection {
     RecentlyClosed(Vec<ClosedTabView>),
     /// The sidebar's player, sent when it changes; `None` hides it.
     MediaPlayer(Option<MediaPlayerView>),
+    MiniOpened(MiniOpenedView),
+    Mini(MiniView),
+    MiniClosed(MiniClosedView),
+    /// Links another application handed over opened as tabs, so the main
+    /// window comes forward. A link that opened a mini window does not.
+    ExternalTabsOpened,
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.
@@ -1885,5 +2068,38 @@ mod bookmark_tests {
             },
         ];
         assert!(!invalid.iter().any(BookmarkCall::validate));
+    }
+}
+
+#[cfg(test)]
+mod history_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn history_forget_retains_its_per_address_and_row_budgets() {
+        let prefix = "https://example.test/";
+        let at_bound = format!(
+            "{prefix}{}",
+            "x".repeat(MAX_HISTORY_URL_BYTES - prefix.len())
+        );
+        let forget = |url| HistoryCall::Forget { urls: vec![url] };
+        assert!(forget(at_bound.clone()).validate());
+        assert!(HistoryCall::Forget {
+            urls: vec![at_bound.clone(); MAX_HISTORY_FORGET_URLS]
+        }
+        .validate());
+        assert!(!HistoryCall::Forget {
+            urls: vec![at_bound.clone(); MAX_HISTORY_FORGET_URLS + 1]
+        }
+        .validate());
+        assert!(!forget(format!("{at_bound}x")).validate());
+        assert!(!forget(format!("{at_bound}\n")).validate());
+        let expanded = format!(
+            "{prefix}{}",
+            "é".repeat((MAX_HISTORY_URL_BYTES - prefix.len()) / 2)
+        );
+        assert!(expanded.len() <= MAX_HISTORY_URL_BYTES);
+        assert!(zephium_core::navigation::is_allowed_str(&expanded));
+        assert!(!forget(expanded).validate());
     }
 }

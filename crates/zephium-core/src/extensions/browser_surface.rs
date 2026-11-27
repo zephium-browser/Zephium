@@ -157,6 +157,23 @@ pub enum ExtensionBrowserRequestAction {
     GoForward {
         tab: ItemId,
     },
+    DuplicateTab {
+        tab: ItemId,
+    },
+    SetTabMuted {
+        tab: ItemId,
+        muted: bool,
+    },
+    /// A zoom level within [`crate::zoom`]'s range; `None` is the default.
+    SetTabZoom {
+        tab: ItemId,
+        percent: Option<u16>,
+    },
+    /// Puts `tabs`, in order, before `before` in their window, or last.
+    MoveTabs {
+        tabs: Box<[ItemId]>,
+        before: Option<ItemId>,
+    },
 }
 
 impl ExtensionBrowserRequestAction {
@@ -171,7 +188,11 @@ impl ExtensionBrowserRequestAction {
             | Self::CloseTabIfPristine { .. }
             | Self::ReloadTab { .. }
             | Self::GoBack { .. }
-            | Self::GoForward { .. } => None,
+            | Self::GoForward { .. }
+            | Self::DuplicateTab { .. }
+            | Self::SetTabMuted { .. }
+            | Self::SetTabZoom { .. }
+            | Self::MoveTabs { .. } => None,
         }
     }
 }
@@ -250,6 +271,8 @@ pub struct ExtensionBrowserTab {
     url: Option<Arc<str>>,
     loading: bool,
     pinned: bool,
+    muted: bool,
+    audible: bool,
 }
 
 impl ExtensionBrowserTab {
@@ -295,7 +318,16 @@ impl ExtensionBrowserTab {
             url,
             loading,
             pinned,
+            muted: false,
+            audible: false,
         })
+    }
+
+    #[must_use]
+    pub const fn with_audio(mut self, muted: bool, audible: bool) -> Self {
+        self.muted = muted;
+        self.audible = audible;
+        self
     }
 
     pub const fn id(&self) -> ItemId {
@@ -327,6 +359,14 @@ impl ExtensionBrowserTab {
 
     pub const fn pinned(&self) -> bool {
         self.pinned
+    }
+
+    pub const fn muted(&self) -> bool {
+        self.muted
+    }
+
+    pub const fn audible(&self) -> bool {
+        self.audible
     }
 }
 

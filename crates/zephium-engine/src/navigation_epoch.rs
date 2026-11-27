@@ -27,6 +27,7 @@ struct NavigationEpochState {
     // even if the same committed epoch becomes visible again.
     activity: Option<NavigationActivity>,
     revoked: bool,
+    assistant_edit: Option<NavigationEpoch>,
     // Provider redirects may advance epochs. Explicit browser actions and
     // native main-frame link/history/reload navigation relinquish cleanup.
     auth_cleanup_owned: bool,
@@ -101,6 +102,7 @@ impl NavigationEpochTracker {
                 current: None,
                 activity: None,
                 revoked: false,
+                assistant_edit: None,
                 auth_cleanup_owned: true,
                 auth_cleanup_fence: None,
             })),
@@ -200,6 +202,41 @@ impl NavigationEpochTracker {
             document_replaced: false,
         });
         Some(epoch)
+    }
+
+    /// The shell's request a main-frame refusal of `target` belongs to, so
+    /// the refusal can name what it refuses. Before the load starts only its
+    /// own address is it; once started, a redirect anywhere still is. Nothing
+    /// is named after commit, when the request is fulfilled.
+    pub(crate) fn refused_request(&self, target: &str) -> Option<NavigationRequestId> {
+        let target = canonical_navigation_target(target)?;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = state.current.as_ref()?;
+        let ours = match current.phase {
+            TrackedNavigationPhase::AwaitingStart => current.target == target,
+            TrackedNavigationPhase::Started => true,
+            TrackedNavigationPhase::Committed => false,
+        };
+        ours.then_some(current.request).flatten()
+    }
+
+    /// The shell's request behind native navigation `id`, while that very
+    /// navigation is still in flight: a refusal reported for it, wherever it
+    /// redirected, is what the person asked for. An older navigation's names
+    /// nothing.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn request_in_flight(&self, id: NavigationId) -> Option<NavigationRequestId> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = state.current.as_ref()?;
+        (current.phase == TrackedNavigationPhase::Started && current.native_id == Some(id))
+            .then_some(current.request)
+            .flatten()
     }
 
     /// A synchronous native load refusal must not strand the still-rendered
@@ -513,6 +550,49 @@ impl NavigationEpochTracker {
         }
     }
 
+    /// Record possible assistant-created draft state before dispatch. Synthetic
+    /// DOM input is deliberately not trusted by the page discard monitor.
+    #[cfg(feature = "agentic-browser")]
+    pub(crate) fn protect_assistant_edit(&self, presentation: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return false;
+        }
+        let Some(current) = state.current.as_ref() else {
+            return false;
+        };
+        if current.phase != TrackedNavigationPhase::Committed || current.epoch.0 != presentation {
+            return false;
+        }
+        state.assistant_edit = Some(current.epoch);
+        true
+    }
+
+    pub(crate) fn has_assistant_edit(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return true;
+        }
+        let Some(current) = state.current.as_ref() else {
+            return false;
+        };
+        let resident = if current.phase == TrackedNavigationPhase::Committed {
+            Some(current.epoch)
+        } else {
+            current
+                .previous_committed
+                .as_ref()
+                .map(|previous| previous.epoch)
+        };
+        state.assistant_edit.is_some() && state.assistant_edit == resident
+    }
+
     pub(crate) fn committed_snapshot(&self) -> Option<(NavigationEpoch, String)> {
         let state = self
             .state
@@ -687,6 +767,119 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "agentic-browser")]
+    #[test]
+    fn assistant_drafts_stay_protected_through_failed_navigation_only() {
+        let tracker = NavigationEpochTracker::new();
+        let original = tracker.begin("https://draft.example/").unwrap();
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Started,
+            "https://draft.example/",
+        ));
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Committed,
+            "https://draft.example/",
+        ));
+        assert!(!tracker.has_assistant_edit());
+        assert!(!tracker.protect_assistant_edit(original.0 + 1));
+        assert!(tracker.protect_assistant_edit(original.0));
+        assert!(tracker.has_assistant_edit());
+        let failed = tracker.begin("https://failed.example/").unwrap();
+        assert!(tracker.has_assistant_edit());
+        assert!(!tracker.protect_assistant_edit(failed.0));
+        assert!(tracker.fail_synchronous(failed));
+        assert!(tracker.has_assistant_edit());
+        tracker.begin("https://new.example/").unwrap();
+        tracker.observe_navigation(&event(
+            2,
+            NavigationEventPhase::Started,
+            "https://new.example/",
+        ));
+        tracker.observe_navigation(&event(
+            2,
+            NavigationEventPhase::Committed,
+            "https://new.example/",
+        ));
+        assert!(!tracker.has_assistant_edit());
+        assert!(!tracker.protect_assistant_edit(original.0));
+        assert!(!tracker.has_assistant_edit());
+    }
+
+    #[test]
+    fn a_failed_navigation_names_its_request_only_while_it_is_the_one_in_flight() {
+        let tracker = NavigationEpochTracker::new();
+        tracker
+            .begin_request("https://fine.example/", NavigationRequestId(7))
+            .unwrap();
+        tracker.observe_navigation(&event(
+            3,
+            NavigationEventPhase::Started,
+            "https://fine.example/",
+        ));
+        tracker.observe_navigation(&event(
+            3,
+            NavigationEventPhase::Redirected,
+            "https://scam.example/win",
+        ));
+        assert_eq!(
+            tracker.request_in_flight(NavigationId::from_raw(3)),
+            Some(NavigationRequestId(7))
+        );
+        // Another native navigation, such as an older one, is not it.
+        assert_eq!(tracker.request_in_flight(NavigationId::from_raw(2)), None);
+        commit(
+            &tracker,
+            3,
+            "https://fine.example/",
+            "https://fine.example/",
+        );
+        assert_eq!(tracker.request_in_flight(NavigationId::from_raw(3)), None);
+    }
+
+    #[test]
+    fn a_refusal_names_the_request_in_flight_wherever_it_redirects() {
+        let tracker = NavigationEpochTracker::new();
+        tracker
+            .begin_request("https://fine.example/", NavigationRequestId(5))
+            .unwrap();
+        assert_eq!(
+            tracker.refused_request("https://fine.example/"),
+            Some(NavigationRequestId(5))
+        );
+        // Before it starts, a load elsewhere is not the request.
+        assert_eq!(tracker.refused_request("https://other.example/"), None);
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Started,
+            "https://fine.example/",
+        ));
+        // A redirect is judged before the engine hears of it, and after.
+        assert_eq!(
+            tracker.refused_request("https://scam.example/win"),
+            Some(NavigationRequestId(5))
+        );
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Redirected,
+            "https://scam.example/win",
+        ));
+        assert_eq!(
+            tracker.refused_request("https://scam.example/win"),
+            Some(NavigationRequestId(5))
+        );
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Committed,
+            "https://scam.example/win",
+        ));
+        assert_eq!(tracker.refused_request("https://scam.example/win"), None);
+        // A navigation the engine began on its own names none.
+        tracker.begin("https://scam.example/win").unwrap();
+        assert_eq!(tracker.refused_request("https://scam.example/win"), None);
+    }
 
     #[test]
     fn native_provider_redirects_keep_auth_cleanup_but_user_navigation_releases_it() {

@@ -183,6 +183,40 @@ fn a_kept_site_is_let_go_whole_where_closing_would_keep_it() {
 }
 
 #[test]
+fn releasing_a_destination_tab_clears_its_stand_in_entry() {
+    let destination = "https://app.slack.com/client";
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: destination.into(),
+    });
+    shell.handle(Command::Open);
+    let id = active_id(&screen);
+    commit_url(&mut shell, id, destination);
+    present_committed(&mut shell, id, destination);
+    shell.handle(Command::SetTabEssential {
+        id,
+        essential: true,
+        before: None,
+    });
+    shell.handle(Command::Open);
+    let effects = shell.items.hibernate(id);
+    shell.commit(effects);
+    assert_eq!(kept(&shell), [(id, destination.to_owned())]);
+    assert!(shell.new_tab_destinations.contains_key(&id));
+
+    let released = shell.handle_operation(Command::ReleaseSite("slack".into()));
+
+    assert!(matches!(
+        released.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert!(shell.items.tab(id).is_none());
+    assert!(!shell.new_tab_destinations.contains_key(&id));
+}
+
+#[test]
 fn every_catalog_site_is_a_valid_page_with_a_full_mark() {
     for site in crate::shell::kept_sites::KEPT_SITES {
         let url = url::Url::parse(site.url).unwrap();
@@ -277,7 +311,7 @@ fn essentials_from_another_browser_join_the_kept_sites_once_each_unloaded() {
             let _ = send.send(added);
         }),
     });
-    assert_eq!(receive.recv().unwrap(), Some(2));
+    assert_eq!(receive.recv().unwrap(), Some((2, false)));
     let sites = kept(&shell);
     assert_eq!(
         sites
@@ -316,7 +350,7 @@ fn data_safety_import_retains_its_admitted_profile_across_focus_changes() {
                 url: format!("https://kind{index}.example/"),
                 title: "Imported".into(),
             }])),
-            done: crate::ImportCompletion::new(|added| assert_eq!(added, Some(1))),
+            done: crate::ImportCompletion::new(|added| assert_eq!(added, Some((1, false)))),
         });
     }
     assert_eq!(

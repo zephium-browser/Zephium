@@ -1,12 +1,15 @@
 <script lang="ts">
-  import Menu from "../Menu.svelte";
+  import Menu, { type MenuEntry } from "../Menu.svelte";
   import Select from "$shared/ui/Select";
   import Disclosure from "$shared/ui/Disclosure";
-  let { opaque = false }: { opaque?: boolean } = $props();
+  let {
+    opaque = false,
+    entries = [{ kind: "item", id: "one", label: "One" }],
+  }: { opaque?: boolean; entries?: MenuEntry[] } = $props();
 </script>
 
 <div data-menu-material={opaque ? "opaque" : undefined}>
-  <Menu label="Actions" entries={[{ kind: "item", id: "one", label: "One" }]} onselect={() => {}}>
+  <Menu label="Actions" {entries} onselect={() => {}}>
     {#snippet trigger()}Actions{/snippet}
   </Menu>
   <Select label="Choice" value="one" options={[{ value: "one", label: "One" }]} />
