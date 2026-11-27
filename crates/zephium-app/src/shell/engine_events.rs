@@ -420,6 +420,17 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
+            EngineEvent::NativeNavigationRefused { id, embedded } => {
+                if !embedded {
+                    self.cancel_https_first_attempt(id);
+                }
+                if self.replace_page_request(
+                    id,
+                    zephium_core::item::PageRequest::NavigationRefused { embedded },
+                ) {
+                    self.project_tab(id);
+                }
+            }
             EngineEvent::ExternalAppRequested {
                 id,
                 url,
@@ -675,7 +686,8 @@ impl Shell {
                     }));
                 }
             }
-            EngineEvent::ShortcutPressed { .. } => {}
+            EngineEvent::ShortcutPressed { .. }
+            | EngineEvent::ExtensionActionMenuSelected { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
                 // Pages re-publish the title they already have (counters,
@@ -718,6 +730,7 @@ impl Shell {
                     // completion as well as through the bounded timer.
                     self.favicon_load_completed(id);
                     self.warm_spare_after_load(id);
+                    self.capture_loaded_tab_preview(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -737,6 +750,10 @@ impl Shell {
                     return;
                 }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
+                // The destination's first load may redirect. An explicit
+                // navigation elsewhere can supersede that load before it commits.
+                let adopt_new_tab_destination =
+                    first_committed_url && self.new_tab_destination_is_current(id);
                 let uncovered = self
                     .items
                     .tab(id)
@@ -750,6 +767,7 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                self.update_new_tab_destination(id, &committed_url, adopt_new_tab_destination);
                 if uncovered {
                     // The view holds a real document again; lay it out before
                     // its presentation is acknowledged.
@@ -835,6 +853,7 @@ impl Shell {
             EngineEvent::ExtensionPageChanged { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
+            EngineEvent::ExtensionActionMenuSelected { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
@@ -868,6 +887,7 @@ impl Shell {
             | EngineEvent::NativeTabCloseRequested { id }
             | EngineEvent::MediaReturnRequested { id }
             | EngineEvent::PageOpenBlocked { id, .. }
+            | EngineEvent::NativeNavigationRefused { id, .. }
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }

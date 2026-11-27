@@ -141,13 +141,17 @@ fn operation_uri(operation: &ICoreWebView2DownloadOperation) -> Option<String> {
         drop(TaskMemory(text));
         return Some("data:".into());
     }
-    take_string(text, 8192)
+    take_string(text, zephium_core::navigation::MAX_URL_BYTES)
 }
 fn current_origin(controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
     let core = unsafe { controller.CoreWebView2() }.ok()?;
     let mut value = PWSTR::null();
     unsafe { core.Source(&mut value) }.ok()?;
-    let url = url::Url::parse(&take_string(value, 8192)?).ok()?;
+    let url = url::Url::parse(&take_string(
+        value,
+        zephium_core::navigation::MAX_URL_BYTES,
+    )?)
+    .ok()?;
     PageOrigin::from_url(&url).ok()
 }
 fn source_origin(uri: &str, controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
@@ -402,12 +406,22 @@ impl Downloads {
         let initial_open = initial.is_some();
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
-            || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
+            || permit.active_token().is_none()
+        {
+            return;
+        }
+        let refusal = if self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
-            || permit.active_token().is_none()
-            || (!initial_open && !surface_intent.load(Ordering::Acquire))
         {
+            Some(DownloadError::Capacity)
+        } else if !initial_open && !surface_intent.load(Ordering::Acquire) {
+            Some(DownloadError::Unavailable)
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            self.refused(partition, &navigation, error);
             return;
         }
         self.ensure_timer();
@@ -432,7 +446,8 @@ impl Downloads {
             initial_open,
             ask_destination,
         };
-        if !source.key() {
+        if !source.live() {
+            self.refused(partition, &source.navigation, DownloadError::Unavailable);
             return;
         }
         let Ok(operation) = (unsafe { args.DownloadOperation() }) else {
@@ -594,6 +609,7 @@ impl Downloads {
                 destination: None,
                 panel: None,
                 panel_lease: None,
+                picker_preferences: None,
                 on_started: initial
                     .as_mut()
                     .and_then(|context| context.on_started.take()),
@@ -645,18 +661,29 @@ impl Downloads {
         id: DownloadId,
         preferences: DownloadPreferences,
     ) {
-        let context = self.active.borrow().get(&id).and_then(|transfer| {
-            transfer.source.as_ref().map(|source| {
-                (
-                    source.key(),
-                    source.root,
-                    transfer.record.filename.clone(),
-                    transfer.record.source.clone(),
-                    source.ask_destination,
-                )
+        let context = self
+            .active
+            .borrow()
+            .get(&id)
+            .filter(|transfer| {
+                transfer.record.state == DownloadState::Pending
+                    && !transfer.cancelling
+                    && !transfer.authorized
+                    && transfer.panel.is_none()
             })
-        });
-        let Some((true, window, filename, source, ask_destination)) = context else {
+            .and_then(|transfer| {
+                transfer.source.as_ref().map(|source| {
+                    (
+                        source.live(),
+                        source.key(),
+                        source.root,
+                        transfer.record.filename.clone(),
+                        transfer.record.source.clone(),
+                        source.ask_destination,
+                    )
+                })
+            });
+        let Some((true, in_front, window, filename, source, ask_destination)) = context else {
             self.cancel(id, None);
             return;
         };
@@ -665,7 +692,7 @@ impl Downloads {
             .clone()
             .map(PathBuf::from)
             .or_else(dirs::download_dir);
-        // Admission pins the foreground document; a page's further automatic
+        // Admission pins the live document; a page's further automatic
         // downloads ask through WebView2's own prompt first.
         if !ask_destination
             && !preferences.ask_destination
@@ -678,8 +705,12 @@ impl Downloads {
             self.prepare(id, directory.join(filename), preferences.directory_identity);
             return;
         }
+        if !in_front {
+            self.defer_destination(id, preferences);
+            return;
+        }
         let Some(lease) = DialogLease::acquire() else {
-            self.cancel(id, Some(DownloadError::Capacity));
+            self.defer_destination(id, preferences);
             return;
         };
         let dialog = match dialog(
@@ -694,10 +725,27 @@ impl Downloads {
                 return;
             }
         };
+        let context = self.active.borrow().get(&id).and_then(|transfer| {
+            transfer
+                .source
+                .as_ref()
+                .map(|source| (!transfer.cancelling && source.live(), source.key()))
+        });
+        match context {
+            Some((true, true)) => {}
+            Some((true, false)) => {
+                self.defer_destination(id, preferences);
+                return;
+            }
+            _ => {
+                self.cancel(id, None);
+                return;
+            }
+        }
         if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
             transfer.panel = Some(dialog.clone());
             transfer.panel_lease = Some(lease);
-            transfer.deadline = DecisionDeadline::new(DecisionPhase::NativePicker, Instant::now());
+            transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
         }
         self.ensure_timer();
         let result = unsafe { dialog.Show(Some(window)) };

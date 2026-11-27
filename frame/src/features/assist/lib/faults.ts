@@ -126,6 +126,8 @@ function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): Fault
       return { message: m.assist_fault_step_failed(), fix: null, retry: "now" };
     case "too_long":
       return { message: m.assist_fault_too_long(), fix: null, retry: "now" };
+    case "timed_out":
+      return { message: m.assist_fault_timed_out(), fix: null, retry: "now" };
     case "busy":
       return { message: m.assist_fault_busy(), fix: null, retry: "no" };
     case "no_model":

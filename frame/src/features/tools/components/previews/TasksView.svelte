@@ -8,13 +8,7 @@
   import LazyView from "$shared/ui/LazyView";
   import Icon from "$shared/ui/Icon";
   import Menu, { type MenuEntry } from "$shared/ui/Menu";
-  import {
-    ArrowDown01Icon,
-    ArrowUpRight01Icon,
-    Cancel01Icon,
-    Delete02Icon,
-    MoreHorizontalIcon,
-  } from "@hugeicons/core-free-icons";
+  import { ArrowDown01Icon, Delete02Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import ToolFrame from "../ToolFrame.svelte";
 
@@ -70,36 +64,34 @@
   );
 
   let overflow: MenuEntry[] = $derived([
-    { kind: "item", id: "expand", label: m.task_page_open(), icon: ArrowUpRight01Icon },
     {
       kind: "item",
       id: "trash",
       label: session.trash ? m.resource_show_active() : m.resource_show_trash(),
       icon: Delete02Icon,
     },
-    { kind: "separator" },
-    { kind: "item", id: "close", label: m.task_page_close(), icon: Cancel01Icon },
   ]);
 
-  async function act(id: string) {
-    if (id === "expand") {
-      if (!(await session.flush())) return;
-      const destination = taskSession(props.profile, "page");
-      destination.selectedId = session.selectedId;
-      destination.query = props.state.query;
-      destination.captureDraft = session.captureDraft;
-      destination.captureContext = session.captureContext;
-      session.captureDraft = "";
-      session.captureContext = null;
-      setTaskPageView(
-        { scope, list: session.listId, trashed: session.trash, board: false },
-        props.profile,
-      );
-      void browser.open("tasks");
-      // The full page is the same tasks, so the panel does not stay open behind it.
-      props.onclose();
-    } else if (id === "trash") session.showTrash(!session.trash);
-    else if (id === "close") props.onclose();
+  async function expand() {
+    if (!(await session.flush())) return;
+    const destination = taskSession(props.profile, "page");
+    destination.selectedId = session.selectedId;
+    destination.query = props.state.query;
+    destination.captureDraft = session.captureDraft;
+    destination.captureContext = session.captureContext;
+    session.captureDraft = "";
+    session.captureContext = null;
+    setTaskPageView(
+      { scope, list: session.listId, trashed: session.trash, board: false },
+      props.profile,
+    );
+    void browser.open("tasks");
+    // The full page is the same tasks, so the panel does not stay open behind it.
+    props.onclose();
+  }
+
+  function act(id: string) {
+    if (id === "trash") session.showTrash(!session.trash);
   }
 </script>
 
@@ -107,7 +99,10 @@
   {...props}
   caption={false}
   scrolls={false}
-  closable={false}
+  onexpand={expand}
+  more={overflow}
+  moreLabel={m.task_more()}
+  onmore={act}
   searchLabel={m.tool_search_tasks()}
   searchFocus={false}
   onsearchdismiss={() => props.edit({ query: "" })}
@@ -131,18 +126,6 @@
       {#snippet trigger()}<span
           >{session.trash ? m.resource_show_trash() : SCOPE_LABEL[scope]()}</span
         ><Icon icon={ArrowDown01Icon} size={13} />{/snippet}
-    </Menu>
-  {/snippet}
-  {#snippet actions()}
-    <Menu
-      label={m.task_more()}
-      entries={overflow}
-      side="bottom"
-      align="end"
-      triggerClass="task-overflow"
-      onselect={act}
-    >
-      {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
     </Menu>
   {/snippet}
   <LazyView
@@ -218,32 +201,8 @@
     background: var(--color-fill-hover);
   }
 
-  :global(.task-scope:focus-visible),
-  :global(.task-overflow:focus-visible) {
+  :global(.task-scope:focus-visible) {
     outline: 2px solid var(--color-ring);
     outline-offset: -2px;
-  }
-
-  :global(.task-overflow) {
-    display: grid;
-    place-items: center;
-    flex: none;
-    width: 28px;
-    height: 28px;
-    border: 0;
-    border-radius: var(--radius-row);
-    background: transparent;
-    color: var(--color-muted);
-    cursor: default;
-    outline: none;
-    transition:
-      background-color var(--motion-instant) var(--ease-smooth),
-      color var(--motion-instant) var(--ease-smooth);
-  }
-
-  :global(.task-overflow:hover),
-  :global(.task-overflow[data-state="open"]) {
-    background: var(--color-fill-hover);
-    color: var(--color-text);
   }
 </style>

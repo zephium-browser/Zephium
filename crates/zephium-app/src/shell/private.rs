@@ -32,6 +32,11 @@ impl PrivateSession {
     pub(super) fn regular_profile(&self) -> ProfileId {
         self.other.profile
     }
+
+    /// The regular profile and space while the private scope is in front.
+    pub(super) fn regular_scope(&self) -> Option<(ProfileId, SpaceId)> {
+        self.shown.then_some((self.other.profile, self.other.space))
+    }
 }
 
 impl Shell {

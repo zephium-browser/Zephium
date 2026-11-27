@@ -10,6 +10,9 @@ const native = vi.hoisted(() => ({
   account: null as unknown as AccountV1,
   kind: "default" as "default" | "incognito",
 }));
+
+// The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
@@ -34,7 +37,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 // Rust serves the account picture by revision; a picture stands in for it here.
 vi.mock("$domain/account/account-model", async (original) => ({
-  ...(await original<typeof import("$domain/account/account-model")>()),
+  ...(await original<typeof import("$domain/account")>()),
   avatarUrl: (revision: number | null | undefined) => (revision ? portraitFixture : null),
 }));
 vi.mock("$domain/tabs", () => ({

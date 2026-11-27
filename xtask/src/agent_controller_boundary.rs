@@ -1423,7 +1423,30 @@ const LOOK_BEGINS: &str = r#"fn look_begins(state: &mut WorkState) -> Result<Age
             .map_err(AgentWorkFailure::Browser)
     }"#;
 
+// The consent press's settled look (59094d95b) sits outside action
+// settlement, so it carries its own rule: one look, dated as it begins.
+const CONSENT_LOOK: &str =
+    "let looked = Self::look_begins(state)?;\n            match Self::observe(state, worker, browser)";
+
 fn validate_work_decision(source: &str) -> Result<(), String> {
+    let consent = source
+        .split("async fn observe_settled(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .ok_or("Work decision actor lost its settled consent look")?;
+    if source.matches("async fn observe_settled(").count() != 1
+        || consent
+            .matches("Self::observe(state, worker, browser)")
+            .count()
+            != 1
+        || consent.matches(CONSENT_LOOK).count() != 1
+        || consent.matches("looked =").count() != 1
+        || !consent.contains("result => return Ok((result?, looked)),")
+    {
+        return Err(
+            "Work decision actor dated its consent look by something other than its look".into(),
+        );
+    }
     let settled = source
         .split("pub(super) async fn execute_prepared_action(")
         .nth(1)
@@ -1529,8 +1552,8 @@ mod tests {
     use super::{
         validate_action, validate_decision_routing, validate_form, validate_manifest,
         validate_probe, validate_root, validate_terra, validate_work,
-        validate_work_actor_qualifier, validate_workflow_qualifier, LOADING_CLASSIFIER,
-        LOOK_DIGEST_USE,
+        validate_work_actor_qualifier, validate_workflow_qualifier, CONSENT_LOOK,
+        LOADING_CLASSIFIER, LOOK_DIGEST_USE,
     };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
@@ -2135,6 +2158,33 @@ mod tests {
         assert!(validate_work(
             WORK,
             &format!("{WORK_DECISION}\nfn f() {{ std::thread::yield_now() }}")
+        )
+        .is_err());
+        // The consent press's settled look is dated as it begins, too.
+        let undated = "match Self::observe(state, worker, browser)";
+        assert!(WORK_DECISION.contains(CONSENT_LOOK));
+        for consent in [
+            undated.to_owned(),
+            format!("let looked = Self::look_begins(state)?;\n            Self::observe(state, worker, browser).await?;\n            {undated}"),
+            format!("let looked = policy_later(state)?;\n            {undated}"),
+        ] {
+            assert!(
+                validate_work(WORK, &WORK_DECISION.replacen(CONSENT_LOOK, &consent, 1)).is_err(),
+                "{consent}"
+            );
+        }
+        assert!(validate_work(
+            WORK,
+            &WORK_DECISION.replacen(
+                "result => return Ok((result?, looked)),",
+                "result => return Ok((result?, Self::look_begins(state)?)),",
+                1
+            )
+        )
+        .is_err());
+        assert!(validate_work(
+            WORK,
+            &WORK_DECISION.replacen("async fn observe_settled(", "async fn observe_later(", 1)
         )
         .is_err());
     }

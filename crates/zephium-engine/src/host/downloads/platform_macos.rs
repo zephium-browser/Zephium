@@ -323,12 +323,23 @@ impl Downloads {
         let (native, ask) = request;
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
-            || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
+            || permit.active_token().is_none()
+        {
+            unsafe { native.cancel(None) };
+            return None;
+        }
+        let refusal = if self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
-            || permit.active_token().is_none()
-            || (initial.is_none() && !surface_intent.load(Ordering::Acquire))
         {
+            Some(DownloadError::Capacity)
+        } else if initial.is_none() && !surface_intent.load(Ordering::Acquire) {
+            Some(DownloadError::Unavailable)
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            self.refused(partition, &navigation, error);
             unsafe { native.cancel(None) };
             return None;
         }
@@ -341,7 +352,7 @@ impl Downloads {
             request_url
                 .as_ref()
                 .and_then(|url| url.absoluteString())
-                .and_then(|url| bounded(&url, 8192))
+                .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                 .filter(|url| zephium_core::navigation::is_allowed_str(url))
                 .and_then(|url| url::Url::parse(&url).ok())
         } else {
@@ -359,7 +370,7 @@ impl Downloads {
         let Some(window) = initial
             .as_ref()
             .map(|context| context.window.clone())
-            .or_else(|| view.window())
+            .or_else(|| crate::platform::imp::home_window(&view))
         else {
             unsafe { native.cancel(None) };
             return None;
@@ -378,7 +389,8 @@ impl Downloads {
             initial_open,
             extension: self.extension_admission.get(),
         };
-        if !source.live() || !source.in_front() {
+        if !source.live() {
+            self.refused(partition, &source.navigation, DownloadError::Unavailable);
             unsafe { native.cancel(None) };
             return None;
         }
@@ -416,7 +428,7 @@ impl Downloads {
                     .view
                     .URL()
                     .and_then(|url| url.absoluteString())
-                    .and_then(|url| bounded(&url, 8192))
+                    .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                     .and_then(|url| url::Url::parse(&url).ok())
                     .and_then(|url| PageOrigin::from_url(&url).ok())
             }
@@ -489,6 +501,7 @@ impl Downloads {
                 destination: None,
                 panel: None,
                 panel_lease: None,
+                picker_preferences: None,
                 on_started: initial
                     .as_mut()
                     .and_then(|context| context.on_started.take()),
@@ -612,7 +625,7 @@ impl Downloads {
                 response
                     .URL()
                     .and_then(|url| url.absoluteString())
-                    .and_then(|url| bounded(&url, 8192))
+                    .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                     .as_deref(),
             );
             let completion = completion.copy();
@@ -656,24 +669,32 @@ impl Downloads {
     ) {
         let context = {
             let active = self.active.borrow();
-            active.get(&id).and_then(|transfer| {
-                transfer.source.as_ref().map(|source| {
-                    (
-                        source.live(),
-                        source.in_front(),
-                        source.window.clone(),
-                        transfer.record.filename.clone(),
-                        transfer.record.source.clone(),
-                        transfer.confirmed
-                            || unsafe {
-                                transfer
-                                    .native
-                                    .respondsToSelector(objc2::sel!(isUserInitiated))
-                                    && transfer.native.isUserInitiated()
-                            },
-                    )
+            active
+                .get(&id)
+                .filter(|transfer| {
+                    transfer.record.state == DownloadState::Pending
+                        && !transfer.cancelling
+                        && !transfer.authorized
+                        && transfer.panel.is_none()
                 })
-            })
+                .and_then(|transfer| {
+                    transfer.source.as_ref().map(|source| {
+                        (
+                            source.live(),
+                            source.in_front(),
+                            source.window.clone(),
+                            transfer.record.filename.clone(),
+                            transfer.record.source.clone(),
+                            transfer.confirmed
+                                || unsafe {
+                                    transfer
+                                        .native
+                                        .respondsToSelector(objc2::sel!(isUserInitiated))
+                                        && transfer.native.isUserInitiated()
+                                },
+                        )
+                    })
+                })
         };
         let Some((true, in_front, window, filename, source, user_initiated)) = context else {
             self.cancel(id, None);
@@ -700,7 +721,7 @@ impl Downloads {
             return;
         }
         if window.attachedSheet().is_some() || !in_front {
-            self.cancel(id, Some(DownloadError::Capacity));
+            self.defer_destination(id, preferences);
             return;
         }
         let Some(mtm) = MainThreadMarker::new() else {
@@ -708,7 +729,7 @@ impl Downloads {
             return;
         };
         let Some(lease) = PanelLease::acquire() else {
-            self.cancel(id, Some(DownloadError::Capacity));
+            self.defer_destination(id, preferences);
             return;
         };
         let panel = NSSavePanel::savePanel(mtm);
@@ -720,14 +741,20 @@ impl Downloads {
             panel.setDirectoryURL(Some(&NSURL::fileURLWithPath(&NSString::from_str(&path))));
         }
         let live = self.active.borrow().get(&id).is_some_and(|transfer| {
-            !transfer.cancelling
-                && transfer
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.live() && source.in_front())
+            !transfer.cancelling && transfer.source.as_ref().is_some_and(|source| source.live())
         });
-        if !live || window.attachedSheet().is_some() {
+        if !live {
             self.cancel(id, Some(DownloadError::Unavailable));
+            return;
+        }
+        if window.attachedSheet().is_some()
+            || !self
+                .active
+                .borrow()
+                .get(&id)
+                .is_some_and(|transfer| transfer.source.as_ref().is_some_and(Source::in_front))
+        {
+            self.defer_destination(id, preferences);
             return;
         }
         if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
@@ -735,7 +762,7 @@ impl Downloads {
             transfer.panel_lease = Some(lease);
             // A person may browse the filesystem for longer than a network
             // callback deadline. Lifetime revocation still applies each tick.
-            transfer.deadline = DecisionDeadline::new(DecisionPhase::NativePicker, Instant::now());
+            transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
         }
         let weak = Rc::downgrade(self);
         let selected_panel = panel.clone();
@@ -1134,7 +1161,7 @@ define_class!(
             let allowed = request
                 .URL()
                 .and_then(|url| url.absoluteString())
-                .and_then(|url| bounded(&url, 8192))
+                .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                 .is_some_and(|url| zephium_core::navigation::is_allowed_str(&url));
             completion.call((if allowed {
                 WKDownloadRedirectPolicy::Allow

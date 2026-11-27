@@ -137,7 +137,7 @@ zephium-notes.workspace = true
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
-window-vibrancy = "=0.8.0"
+window-vibrancy = "=0.8.1"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
@@ -164,10 +164,12 @@ tauri = { workspace = true, features = ["unstable"] }
 windows = { version = "0.61", features = ["Win32_Graphics_Gdi"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+zephium-credentials.workspace = true
 zephium-work-composition = { workspace = true, optional = true }
 zephium-blocker = { workspace = true, features = ["runtime", "runtime-exact"] }
 raw-window-handle.workspace = true
 webview2-com = "0.38"
+windows-version = "=0.1.7"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_System_LibraryLoader", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_Globalization", "Data_Xml_Dom", "UI_Notifications"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
@@ -184,7 +186,7 @@ zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] 
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tauri-plugin-global-shortcut.workspace = true
-rfd = { version = "=0.16.0", default-features = false, features = ["common-controls-v6"] }
+rfd = { version = "=0.18.0", default-features = false, features = ["common-controls-v6"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }

@@ -22,8 +22,8 @@ const native = vi.hoisted(() => ({
   paneHide: vi.fn(),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     faviconProbe: async () => true,
     workCall: native.call,
     workActivity: native.activity,

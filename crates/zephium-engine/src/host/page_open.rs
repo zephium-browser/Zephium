@@ -131,8 +131,7 @@ impl EngineHost {
             let observed = view.view.webview();
             if Retained::as_ptr(&observed).cast::<()>()
                 != Retained::as_ptr(&features.opener.webview).cast::<()>()
-                || !observed
-                    .window()
+                || !crate::platform::imp::home_window(&observed)
                     .is_some_and(|window| window.isVisible() && window.isKeyWindow())
             {
                 return NewWindowResponse::Deny;

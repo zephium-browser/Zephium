@@ -2,6 +2,35 @@
 
 use super::*;
 
+pub(super) fn new_tab_destination_matches(destination: &url::Url, target: &url::Url) -> bool {
+    destination == target || navigation::https_upgrade(destination).as_ref() == Some(target)
+}
+
+/// A restored tab may hold the committed URL of a `www.` redirect.
+pub(super) fn restored_tab_is_new_tab_destination(
+    destination: &url::Url,
+    restored: &url::Url,
+) -> bool {
+    if new_tab_destination_matches(destination, restored) {
+        return true;
+    }
+    let (Some(destination_host), Some(restored_host)) = (destination.domain(), restored.domain())
+    else {
+        return false;
+    };
+    let differs_by_www = destination_host.strip_prefix("www.") == Some(restored_host)
+        || restored_host.strip_prefix("www.") == Some(destination_host);
+    if !differs_by_www
+        || !destination_host.trim_end_matches('.').contains('.')
+        || !restored_host.trim_end_matches('.').contains('.')
+    {
+        return false;
+    }
+    let mut restored = restored.clone();
+    restored.set_host(Some(destination_host)).is_ok()
+        && new_tab_destination_matches(destination, &restored)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum NewTabPosition {
     #[default]
@@ -47,6 +76,9 @@ pub(super) struct TabPreferences {
     /// Where a link handed over by another application opens; none
     /// follows `new_position`.
     pub(super) external_position: Option<NewTabPosition>,
+    /// A link handed over by another application opens in a mini window,
+    /// the default; a link no mini window can take still opens as a tab.
+    pub(super) external_mini: bool,
     pub(super) archive_after: ArchiveAfter,
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
@@ -59,6 +91,8 @@ pub(super) struct TabPreferences {
     pub(super) startup_pages: Vec<String>,
     /// Where the Home command goes.
     pub(super) home: Option<String>,
+    /// A regular new tab opens this page; none keeps the built-in page.
+    pub(super) new_page: Option<url::Url>,
 }
 
 impl Default for TabPreferences {
@@ -66,6 +100,7 @@ impl Default for TabPreferences {
         Self {
             new_position: NewTabPosition::default(),
             external_position: None,
+            external_mini: true,
             archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
@@ -74,6 +109,7 @@ impl Default for TabPreferences {
             start_with_pages: false,
             startup_pages: Vec::new(),
             home: None,
+            new_page: None,
         }
     }
 }
@@ -94,6 +130,7 @@ impl TabPreferences {
             "tabs.startup",
             "tabs.startup-pages",
             "tabs.home",
+            "tabs.new-page",
             "tabs.external-position",
             "tabs.archive",
         ] {
@@ -124,10 +161,25 @@ impl TabPreferences {
                 self.startup_pages = zephium_core::preferences::startup_pages(value)
             }
             ("tabs.home", value) => self.home = zephium_core::preferences::home_page(value),
-            ("tabs.external-position", "new-tab") => self.external_position = None,
-            ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
+            ("tabs.new-page", value) => {
+                self.new_page = zephium_core::preferences::new_tab_page(value)
+                    .and_then(|page| url::Url::parse(&page).ok());
+            }
+            ("tabs.external-position", "new-tab") => {
+                self.external_position = None;
+                self.external_mini = false;
+            }
+            ("tabs.external-position", "end") => {
+                self.external_position = Some(NewTabPosition::End);
+                self.external_mini = false;
+            }
             ("tabs.external-position", "after-current") => {
-                self.external_position = Some(NewTabPosition::AfterCurrent)
+                self.external_position = Some(NewTabPosition::AfterCurrent);
+                self.external_mini = false;
+            }
+            ("tabs.external-position", "mini") => {
+                self.external_position = None;
+                self.external_mini = true;
             }
             ("tabs.archive", "never") => self.archive_after = ArchiveAfter::Never,
             ("tabs.archive", "12h") => self.archive_after = ArchiveAfter::HalfDay,
@@ -147,9 +199,24 @@ struct KeptSlot {
 
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
-        self.open_tab_with_id()
+        self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
             .unwrap_or_default()
+    }
+
+    /// Apply the destination only to a new-tab intent, never to an intermediate
+    /// tab allocated for a link, duplicate, extension page or explicit URL.
+    pub(super) fn open_new_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
+        let (id, mut effects) = self.open_tab_with_id()?;
+        if let Some(page) = self.tab_preferences.new_page.clone().filter(|_| {
+            self.windows
+                .focused()
+                .is_some_and(|window| !self.incognito_profile(window.profile))
+        }) {
+            effects.extend(self.items.navigate(id, page.as_str()));
+            self.new_tab_destinations.insert(id, page);
+        }
+        Some((id, effects))
     }
 
     pub(super) fn open_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
@@ -278,14 +345,15 @@ impl Shell {
         if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) {
             return NativeWork::default();
         }
+        // A stand-in New Tab leaves nothing worth reopening.
+        let stand_in = self.is_new_tab_stand_in(id);
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
         self.forget_tab_media(id);
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);
-        let closed = kept
-            .is_none()
+        let closed = (kept.is_none() && !stand_in)
             .then(|| self.closed_record(id, unix_millis()))
             .flatten();
         self.cancel_page_permission_for_item(id);
@@ -432,7 +500,7 @@ impl Shell {
         if self.incognito_profile(profile) {
             return Vec::new();
         }
-        self.open_tab_with_id()
+        self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
             .unwrap_or_default()
     }
@@ -448,14 +516,52 @@ impl Shell {
         }) && self.items.pending_navigation_request(id).is_none()
     }
 
-    /// The front tab is the only open tab of its space and an untouched New
-    /// Tab: closing it would only swap it for an identical one.
+    /// Used to keep the lone New Tab open and to skip Recently Closed when
+    /// a stand-in is explicitly closed. A website can hold user input, so
+    /// automatic removal uses the untouched built-in New Tab check.
+    pub(super) fn is_new_tab_stand_in(&self, id: ItemId) -> bool {
+        self.is_untouched_new_tab(id)
+            || (self.new_tab_destination_is_current(id)
+                && self.items.get(id).is_some_and(|item| {
+                    matches!(
+                        item.placement,
+                        Placement::Space {
+                            section: SpaceSection::Today,
+                            ..
+                        }
+                    )
+                }))
+    }
+
+    pub(super) fn new_tab_destination_is_current(&self, id: ItemId) -> bool {
+        self.new_tab_destinations
+            .get(&id)
+            .is_some_and(|destination| {
+                self.items
+                    .pending_navigation_url(id)
+                    .is_none_or(|target| new_tab_destination_matches(destination, target))
+            })
+    }
+
+    pub(super) fn update_new_tab_destination(&mut self, id: ItemId, url: &url::Url, adopt: bool) {
+        let Some(destination) = self.new_tab_destinations.get_mut(&id) else {
+            return;
+        };
+        if adopt {
+            destination.clone_from(url);
+        } else if *destination != *url {
+            self.new_tab_destinations.remove(&id);
+        }
+    }
+
+    /// The front tab is the only open tab of its space and still stands in
+    /// for a page: closing it would only swap it for another new tab.
     pub(super) fn is_lone_new_tab(&self, id: ItemId) -> bool {
         self.windows.focused().is_some_and(|window| {
             window.active == Some(id)
                 && !self.incognito_profile(window.profile)
                 && self.regular_tabs(window.space) == [id]
-        }) && self.is_untouched_new_tab(id)
+        }) && self.is_new_tab_stand_in(id)
     }
 
     /// The tab in this space already showing exactly `url`, if any.
@@ -546,6 +652,9 @@ impl Shell {
             let Some(item) = pending.pop() else {
                 break;
             };
+            self.recent_tabs.forget(item);
+            self.tab_previews.forget(item);
+            self.new_tab_destinations.remove(&item);
             self.sources.retain(|held| held != item);
             if let Some(profile) = self.profile_of_item(item) {
                 self.engine.forget_discarded_state(profile, Some(item));
@@ -786,6 +895,10 @@ impl Shell {
         foreground: bool,
         adoption: zephium_core::ports::engine::NativeTabAdoption,
     ) {
+        if self.mini_window_of(source).is_some() {
+            self.adopt_linked_mini(source, child, foreground, adoption);
+            return;
+        }
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
@@ -898,6 +1011,12 @@ impl Shell {
     /// source, routed through the same navigation policy. The split group
     /// survives: the new tab shows alone, the group stays a tab away.
     pub(super) fn open_linked_tab(&mut self, source: ItemId, url: &str) {
+        if self.mini_window_of(source).is_some() {
+            if !self.open_linked_mini(source, url) {
+                self.open_mini_link_as_tab(source, url);
+            }
+            return;
+        }
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
@@ -1001,4 +1120,55 @@ pub(super) fn unix_millis() -> Option<u64> {
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
         .filter(|ms| (1_000..=zephium_core::session::MAX_EXACT_MS).contains(ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restored_tab_is_new_tab_destination;
+    use url::Url;
+
+    #[test]
+    fn restored_destination_matches_www_redirects() {
+        for (destination, restored) in [
+            ("https://google.com/", "https://www.google.com/"),
+            ("https://www.google.com/", "https://google.com/"),
+            ("http://google.com/", "https://www.google.com/"),
+        ] {
+            assert!(
+                restored_tab_is_new_tab_destination(
+                    &Url::parse(destination).unwrap(),
+                    &Url::parse(restored).unwrap(),
+                ),
+                "{destination} and {restored}",
+            );
+        }
+    }
+
+    #[test]
+    fn restored_destination_rejects_other_url_changes() {
+        for (destination, restored) in [
+            ("https://google.com/", "https://www.google.com/other"),
+            ("https://google.com/", "https://www.google.com/?q=1"),
+            ("https://google.com/", "https://www.google.com/#top"),
+            ("https://google.com/", "https://www.google.com:8443/"),
+            ("https://google.com/", "http://www.google.com/"),
+            ("https://google.com/", "https://www.www.google.com/"),
+            ("https://www.com/", "https://com/"),
+            ("https://www.com./", "https://com./"),
+            ("http://127.0.0.1/", "https://127.0.0.1/"),
+            ("https://google.com/", "https://user@www.google.com/"),
+            (
+                "https://user:one@google.com/",
+                "https://user:two@www.google.com/",
+            ),
+        ] {
+            assert!(
+                !restored_tab_is_new_tab_destination(
+                    &Url::parse(destination).unwrap(),
+                    &Url::parse(restored).unwrap(),
+                ),
+                "{destination} and {restored}",
+            );
+        }
+    }
 }

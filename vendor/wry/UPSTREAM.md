@@ -54,15 +54,18 @@ Its security-relevant deltas currently enforce these invariants:
   the adapter prevents a second attacker-sized Rust allocation and stops body
   streaming at the limit. `native_admission.rs` additionally allows at most 32
   asynchronous custom-protocol requests per WebView (per verified WebKitGTK
-  context on Linux); on macOS the bound is per scheme of each WebView, so IPC
-  and assets never hold each other back. Every accepted request carries a
-  unique non-cloneable RAII permit through response, cancellation, timeout, or
-  teardown. On macOS a request past the bound waits, in arrival order within
-  its scheme, in a main-thread wait list of at most 512 tasks and starts as a
-  permit is released; a stopped task leaves the list, and teardown clears it.
-  Only a request past both bounds (and, on other platforms, past the in-flight
-  bound) completes synchronously with an empty 503 response and never acquires
-  a native deferral. Teardown seals and drains accounting, and late permit drops
+  context on Linux); on macOS and Windows the bound is per scheme of each
+  WebView, so IPC and assets never hold each other back. Every accepted request
+  carries a unique non-cloneable RAII permit through response, cancellation,
+  timeout, or teardown. On macOS and Windows a request past the bound waits, in
+  arrival order within its scheme, in a main-thread wait list of at most 512
+  requests and starts as a permit is released; a stopped macOS task leaves the
+  list, and teardown clears it. On Windows a waiting request holds its WebView2
+  deferral, and teardown or a full list completes it exactly once with an empty
+  503. Only a request past both bounds (and, on Linux, past the in-flight bound)
+  is refused with an empty 503 response; on macOS and Linux the refusal is
+  synchronous and acquires no native deferral. Teardown seals and drains
+  accounting, and late permit drops
   cannot underflow or reopen it. Zephium's page-evaluation integration accepts
   primitive-only contracts: fixed-size discard and favicon results and one
   explicitly bounded HTML string. Page objects and attacker-controlled object
@@ -333,3 +336,25 @@ it takes the video back, so without a handler that brings the page on screen
 the button does nothing for a background tab. A missing handler keeps
 upstream's no-op; a panic is contained. Like the other private selectors it
 must be reviewed during upstream rebases.
+
+- Programmatic WebKit navigation records retain their `WKNavigation` objects
+  until terminal settlement or proven policy refusal is superseded. A refused
+  attempt that never starts releases its registry slot before a later owned
+  load. Unstarted attempts without a policy refusal keep their attribution so
+  overlapping and reentrant loads cannot exchange URLs. Action callbacks have
+  no navigation identity: URL correlation is used only when unambiguous; nested
+  or same-address ambiguity remains conservatively retained.
+
+- macOS script-dialog suppression is scoped to a committed main-frame
+  document generation. Same-document history/hash changes do not reopen
+  dialogs. A later document clears suppression; an old sheet's completion
+  cannot silence its replacement. The fork explicitly enables AppKit NSCell
+  and block2 APIs used by the suppression checkbox and sheet completion,
+  including in its independent dependency graph.
+
+- Native page navigation URLs use a 256 KiB allocation ceiling in both UTF-16
+  units and UTF-8 bytes, synchronized with Zephium's domain navigation bound.
+  Unreadable/oversized native main-frame and new-window addresses report a
+  metadata-free refusal instead of silently disappearing. WebKit identifies
+  child-frame refusals separately; these never manufacture a whole-tab
+  navigation failure or a partial URL/native identity.

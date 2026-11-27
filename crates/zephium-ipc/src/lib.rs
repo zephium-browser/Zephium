@@ -129,6 +129,8 @@ pub enum PageRequestView {
         host: Option<String>,
         site: Option<String>,
     },
+    /// The native address was unreadable or too long. Dismissal only.
+    NavigationRefused { embedded: bool },
     /// The site, or its proxy, asks to sign in. Never carries the server's
     /// own text.
     HttpAuth {
@@ -743,7 +745,51 @@ impl PanelLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TabSwitcherAction {
+    Step {
+        reverse: bool,
+    },
+    Select {
+        index: u32,
+    },
+    Commit,
+    Cancel,
+    Close,
+    /// Leaves the switcher for a new tab in its window.
+    NewTab,
+    /// Leaves the switcher for this tab, whatever is selected by then.
+    Activate {
+        tab_id: String,
+    },
+    /// Closes this tab, whatever is selected by then, and stays open.
+    CloseTab {
+        tab_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherEntry {
+    pub tab_id: String,
+    pub title: String,
+    pub url_host: String,
+    pub favicon: Option<IconRef>,
+    pub preview_url: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherState {
+    pub session_id: String,
+    pub window_id: String,
+    pub entries: Vec<TabSwitcherEntry>,
+    pub selected: u32,
+    pub keyboard: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PanelState {
+    pub switcher: Option<TabSwitcherState>,
     pub window_id: Option<String>,
     pub revision: String,
     pub session_id: String,
@@ -757,6 +803,8 @@ pub struct PanelState {
     pub seed: Option<String>,
     /// The tab whose address is being edited; it is no destination of its own.
     pub seed_tab: Option<String>,
+    /// An address chosen in this presentation opens in a new mini window.
+    pub mini: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -770,6 +818,9 @@ pub struct SearchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    #[serde(default)]
+    #[specta(optional)]
+    pub shortcut: Option<String>,
     pub pending: bool,
     pub context: Option<SearchContext>,
     pub query: String,
@@ -839,6 +890,7 @@ impl HistoryRange {
 pub const MAX_HISTORY_PAGE_LIMIT: u16 = 200;
 pub const MAX_HISTORY_QUERY_BYTES: usize = 512;
 pub const MAX_HISTORY_FORGET_URLS: usize = 100;
+const MAX_HISTORY_URL_BYTES: usize = 8 * 1024;
 
 impl HistoryCall {
     pub fn validate(&self) -> bool {
@@ -859,9 +911,13 @@ impl HistoryCall {
             Self::Forget { urls } => {
                 !urls.is_empty()
                     && urls.len() <= MAX_HISTORY_FORGET_URLS
-                    && urls
-                        .iter()
-                        .all(|url| zephium_core::navigation::is_allowed_str(url))
+                    && urls.iter().all(|url| {
+                        url.len() <= MAX_HISTORY_URL_BYTES
+                            && url::Url::parse(url).is_ok_and(|target| {
+                                target.as_str().len() <= MAX_HISTORY_URL_BYTES
+                                    && zephium_core::navigation::is_allowed(&target)
+                            })
+                    })
             }
             Self::Clear { .. } | Self::ClosedTabs => true,
             Self::ClearSince { since } => *since > 0,
@@ -1254,6 +1310,47 @@ pub enum WorkFolderAdmitV1 {
     Refused { not_a_folder: bool },
 }
 
+/// A mini window's chrome: its window and the one page in it, if any yet.
+/// The page's URL and title are untrusted and only ever shown as text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub tab: Option<TabView>,
+    /// Where "Open in Zephium" can put the page: its profile's spaces, in
+    /// sidebar order.
+    pub spaces: Vec<MiniSpaceView>,
+    /// The space "Open in Zephium" uses unless the person picks another.
+    pub space: Option<String>,
+    /// The window stays above other applications' windows.
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniSpaceView {
+    pub id: String,
+    pub name: String,
+}
+
+/// The shell made a mini window; the desktop builds its native window with
+/// this content size.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniOpenedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The shell let a mini window go. `reveal_main` brings the main window
+/// forward because the page just moved into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniClosedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub reveal_main: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,
@@ -1294,6 +1391,8 @@ pub enum OperationOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum OperationReason {
     MutationApplied,
+    /// The address went to a mini window, so the main window stays behind.
+    OpenedInMini,
     StateUnchanged,
     InvalidScope,
     NoFocusedWindow,
@@ -1725,6 +1824,10 @@ pub enum Projection {
     WorkEnvironmentChanged(work::WorkEnvironmentChangedV1),
     WorkChanged(work::WorkChangedV1),
     PanelOwner(PanelOwner),
+    TabSwitcher {
+        session: u64,
+        state: Option<TabSwitcherState>,
+    },
     Items(ItemsState),
     Tab(TabView),
     Favicons(FaviconsView),
@@ -1760,6 +1863,12 @@ pub enum Projection {
     RecentlyClosed(Vec<ClosedTabView>),
     /// The sidebar's player, sent when it changes; `None` hides it.
     MediaPlayer(Option<MediaPlayerView>),
+    MiniOpened(MiniOpenedView),
+    Mini(MiniView),
+    MiniClosed(MiniClosedView),
+    /// Links another application handed over opened as tabs, so the main
+    /// window comes forward. A link that opened a mini window does not.
+    ExternalTabsOpened,
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.
@@ -1959,5 +2068,38 @@ mod bookmark_tests {
             },
         ];
         assert!(!invalid.iter().any(BookmarkCall::validate));
+    }
+}
+
+#[cfg(test)]
+mod history_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn history_forget_retains_its_per_address_and_row_budgets() {
+        let prefix = "https://example.test/";
+        let at_bound = format!(
+            "{prefix}{}",
+            "x".repeat(MAX_HISTORY_URL_BYTES - prefix.len())
+        );
+        let forget = |url| HistoryCall::Forget { urls: vec![url] };
+        assert!(forget(at_bound.clone()).validate());
+        assert!(HistoryCall::Forget {
+            urls: vec![at_bound.clone(); MAX_HISTORY_FORGET_URLS]
+        }
+        .validate());
+        assert!(!HistoryCall::Forget {
+            urls: vec![at_bound.clone(); MAX_HISTORY_FORGET_URLS + 1]
+        }
+        .validate());
+        assert!(!forget(format!("{at_bound}x")).validate());
+        assert!(!forget(format!("{at_bound}\n")).validate());
+        let expanded = format!(
+            "{prefix}{}",
+            "é".repeat((MAX_HISTORY_URL_BYTES - prefix.len()) / 2)
+        );
+        assert!(expanded.len() <= MAX_HISTORY_URL_BYTES);
+        assert!(zephium_core::navigation::is_allowed_str(&expanded));
+        assert!(!forget(expanded).validate());
     }
 }

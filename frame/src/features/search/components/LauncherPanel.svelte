@@ -1,5 +1,9 @@
+<script module lang="ts">
+  export { default as TabSwitcher } from "./TabSwitcher.svelte";
+</script>
+
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import type { PanelState, ToolKind } from "$shared/ipc/bindings";
@@ -51,6 +55,7 @@
     onTool: (tool) => onTool(tool),
     onCapture: untrack(() => onCapture),
     captureKeys: keys.capture,
+    sitesOnly: () => !!context?.mini,
   });
 
   // Geometry the native shapes are placed from. Kept as numbers rather than
@@ -121,12 +126,13 @@
     if (row)
       available.push({ id: "open", label: primary, keys: keys.open, run: () => surface.submit() });
     if (surface.addressable) {
-      available.push({
-        id: "background",
-        label: m.launcher_open_background(),
-        keys: keys.background,
-        run: () => surface.submit(true),
-      });
+      if (!context?.mini)
+        available.push({
+          id: "background",
+          label: m.launcher_open_background(),
+          keys: keys.background,
+          run: () => surface.submit(true),
+        });
       available.push({
         id: "copy",
         label: m.launcher_copy_link(),
@@ -150,7 +156,9 @@
     if (target.calculation) return m.launcher_copy_answer();
     switch (target.result?.kind) {
       case "tab":
-        return m.launcher_switch_tab();
+        return target.result.action.type === "OpenUrl"
+          ? m.launcher_open()
+          : m.launcher_switch_tab();
       case "search":
       case "suggestion":
       case "search_history":
@@ -189,8 +197,18 @@
         // Editing a page's address opens on that address, selected, so typing
         // replaces it and Return goes back to it.
         surface.begin(next);
-        input?.focus();
-        input?.select();
+        // The seeded value must reach the DOM before selection is applied.
+        void tick().then(() => {
+          if (
+            bound !== next.session_id ||
+            !context?.visible ||
+            context.session_id !== next.session_id ||
+            !input?.isConnected
+          )
+            return;
+          input.focus();
+          input.select();
+        });
       } else if (bound !== null) {
         bound = null;
         menu = false;
@@ -267,6 +285,10 @@
     // isComposing already false; that key still reports the IME's 229.
     if (event.defaultPrevented || surface.composing || event.isComposing || event.keyCode === 229)
       return;
+    if (event.key === "Backspace" && event.target === input && surface.backspace()) {
+      event.preventDefault();
+      return;
+    }
     const mod = IS_MAC ? event.metaKey : event.ctrlKey;
     const key = event.key.toLowerCase();
     if (mod && key === "k") {
@@ -294,7 +316,7 @@
     // A focused button activates itself instead of running the field's row.
     if (event.key === "Enter" && event.target instanceof HTMLButtonElement) return;
     const numbered = mod && !event.shiftKey && !event.altKey ? Number(key) : NaN;
-    if (numbered >= 1 && numbered <= destinations.length) {
+    if (!context?.mini && numbered >= 1 && numbered <= destinations.length) {
       event.preventDefault();
       onTool(destinations[numbered - 1]!.kind);
       return;
@@ -365,7 +387,7 @@
   data-native-clip={nativeClip}
   style:--inset={`${inset}px`}
 >
-  <div class="capsule">
+  <div class="capsule" data-shortcut={surface.activeShortcut?.id}>
     <span class="lead" aria-hidden="true"
       >{#if lead.image}<FavIcon image={lead.image} tone={lead.tone} size={16} lit />{:else}<Icon
           icon={lead.icon}
@@ -382,8 +404,12 @@
       autocapitalize="off"
       autocorrect="off"
       spellcheck={false}
-      placeholder={m.panel_search_placeholder()}
-      aria-label={m.panel_search_placeholder()}
+      placeholder={context?.mini ? m.panel_mini_placeholder() : m.panel_search_placeholder()}
+      aria-label={surface.activeShortcut
+        ? m.search_shortcut_label({ name: surface.activeShortcut.name })
+        : context?.mini
+          ? m.panel_mini_placeholder()
+          : m.panel_search_placeholder()}
       role="combobox"
       aria-haspopup={menu ? "menu" : "listbox"}
       aria-controls={menu ? ACTIONS_ID : "launcher-results"}
@@ -432,7 +458,8 @@
           >{:else if surface.notice === "copied"}<span class="status">{m.launcher_copied()}</span
           >{:else if surface.notice === "answer"}<span class="status"
             >{m.launcher_answer_copied()}</span
-          >{:else if surface.running}<span class="status">{m.panel_opening()}</span>{:else if home}
+          >{:else if surface.running}<span class="status">{m.panel_opening()}</span
+          >{:else if home && !context?.mini}
           <div class="destinations" role="group" aria-label={m.launcher_destinations()}>
             {#each destinations as destination (destination.kind)}
               <button

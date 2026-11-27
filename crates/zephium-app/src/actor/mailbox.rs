@@ -23,6 +23,7 @@ enum CoalescedKey {
     FocusWake,
     AudioWake,
     VisitTitlesWake,
+    TabPreview,
     Title(ItemId),
     Url(ItemId),
     Loading(ItemId),
@@ -138,7 +139,7 @@ const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_I
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
-    + 5 // Includes replaceable memory-pressure and guide-cleanup facts.
+    + 6 // Includes the single preview capture and replaceable memory-pressure and guide-cleanup facts.
     + cfg!(feature = "work-execution") as usize;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
@@ -264,6 +265,7 @@ const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
+    TabPreview,
     MediaCapture(ItemId),
     Audio(ItemId),
     Fullscreen(ItemId),
@@ -288,6 +290,7 @@ enum RecoveryKey {
 
 fn recovery_key(command: &Command) -> Option<RecoveryKey> {
     match command {
+        Command::TabPreviewReady { .. } => Some(RecoveryKey::TabPreview),
         Command::Engine(EngineEvent::MediaCaptureChanged { id, .. }) => {
             Some(RecoveryKey::MediaCapture(*id))
         }
@@ -661,6 +664,15 @@ impl CommandQueue {
                 .map_or(deadline, |current| current.min(deadline)),
         );
         self.inner.timer_ready.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dormancy_deadline(&self) -> Option<std::time::Instant> {
+        self.inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .dormancy_deadline
     }
 
     pub(crate) fn schedule_page_permission(
@@ -1321,7 +1333,8 @@ fn command_is_critical(command: &Command) -> bool {
     }
     matches!(
         command,
-        Command::SetWindowFocused(false)
+        Command::TabPreviewReady { .. }
+            | Command::SetWindowFocused(false)
             | Command::SetPagePermissionCardHost(false)
             | Command::SetChromeModal(false)
             | Command::BlockerReady(_)
@@ -1362,6 +1375,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::NavigationFailureReported { .. }
+                    | EngineEvent::NativeNavigationRefused { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }
                     | EngineEvent::ViewCreationFailed { .. }
@@ -1393,6 +1407,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
     match command {
         #[cfg(feature = "work-execution")]
         Command::WorkWake => Some(CoalescedKey::Work),
+        Command::TabPreviewReady { .. } => Some(CoalescedKey::TabPreview),
         Command::Bootstrap => Some(CoalescedKey::Bootstrap),
         Command::Engine(event) => CoalescedKey::of(event),
         Command::SetWindowSize(_) => Some(CoalescedKey::WindowSize),

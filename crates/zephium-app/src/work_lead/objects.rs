@@ -20,6 +20,47 @@ pub(crate) struct CanvasObject {
     pub part_title: Option<String>,
 }
 
+/// The pages behind this run's current objects: what a reply that names no
+/// sources of its own rests on. Empty when they are general knowledge too.
+pub(crate) fn run_evidence(objects: &[CanvasObject]) -> Vec<WorkEvidenceLink> {
+    let mut links: Vec<WorkEvidenceLink> = Vec::new();
+    for link in objects
+        .iter()
+        .filter(|object| object.current && object.in_this_run)
+        .flat_map(|object| &object.artifact.evidence)
+    {
+        if links.len() == MAX_ARTIFACT_EVIDENCE {
+            break;
+        }
+        if !links.contains(link) {
+            links.push(link.clone());
+        }
+    }
+    links
+}
+
+/// What a revision that names no sources rests on: a reply without pages
+/// takes this run's, a plan whose pages came from its picks none (so its new
+/// picks give them), and anything else keeps its own.
+pub(crate) fn revised_evidence(
+    objects: &[CanvasObject],
+    target: &CanvasObject,
+) -> Vec<WorkEvidenceLink> {
+    let evidence = &target.artifact.evidence;
+    match &target.artifact.data {
+        WorkArtifactDataV1::Reply { .. } if evidence.is_empty() => run_evidence(objects),
+        data @ WorkArtifactDataV1::Plan { .. }
+            if !evidence.is_empty() && {
+                let picked = pick_evidence(objects, data);
+                evidence.iter().all(|link| picked.contains(link))
+            } =>
+        {
+            Vec::new()
+        }
+        _ => evidence.clone(),
+    }
+}
+
 /// Objects the runs of this work placed, oldest first; records a page gave
 /// a part are sources, not objects.
 pub(crate) fn canvas(
@@ -604,20 +645,50 @@ pub(crate) fn propose(
     normalize(kind, &mut data);
     let mut value_sources = Vec::new();
     if kind == "sheet" {
-        value_sources =
-            super::value_sources::ground_sheet(&mut data, sources, &run.source_previews())
-                .map_err(|error| (error, ObjectRefusal::Source))?;
+        let mut uncited = Vec::new();
+        value_sources = super::value_sources::ground_sheet(
+            &mut data,
+            sources,
+            &run.source_previews(),
+            lenient,
+            &mut uncited,
+        )
+        .map_err(|error| (error, ObjectRefusal::Source))?;
+        if !uncited.is_empty() {
+            let rows = uncited
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            left_out.push(format!(
+                "the citation of rows {rows} (their values are not on the page they cited)"
+            ));
+        }
     }
+    // A retry leaves out a key that is no source of this run rather than
+    // refusing the object again: the object then claims less, not more.
+    let mut unknown_keys: Vec<String> = Vec::new();
+    let mut known = |key: &str| {
+        let known = !lenient || run.source(key).is_some();
+        if !known && !unknown_keys.iter().any(|k| k == key) {
+            unknown_keys.push(key.to_owned());
+        }
+        known
+    };
     let mut keys: Vec<String> = Vec::new();
     for key in sources.iter().chain(&value_sources) {
         let key = key.trim().to_owned();
-        if !keys.contains(&key) {
+        if known(&key) && !keys.contains(&key) {
             keys.push(key);
         }
     }
     items_mut(&mut data, |item| {
         if let Some(Value::String(key)) = item.get("source") {
             let key = key.trim().to_owned();
+            if !known(&key) {
+                item.remove("source");
+                return;
+            }
             if !keys.contains(&key) {
                 keys.push(key.clone());
             }
@@ -650,6 +721,12 @@ pub(crate) fn propose(
         let index = keys.iter().position(|candidate| candidate == key).unwrap();
         item.insert("record_source".into(), Value::from(index as u64));
     });
+    if !unknown_keys.is_empty() {
+        left_out.push(format!(
+            "the sources {} (not sources of this run)",
+            unknown_keys.join(", ")
+        ));
+    }
     let mut evidence = Vec::new();
     let mut unknown = None;
     for key in &keys {
@@ -747,12 +824,41 @@ pub(crate) fn propose(
             ));
         }
     }
+    if evidence.is_empty() {
+        evidence = pick_evidence(objects, &data);
+    }
     Ok(Proposed {
         title: title.to_owned(),
         data,
         evidence,
         left_out,
     })
+}
+
+/// The pages behind the picks a plan's steps point to: what a plan that
+/// names no sources of its own rests on.
+pub(crate) fn pick_evidence(
+    objects: &[CanvasObject],
+    data: &WorkArtifactDataV1,
+) -> Vec<WorkEvidenceLink> {
+    let WorkArtifactDataV1::Plan { steps, .. } = data else {
+        return Vec::new();
+    };
+    let mut links: Vec<WorkEvidenceLink> = Vec::new();
+    for link in steps
+        .iter()
+        .filter_map(|step| step.pick.as_ref())
+        .filter_map(|pick| objects.iter().find(|o| o.artifact.id == pick.artifact))
+        .flat_map(|object| &object.artifact.evidence)
+    {
+        if links.len() == MAX_ARTIFACT_EVIDENCE {
+            break;
+        }
+        if !links.contains(link) {
+            links.push(link.clone());
+        }
+    }
+    links
 }
 
 /// What a second try left out, for the model: the place and why.
@@ -876,9 +982,11 @@ const REDO: [&str; 9] = [
     "give access",
 ];
 /// Words that claim a finished or checked result.
-const CLAIMS: [&str; 7] = [
+const CLAIMS: [&str; 9] = [
     "complete",
+    "finished",
     "verified",
+    "checked",
     "confirmed",
     "all set",
     "ready",
@@ -897,6 +1005,11 @@ const PICK_TAGS: [&str; 5] = [
 /// The value says it was not found rather than giving it.
 pub(crate) fn says_not_found(text: &str) -> bool {
     says(text, &NOT_FOUND)
+}
+
+/// The text calls a result finished or checked.
+pub(crate) fn claims_done(text: &str) -> bool {
+    affirms(text, &CLAIMS, true)
 }
 
 fn says(text: &str, words: &[&str]) -> bool {
@@ -937,6 +1050,24 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
                 .next()
                 .unwrap_or("");
             let clause = clause.rsplit(" but ").next().unwrap_or(clause);
+            // "and" or "or" starts another claim unless only modifiers come
+            // between it and this one: "No issues found and pricing checked"
+            // claims, "could not be checked or independently verified" does
+            // not. Walking back, the nearest joint that opens a predicate of
+            // its own bounds the claim. A doubtful case is read as a claim:
+            // a refusal costs a retry, a missed claim publishes a false one.
+            let mut joints: Vec<usize> = clause
+                .match_indices(" and ")
+                .map(|(at, _)| at + 5)
+                .chain(clause.match_indices(" or ").map(|(at, _)| at + 4))
+                .collect();
+            joints.sort_unstable();
+            let clause = joints
+                .iter()
+                .rev()
+                .map(|&start| &clause[start..])
+                .find(|claim| !modifiers(claim))
+                .unwrap_or(clause);
             let denied = negation
                 && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
@@ -947,6 +1078,28 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
     })
 }
 
+/// Words that only modify a predicate they continue: "fully", "yet",
+/// "been".
+fn modifiers(text: &str) -> bool {
+    text.split_whitespace().all(|word| {
+        (word.len() > 4 && word.ends_with("ly"))
+            || matches!(
+                word,
+                "be" | "been"
+                    | "being"
+                    | "is"
+                    | "was"
+                    | "were"
+                    | "are"
+                    | "yet"
+                    | "all"
+                    | "also"
+                    | "even"
+                    | "still"
+            )
+    })
+}
+
 /// What the run knows when an object is proposed.
 pub(crate) struct Honesty {
     /// The object rests on sources.
@@ -954,13 +1107,24 @@ pub(crate) struct Honesty {
     /// Names of this request's parts that could not do their job, and
     /// their services, in lower case: "slack", "flights".
     pub failed: Vec<String>,
+    /// The request tried to read pages and could read none of them.
+    pub unread: bool,
 }
 
 /// Refuses an object that stands for a failure or claims more than the run
 /// found: a figure or pick that says it was not found, a to-do to retry the
-/// agent's own work, a recommended pick without sources, or a headline that
-/// calls the result complete while a part failed.
+/// agent's own work, a recommended pick without sources, a headline that
+/// calls the result complete while a part failed, or a table or picks
+/// when no page the request tried to read could be read.
 pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), String> {
+    if run.unread
+        && matches!(
+            data,
+            WorkArtifactDataV1::Sheet { .. } | WorkArtifactDataV1::Picks { .. }
+        )
+    {
+        return Err("no page you tried to read could be read, so a table or picks would rest on search snippets alone. Publish none: reply with what could not be read, and offer to try again".into());
+    }
     match data {
         WorkArtifactDataV1::Reply {
             headline, figures, ..
@@ -972,8 +1136,8 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
             }) {
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
-            if !run.failed.is_empty() && affirms(headline, &CLAIMS, true) {
-                return Err("reply: the headline calls the result finished or checked while a part could not do its job; say what was found".into());
+            if (!run.failed.is_empty() || run.unread) && claims_done(headline) {
+                return Err("reply: the headline calls the result finished or checked while a part could not do its job or no page could be read; say what was found".into());
             }
         }
         WorkArtifactDataV1::Picks { items, .. } => {
@@ -1506,6 +1670,147 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_without_its_own_sources_rests_on_this_runs_sourced_objects() {
+        let object = |id: &str, evidence: serde_json::Value, in_this_run: bool| CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Sets", "evidence": evidence,
+                "review": "mechanical", "presentation": "automatic",
+                "data": {"kind": "picks", "facet": "product", "items": [{"name": "Paris"}]}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run,
+            part_title: None,
+        };
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let general = object("01M3RV9DBTWYS7770BES8YYKT3", serde_json::json!([]), true);
+        assert!(run_evidence(std::slice::from_ref(&general)).is_empty());
+        let earlier = object(
+            "01M3RV9DBTWYS7770BES8YYKT4",
+            serde_json::json!([link(7)]),
+            false,
+        );
+        let picks = object(
+            "01M3RV9DBTWYS7770BES8YYKT5",
+            serde_json::json!([link(1), link(2)]),
+            true,
+        );
+        let sheet = object(
+            "01M3RV9DBTWYS7770BES8YYKT6",
+            serde_json::json!([link(2), link(3)]),
+            true,
+        );
+        let links = run_evidence(&[earlier, general, picks, sheet]);
+        assert_eq!(
+            links.iter().map(|l| l.source_id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        let many: Vec<_> = (0..MAX_ARTIFACT_EVIDENCE as u16 + 8)
+            .map(|i| {
+                object(
+                    "01M3RV9DBTWYS7770BES8YYKT7",
+                    serde_json::json!([link(i)]),
+                    true,
+                )
+            })
+            .collect();
+        assert_eq!(run_evidence(&many).len(), MAX_ARTIFACT_EVIDENCE);
+    }
+
+    #[test]
+    fn a_plan_without_its_own_sources_rests_on_the_picks_it_points_to() {
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let picks = |id: &str, evidence: serde_json::Value| CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Flights", "evidence": evidence,
+                "review": "mechanical", "presentation": "automatic",
+                "data": {"kind": "picks", "facet": "flight", "items": [{"name": "LOT"}]}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run: true,
+            part_title: None,
+        };
+        let flights = picks(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            serde_json::json!([link(1), link(2)]),
+        );
+        let other = picks("01M3RV9DBTWYS7770BES8YYKT4", serde_json::json!([link(5)]));
+        let plan = |pick: Option<&str>| -> WorkArtifactDataV1 {
+            serde_json::from_value(serde_json::json!({"kind": "plan", "steps": [
+                {"kind": "travel", "title": "Fly to San Francisco", "pick": pick.map(|id| serde_json::json!({"artifact": id, "index": 0}))},
+                {"kind": "task", "title": "Apply for ESTA"}
+            ]}))
+            .unwrap()
+        };
+        let objects = [flights, other];
+        let links = pick_evidence(&objects, &plan(Some("01M3RV9DBTWYS7770BES8YYKT3")));
+        assert_eq!(
+            links.iter().map(|l| l.source_id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        // A plan that points to no pick stays general knowledge.
+        assert!(pick_evidence(&objects, &plan(None)).is_empty());
+    }
+
+    #[test]
+    fn a_revision_without_sources_rests_on_what_its_object_rests_on_now() {
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let object =
+            |id: &str, evidence: serde_json::Value, data: serde_json::Value| CanvasObject {
+                artifact: serde_json::from_value(serde_json::json!({
+                    "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                    "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                    "output": "result", "title": "Object", "evidence": evidence,
+                    "review": "mechanical", "presentation": "automatic", "data": data
+                }))
+                .unwrap(),
+                current: true,
+                in_this_run: true,
+                part_title: None,
+            };
+        let picks =
+            serde_json::json!({"kind": "picks", "facet": "flight", "items": [{"name": "LOT"}]});
+        let plan = serde_json::json!({"kind": "plan", "steps": [
+            {"kind": "travel", "title": "Fly", "pick": {"artifact": "01M3RV9DBTWYS7770BES8YYKT3", "index": 0}}
+        ]});
+        let flights = object(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            serde_json::json!([link(1)]),
+            picks,
+        );
+        let reply = object(
+            "01M3RV9DBTWYS7770BES8YYKT5",
+            serde_json::json!([]),
+            serde_json::json!({"kind": "reply", "headline": "Flights", "text": "Two flights fit."}),
+        );
+        let derived = object(
+            "01M3RV9DBTWYS7770BES8YYKT6",
+            serde_json::json!([link(1)]),
+            plan.clone(),
+        );
+        let own = object(
+            "01M3RV9DBTWYS7770BES8YYKT7",
+            serde_json::json!([link(1), link(4)]),
+            plan,
+        );
+        let objects = [flights, reply.clone(), derived.clone(), own.clone()];
+        let ids =
+            |links: Vec<WorkEvidenceLink>| links.iter().map(|l| l.source_id).collect::<Vec<_>>();
+
+        // A reply first placed without pages takes the ones placed since.
+        assert_eq!(ids(revised_evidence(&objects, &reply)), [1, 4]);
+        // A plan's pages from its picks come again from the picks it names now.
+        assert!(revised_evidence(&objects, &derived).is_empty());
+        // Pages a plan named itself stay.
+        assert_eq!(ids(revised_evidence(&objects, &own)), [1, 4]);
+    }
+
+    #[test]
     fn the_leads_offers_side_by_side_are_no_copy_of_a_parts_picks() {
         let picks = |id: &str, part: &str, names: &[&str]| {
             CanvasObject {
@@ -1577,6 +1882,7 @@ mod tests {
         let honest_run = Honesty {
             sourced: true,
             failed: vec!["slack".into(), "flights".into()],
+            unread: false,
         };
         let reply: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "reply", "headline": "Airfare recheck complete", "text": "The lookup failed.",
@@ -1595,7 +1901,8 @@ mod tests {
             &headline,
             &Honesty {
                 sourced: true,
-                failed: vec![]
+                failed: vec![],
+                unread: false,
             }
         )
         .is_ok());
@@ -1618,11 +1925,27 @@ mod tests {
             .unwrap();
             assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
         }
-        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
-            "kind": "reply", "headline": "Slack was not read, but the plan is complete", "text": "The plan stands."
-        }))
-        .unwrap();
-        assert!(honest(&claimed, &honest_run).is_err());
+        for headline in [
+            "Pricing could not be checked",
+            "Pricing could not be checked or verified",
+            "Pricing could not be checked or independently verified",
+            "Nothing was read, so pricing is not yet fully confirmed",
+        ] {
+            assert!(!claims_done(headline), "{headline}");
+        }
+        for headline in [
+            "Slack was not read, but the plan is complete",
+            "No issues found and pricing checked",
+            "No issues found and pricing fully checked",
+            "No issues found and pricing reviewed and independently verified",
+        ] {
+            assert!(claims_done(headline), "{headline}");
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The plan stands."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &honest_run).is_err(), "{headline}");
+        }
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))
@@ -1649,7 +1972,8 @@ mod tests {
             &unsourced,
             &Honesty {
                 sourced: false,
-                failed: vec![]
+                failed: vec![],
+                unread: false,
             }
         )
         .is_err());
@@ -1658,6 +1982,55 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&tagged, &honest_run).is_err());
+    }
+
+    #[test]
+    fn no_table_when_no_page_could_be_read() {
+        let unread = Honesty {
+            sourced: true,
+            failed: vec![],
+            unread: true,
+        };
+        let sheet: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "sheet", "columns": [{"label": "Provider", "kind": "text"}, {"label": "Price", "kind": "text"}],
+            "rows": [{"cells": ["Hetzner", "CX23 from $6.49/mo"]}, {"cells": ["Vercel", ""]}]
+        }))
+        .unwrap();
+        assert!(honest(&sheet, &unread).unwrap_err().contains("no page"));
+        assert!(mend(&sheet, &unread).is_none());
+        let picks: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks", "facet": "service", "items": [{"name": "Hetzner"}]
+        }))
+        .unwrap();
+        assert!(honest(&picks, &unread).is_err());
+        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Comparison complete", "text": "The table is on the canvas."
+        }))
+        .unwrap();
+        assert!(honest(&claimed, &unread).is_err());
+        for headline in ["Pricing checked", "Pricing finished"] {
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The table is on the canvas."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &unread).is_err(), "{headline}");
+        }
+        let negated: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Pricing could not be checked", "text": "The pages didn't open."
+        }))
+        .unwrap();
+        assert!(honest(&negated, &unread).is_ok());
+        let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "I couldn't read the pricing pages",
+            "text": "Vercel, Cloudflare and Hetzner's pages didn't open. Try again."
+        }))
+        .unwrap();
+        assert!(honest(&plain, &unread).is_ok());
+        let read = Honesty {
+            unread: false,
+            ..unread
+        };
+        assert!(honest(&sheet, &read).is_ok());
     }
 }
 

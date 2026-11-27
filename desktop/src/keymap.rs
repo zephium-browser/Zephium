@@ -141,7 +141,7 @@ impl Keymap {
                     // the key after the focused page has, and a page keystroke
                     // hides the pointer until the mouse moves.
                     command.group == Group::Keys
-                        || matches!(command.id, "tab.next" | "tab.previous")
+                        || matches!(command.id, "tab.recent.next" | "tab.recent.previous")
                 })
                 .filter(|command| self.offers(command.id))
                 .filter_map(|command| {
@@ -590,7 +590,7 @@ mod tests {
         // platform must match Ctrl+Tab and Ctrl+Shift+Tab ahead of the page.
         let keymap = Keymap::default();
         keymap.refresh_tables();
-        for id in ["tab.next", "tab.previous"] {
+        for id in ["tab.recent.next", "tab.recent.previous"] {
             #[cfg(target_os = "macos")]
             assert!(read(&keymap.key_table).iter().any(|(_, held)| *held == id));
             #[cfg(not(target_os = "macos"))]

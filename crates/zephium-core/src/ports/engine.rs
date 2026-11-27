@@ -69,6 +69,8 @@ pub struct WebExtensionLoad {
 pub struct WebExtensionLoaded {
     pub name: String,
     pub version: String,
+    #[cfg(target_os = "windows")]
+    pub options: Option<Box<url::Url>>,
 }
 
 /// Which engine data partition a view lives in. Every persistent profile gets
@@ -836,6 +838,16 @@ pub trait Engine {
     fn site_permissions(&self, _profile: ProfileId, done: crate::permissions::SitePermissionsDone) {
         done(None);
     }
+    /// A complete native catalog for negative grant proofs. None if the
+    /// source is unavailable, truncated or contains a malformed known entry.
+    /// UI listings may be partial and cannot establish that a grant is absent.
+    fn site_permission_snapshot(
+        &self,
+        _profile: ProfileId,
+        done: crate::permissions::SitePermissionsDone,
+    ) {
+        done(None);
+    }
     /// Saves one decision in the engine's own store for `profile`; None
     /// forgets it so the site is asked again.
     fn set_site_permission(
@@ -921,6 +933,14 @@ pub trait Engine {
     fn go_to_history_entry(&self, _id: ItemId, _offset: i32, _url: &str) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    fn capture_tab_preview(
+        &self,
+        _id: ItemId,
+        _url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        done(None);
+    }
     fn close(&self, id: ItemId) -> NativeDispatch;
     /// Lay the split `tree` into `region` of `window`, or hide that window's
     /// content when `region` is `None`. The engine owns pane geometry so
@@ -932,6 +952,21 @@ pub trait Engine {
         region: Option<Rect>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, preview: Option<DropPreview>) -> NativeDispatch;
+    /// Whether a window other than the main one can host a page in its own
+    /// native window, as a mini window does.
+    fn hosts_mini_windows(&self) -> bool {
+        false
+    }
+    /// Retires the stage of a window other than the main one before its
+    /// native window goes away. A later layout for it is refused.
+    fn release_window(&self, _window: WindowId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Gives a page the keyboard inside its own window, as a mini window's
+    /// page takes it when the window opens.
+    fn focus_page(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// A transient guide in window coordinates; never changes pane geometry.
     fn set_resize_guide(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         NativeDispatch::Unsupported
@@ -1637,6 +1672,11 @@ pub enum EngineEvent {
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
     },
+    /// A browser-owned row was chosen from a native extension action menu.
+    ExtensionActionMenuSelected {
+        profile: ProfileId,
+        command: String,
+    },
     /// Coalescible native notification that one or more effective actions for
     /// this profile changed. It carries no native or extension identity; the
     /// Shell responds by requesting a fresh exact replacement cohort.
@@ -1702,6 +1742,13 @@ pub enum EngineEvent {
     NavigationFailed {
         id: ItemId,
         request: NavigationRequestId,
+    },
+    /// A main-frame URL failed the bounded native copy boundary. This is a
+    /// policy refusal, independent of transport failure or HTTPS fallback.
+    NativeNavigationRefused {
+        id: ItemId,
+        /// Child content refusal does not affect the top-level navigation.
+        embedded: bool,
     },
     /// Why the view's current main-frame navigation failed, reported before
     /// its failure settles.

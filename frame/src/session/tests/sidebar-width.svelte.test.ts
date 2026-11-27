@@ -59,8 +59,8 @@ test("hidden mode keeps its expanded width and temporary panels do not replace i
   sidebar.beginSidebarResize();
   sidebar.cancelSidebarResize();
   sidebar.adoptResizeWidth(56);
-  expect(host.stored.get("sidebar.width")).toBe("360");
-  expect(host.set).not.toHaveBeenCalledWith("sidebar.width", expect.anything());
+  expect(host.stored.get("sidebar.width")).toBe("180");
+  expect(sidebar.sidebarMode()).toBe("hidden");
 });
 
 test("only a current, finite native resize saves a rounded width", async () => {
@@ -122,3 +122,66 @@ test.each(["rejected", "failed", "transport", "unconfirmed"])(
     expect(host.set).toHaveBeenCalledTimes(2);
   },
 );
+
+test("hidden card previews live, cancels without saving, and persists only on release", async () => {
+  host.stored.set("sidebar.mode", "hidden");
+  const sidebar = await import("../sidebar-mode.svelte");
+  await sidebar.init();
+  sidebar.beginSidebarResize();
+  sidebar.applyDragWidth(330);
+  expect(sidebar.expanded()).toBe(330);
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  expect(host.set).not.toHaveBeenCalled();
+  sidebar.cancelSidebarResize();
+  expect(sidebar.expanded()).toBe(240);
+  expect(host.set).not.toHaveBeenCalled();
+  sidebar.beginSidebarResize();
+  sidebar.applyDragWidth(56);
+  expect(sidebar.expanded()).toBe(180);
+  sidebar.finishSidebarResize(56);
+  expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(host.stored.get("sidebar.width")).toBe("180");
+  expect(host.width).toHaveBeenLastCalledWith(180, false, expect.any(Number));
+});
+
+test("native hidden capture ignores stale or malformed progress and saves its final selection", async () => {
+  host.stored.set("sidebar.mode", "hidden");
+  const sidebar = await import("../sidebar-mode.svelte");
+  await sidebar.init();
+  const revision = sidebar.sidebarResizeRevision();
+  const progress = (detail: unknown) =>
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-resize-progress", { detail }));
+  progress({ width: 330, revision: revision - 1, active: true });
+  progress({ width: Number.NaN, revision, active: true });
+  progress({ width: "330", revision, active: true });
+  expect(sidebar.sidebarResizeActive()).toBe(false);
+  progress({ width: 330, revision, active: true });
+  expect(sidebar.expanded()).toBe(330);
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  expect(host.set).not.toHaveBeenCalled();
+  window.dispatchEvent(
+    new CustomEvent("zephium:sidebar-width-selected", { detail: { width: 330, revision } }),
+  );
+  expect(sidebar.sidebarResizeActive()).toBe(false);
+  expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(host.stored.get("sidebar.width")).toBe("330");
+});
+
+test("a settled hidden resize schedules no idle work", async () => {
+  vi.useFakeTimers();
+  const frame = vi.fn();
+  vi.stubGlobal("requestAnimationFrame", frame);
+  host.stored.set("sidebar.mode", "hidden");
+  const sidebar = await import("../sidebar-mode.svelte");
+  await sidebar.init();
+  sidebar.beginSidebarResize();
+  sidebar.applyDragWidth(330);
+  sidebar.finishSidebarResize(330);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(vi.getTimerCount()).toBe(0);
+  const calls = host.width.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(vi.getTimerCount()).toBe(0);
+  expect(frame).not.toHaveBeenCalled();
+  expect(host.width).toHaveBeenCalledTimes(calls);
+});

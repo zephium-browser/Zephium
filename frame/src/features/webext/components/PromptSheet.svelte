@@ -24,7 +24,7 @@
   const restore = beside ? () => {} : expandBriefly();
   onDestroy(restore);
 
-  let left = $derived(beside ? COMPACT_WIDTH + INSET : INSET);
+  const left = beside ? COMPACT_WIDTH + INSET : INSET;
 </script>
 
 <div

@@ -172,13 +172,12 @@ test("Escape closes the panel when chrome focus is outside its content", async (
   expect(onclose).toHaveBeenCalledOnce();
 });
 
-test("the header offers a visible close button even while a reply is working", async () => {
+test("the header's More menu closes the panel even while a reply is working", async () => {
   const onclose = vi.fn();
   native.status = status([person(1, "Summarize"), reply(2, [], { state: "working", cost: null })]);
   const screen = await render(PanelStage, { profile: PROFILE, onclose });
-  const close = screen.getByRole("button", { name: "Close tool", exact: true });
-  await expect.element(close).toBeVisible();
-  await close.click();
+  await screen.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Close tool" }).click();
   expect(onclose).toHaveBeenCalledOnce();
 });
 
@@ -206,6 +205,24 @@ test("while a reply works, Send is Stop, and Escape stops it before closing anyt
   await field.click();
   await userEvent.keyboard("{Escape}");
   expect(onclose).toHaveBeenCalledOnce();
+});
+
+test("an idle empty field parks its caret, and Escape still stops a working reply", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  const onclose = vi.fn();
+  native.status = status([person(1, "Summarize"), reply(2, [], { state: "working", cost: null })]);
+  await page.viewport(400, 820);
+  const screen = await render(PanelStage, { profile: PROFILE, onclose });
+  const field = screen.getByRole("textbox", { name: "Ask Zephium…" });
+  await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  await field.click();
+  await expect.poll(() => field.element().dataset.caretParked, { timeout: 6000 }).toBe("");
+  expect(document.activeElement).not.toBe(field.element());
+  await userEvent.keyboard("{Escape}");
+  await expect.poll(() => native.stop.mock.calls.length).toBe(1);
+  expect(onclose).not.toHaveBeenCalled();
+  expect(document.activeElement).toBe(field.element());
+  vi.mocked(document.hasFocus).mockRestore();
 });
 
 test("one round button: the mic on an empty field, Send once there are words", async () => {

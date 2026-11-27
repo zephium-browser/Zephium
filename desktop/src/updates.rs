@@ -63,6 +63,14 @@ static RELAUNCH_AFTER_EXIT: AtomicBool = AtomicBool::new(false);
 static INSTALL_AFTER_EXIT: Mutex<Option<(Parked, std::path::PathBuf)>> = Mutex::new(None);
 
 const SUPPORTED: bool = !cfg!(debug_assertions) && cfg!(any(target_os = "macos", windows));
+
+fn supported_identity(native_release: bool, identifier: &str) -> bool {
+    native_release && identifier == "app.zephium"
+}
+
+fn supported(app: &tauri::AppHandle) -> bool {
+    supported_identity(SUPPORTED, &app.config().identifier)
+}
 /// The release's highlights, kept from its download for the first launch of it.
 const HIGHLIGHTS: &str = "updates.highlights";
 const MAX_HIGHLIGHTS: usize = 5;
@@ -73,8 +81,8 @@ const NATIVE_FIRST_CHECK: Duration = Duration::from_secs(5 * 60);
 const NATIVE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 impl Updates {
-    fn status(&self) -> UpdateStatus {
-        if !SUPPORTED {
+    fn status(&self, supported: bool) -> UpdateStatus {
+        if !supported {
             return UpdateStatus::Unavailable;
         }
         lock(&self.status).clone().unwrap_or(UpdateStatus::Idle)
@@ -115,7 +123,8 @@ pub(crate) fn update_status(
     caller: WebviewWindow,
     updates: tauri::State<'_, Updates>,
 ) -> Option<UpdateStatus> {
-    authorize(&caller, CallerPolicy::Main, "update_status").then(|| updates.status())
+    authorize(&caller, CallerPolicy::Main, "update_status")
+        .then(|| updates.status(supported(caller.app_handle())))
 }
 
 /// Checks for a newer release and downloads it. Returns the resulting status;
@@ -134,7 +143,7 @@ pub(crate) async fn update_check(
 
 async fn run_check(app: &tauri::AppHandle) -> UpdateStatus {
     let updates = app.state::<Updates>();
-    if let Err(status) = updates.begin_check(SUPPORTED) {
+    if let Err(status) = updates.begin_check(supported(app)) {
         return status;
     }
     let next = match check_and_download(app, &updates).await {
@@ -151,7 +160,7 @@ async fn run_check(app: &tauri::AppHandle) -> UpdateStatus {
 /// Checks on native's own schedule, unless the person turned automatic
 /// checks off, and tells the window what changed.
 pub(crate) fn schedule_native_checks(app: &tauri::AppHandle) {
-    if !SUPPORTED {
+    if !supported(app) {
         return;
     }
     let app = app.clone();
@@ -344,7 +353,7 @@ async fn check_and_download(
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn update_relaunch(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
-    if !authorize(&caller, CallerPolicy::Main, "update_relaunch") {
+    if !authorize(&caller, CallerPolicy::Main, "update_relaunch") || !supported(&app) {
         return false;
     }
     let updates = app.state::<Updates>();
@@ -458,7 +467,7 @@ impl From<tauri_plugin_updater::Error> for InstallError {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn restore(app: &tauri::AppHandle, directory: &std::path::Path) {
-    if !SUPPORTED {
+    if !supported(app) {
         return;
     }
     let path = directory.join("pending-update");
@@ -555,7 +564,7 @@ fn install_on_quit(app: &tauri::AppHandle) {
     let Some(updates) = app.try_state::<Updates>() else {
         return;
     };
-    if !matches!(updates.status(), UpdateStatus::Ready { .. }) {
+    if !matches!(updates.status(supported(app)), UpdateStatus::Ready { .. }) {
         return;
     }
     let Some(mut parked) = lock(&updates.parked).take() else {
@@ -673,6 +682,22 @@ mod highlight_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_release_production_identity_can_use_the_production_updater() {
+        assert!(supported_identity(true, "app.zephium"));
+        for identifier in [
+            "app.zephium.dev",
+            "app.zephium.protection-qa",
+            "app.zephium.files-qa",
+            "app.zephium.webext-qa",
+            "",
+            "app.zephium.evil",
+        ] {
+            assert!(!supported_identity(true, identifier), "{identifier}");
+        }
+        assert!(!supported_identity(false, "app.zephium"));
+    }
 
     #[test]
     fn retry_reasons_are_typed_localization_keys() {

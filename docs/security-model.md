@@ -649,7 +649,7 @@ mode with `synchronous=FULL`; every opened connection also enables SQLite's defe
 mode and cell-size checking, disables trusted-schema behavior and double-quoted string
 literals, and keeps temporary storage in memory. The complete restorable non-private
 session is committed as one meta-database transaction. History is capped at 50,000 rows
-per profile and the favicon cache at 512 origins per profile.
+per profile and the favicon cache at 1,024 origins per profile.
 
 `user_version` is not treated as sufficient schema identity. Before migration DML and
 after every committed migration step, the store compares a bounded inventory of every
@@ -1133,16 +1133,27 @@ Store worker queues are also bounded. Page-controlled history growth and extract
 results are capped. These are denial-of-service controls, not proof that arbitrary web
 pages cannot exhaust an engine renderer.
 
-**Page-derived native networking and images.** There is no generic native HTTP client or
-page-derived fetch port. Such a client could not share the exact profile's proxy, DNS,
-cookie, partition, and shutdown policy, so page-derived network access remains inside
+**Page-derived native networking and images.** Pages the person did not open are read by
+`zephium-public-fetch` with no cookies, credentials, referrer, or profile state. It admits
+named public HTTPS hosts on port 443, re-checks every redirect hop (at most three), and on a
+direct connection refuses a DNS answer holding any non-public address. Reads are capped at
+30 seconds, 8 MiB decoded, and 16 at once (4 per host). They follow Zephium's HTTP proxy or
+the system HTTPS proxy as the web view reads it, ignoring bypass lists, and refuse SOCKS,
+PAC, and auto-discovery unless Windows proves it is off or found nothing. These reads and
+Work's public image and YouTube title fetches take their route from one shared source that
+reads the system setting on a blocking thread, never on the async executor, at start, every
+30 seconds and after a failed connection. Until the route is known, or while a system read
+exceeds 2 seconds, nothing is sent; a change refuses page reads in flight. Work's fetches
+connect only directly and refuse while any proxy is in force. No native client
+can share the exact profile's proxy, DNS, cookie, partition, and shutdown policy, so
+network access for the page the person is viewing remains inside
 the exact profile-scoped native engine session. Favicon network access and codec parsing
 run inside the exact sandboxed site renderer. The host polls an asynchronous,
 same-origin image load under the current immutable WebView generation and navigation
 epoch, then accepts only a canonical base64 encoding of exactly 32x32 RGBA pixels
 (4,096 bytes). Rust validates and stores only that fixed raster; privileged chrome
 paints it with `ImageData` on a canvas and never invokes an `<img>` decoder or custom
-protocol. Persistent caches are capped at 512 decoded origins; private-profile icons
+protocol. Persistent caches are capped at 1,024 decoded origins; private-profile icons
 are bounded in memory and never sent to SQLite. A page can choose or forge its own
 pixels, but malformed containers, SVG/ICO/PNG parsers, cross-origin late results, and
 unbounded payloads do not cross into the privileged renderer. Candidate discovery

@@ -6,7 +6,11 @@
 //!
 //! A scenario is a JSON array of steps, run in order:
 //! - `{"load": "<dir or .crx>", "compat": true, "id": "<optional id>"}`
+//!   Use `"compat": false, "verify_background_start": true` for an already
+//!   prepared package that reports the worker startup signal.
 //! - `{"background": true}` starts the last loaded extension's background
+//! - `{"background_waiters": 8, "cancel": false}` checks concurrent startup
+//!   settlement, optionally unloading while readiness is pending
 //! - `{"tab": "<url>"}` opens a tab and waits for it to load; `{"blank": true}`
 //!   opens one with no page, as the browser's new tab
 //! - `{"page": "<path>"}` opens one of the extension's pages in a probe view
@@ -357,6 +361,10 @@ impl Lab {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         inspectable: true,
+                        verify_background_start: step
+                            .get("verify_background_start")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(compat),
                     };
                     this.runtime.load(spec, move |result| {
                         println!("LOADED {result:?}");
@@ -445,6 +453,39 @@ impl Lab {
         } else if let Some(path) = step.get("page").and_then(Value::as_str) {
             let view = this.open_page(path);
             wait_loaded(view, next);
+        } else if step.get("background_waiters").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            let count = step
+                .get("background_waiters")
+                .and_then(Value::as_u64)
+                .unwrap_or(8)
+                .clamp(1, 65);
+            let results = Rc::new(RefCell::new(Vec::new()));
+            for _ in 0..count {
+                let results = results.clone();
+                this.runtime.start_background(&id, move |result| {
+                    results.borrow_mut().push(result.is_ok());
+                });
+            }
+            if step.get("cancel").and_then(Value::as_bool) == Some(true) {
+                let lab = this.clone();
+                after(500, move || {
+                    lab.runtime.unload(&id);
+                });
+            }
+            // Outlive both readiness deadlines, so late callbacks are counted.
+            after(11_000, move || {
+                let results = results.borrow();
+                println!(
+                    "RESULT background-waiters {}",
+                    serde_json::json!({
+                        "requested": count, "settled": results.len(),
+                        "ok": results.iter().filter(|ok| **ok).count(),
+                        "errors": results.iter().filter(|ok| !**ok).count(),
+                    })
+                );
+                next();
+            });
         } else if let Some(body) = step.get("eval").and_then(Value::as_str) {
             let timeout = step.get("timeout").and_then(Value::as_u64).unwrap_or(5000);
             let view = match step.get("in").and_then(Value::as_str) {

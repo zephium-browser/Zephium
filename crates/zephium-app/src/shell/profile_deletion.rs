@@ -73,7 +73,7 @@ impl ProfileDeletionState {
 }
 
 pub(super) enum ProfileDeletionProof {
-    NotesReleased,
+    NotesReleased(bool),
     NativeErased(ProfileDataErasureOutcome),
 }
 pub(super) type ProfileDeletionInbox =
@@ -224,9 +224,13 @@ impl Shell {
             .recently_closed
             .retain(|entry| entry.profile != profile);
         filtered.spaces.retain(|space| space.profile != profile);
-        filtered.items.retain(|item| {
-            let (Placement::Favorites { space } | Placement::Space { space, .. }) = item.placement;
-            !removed_spaces.contains(&space)
+        filtered.items.retain(|item| match item.placement {
+            Placement::Favorites { space } | Placement::Space { space, .. } => {
+                !removed_spaces.contains(&space)
+            }
+            Placement::Mini {
+                profile: item_profile,
+            } => item_profile != profile,
         });
 
         (session::canonicalize(filtered.clone()) == filtered).then_some(filtered)
@@ -293,6 +297,8 @@ impl Shell {
         let removed_spaces = self.spaces.remove_for_profile(profile);
         let _native_erasure_owns_close = self.items.remove_for_profile(&removed_spaces);
         self.sources.retain(|id| self.items.tab(id).is_some());
+        self.new_tab_destinations
+            .retain(|id, _| self.items.tab(*id).is_some());
         self.profiles.remove(profile);
         self.forget_profile_roster(profile);
 
@@ -649,6 +655,12 @@ impl Shell {
     }
 
     fn release_profile_notes(&mut self, profile: ProfileId) {
+        let Some(cleanup) = self.profile_cleanup.clone() else {
+            // Even restart recovery must retain its exact obligation until a
+            // composed external owner can prove files and credentials absent.
+            self.schedule_profile_deletion_retry(profile);
+            return;
+        };
         let Some(state) = self.profile_deletion.states.get_mut(&profile) else {
             return;
         };
@@ -656,15 +668,6 @@ impl Shell {
             native_erasure_verified,
         } = state.phase
         else {
-            return;
-        };
-        let Some(notes) = &self.notes else {
-            state.phase = if native_erasure_verified {
-                ProfileDeletionPhase::FinalizeReady
-            } else {
-                ProfileDeletionPhase::NativeReady
-            };
-            self.drive_profile_deletion(profile);
             return;
         };
         state.attempt_generation = state.attempt_generation.wrapping_add(1).max(1);
@@ -679,30 +682,36 @@ impl Shell {
         let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
             queue: Arc::downgrade(&queue.inner),
         });
-        if !notes.release(
-            profile,
-            Box::new(move || {
-                let mut pending = inbox
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if pending.len() < zephium_core::session::MAX_SESSION_PROFILES
-                    || pending.contains_key(&profile)
-                {
-                    // A timed-out release may acknowledge after its retry.
-                    // Never let that older proof replace the current one.
-                    if pending
-                        .get(&profile)
-                        .is_none_or(|(generation, _)| *generation <= attempt)
-                    {
-                        pending.insert(profile, (attempt, ProfileDeletionProof::NotesReleased));
-                    }
-                }
-                drop(pending);
-                if let Some(wake) = wake {
-                    let _ = wake.dispatch(Command::ProfileDeletionReady(profile));
-                }
-            }),
-        ) {
+        let report = move |success| {
+            let mut pending = inbox
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if (pending.len() < zephium_core::session::MAX_SESSION_PROFILES
+                || pending.contains_key(&profile))
+                && pending
+                    .get(&profile)
+                    .is_none_or(|(generation, _)| *generation <= attempt)
+            {
+                pending.insert(
+                    profile,
+                    (attempt, ProfileDeletionProof::NotesReleased(success)),
+                );
+            }
+            drop(pending);
+            if let Some(wake) = wake {
+                let _ = wake.dispatch(Command::ProfileDeletionReady(profile));
+            }
+        };
+        let release_external: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let _ = cleanup.release(profile, Box::new(report));
+        });
+        let admitted = if let Some(notes) = &self.notes {
+            notes.release(profile, release_external)
+        } else {
+            release_external();
+            true
+        };
+        if !admitted {
             if let Some(state) = self.profile_deletion.states.get_mut(&profile) {
                 state.phase = ProfileDeletionPhase::NotesReady {
                     native_erasure_verified,
@@ -804,13 +813,20 @@ impl Shell {
         };
         let outcome = match (outcome, &state.phase) {
             (
-                ProfileDeletionProof::NotesReleased,
+                ProfileDeletionProof::NotesReleased(success),
                 ProfileDeletionPhase::NotesInFlight {
                     attempt: expected,
                     native_erasure_verified,
                     ..
                 },
             ) if attempt == *expected => {
+                if !success {
+                    state.phase = ProfileDeletionPhase::NotesReady {
+                        native_erasure_verified: *native_erasure_verified,
+                    };
+                    self.schedule_profile_deletion_retry(profile);
+                    return;
+                }
                 state.phase = if *native_erasure_verified {
                     ProfileDeletionPhase::FinalizeReady
                 } else {

@@ -2,6 +2,7 @@
 pub const KEYS: &[&str] = &[
     "appearance",
     "search.engine",
+    "search.shortcuts",
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
@@ -37,6 +38,7 @@ pub const KEYS: &[&str] = &[
     "tabs.startup",
     "tabs.startup-pages",
     "tabs.home",
+    "tabs.new-page",
     "network.proxy",
     "network.proxy-address",
     "time.track",
@@ -102,6 +104,11 @@ pub fn home_page(value: &str) -> Option<String> {
     crate::navigation::web_address(value).map(|page| page.to_string())
 }
 
+/// A bounded new-tab preference, without treating invalid input as a search.
+pub fn new_tab_page(value: &str) -> Option<String> {
+    (value.len() <= 2048).then(|| home_page(value)).flatten()
+}
+
 /// Interface languages a person may choose, by BCP 47 tag. One without a
 /// translation yet shows English; a translation lands by adding its locale to
 /// `project.inlang`. Mirrors `INTERFACE_LANGUAGES` in the frame.
@@ -130,6 +137,15 @@ pub const CODE_FONTS: &[&str] = &[
 /// carried, so a second run finds nothing to do.
 pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
     let mut writes = Vec::new();
+    if let Some(value) = stored("search.shortcuts").filter(|value| !value.is_empty()) {
+        if let Some(registry) = crate::search::ShortcutRegistry::from_setting(&value) {
+            if let Some(filtered) = registry.to_setting() {
+                if filtered != value {
+                    writes.push(("search.shortcuts", filtered));
+                }
+            }
+        }
+    }
     match stored("ui.text-size").as_deref() {
         Some("large") => {
             if stored("ui.font-size").is_none() {
@@ -187,6 +203,7 @@ pub fn feature_enabled(stored: impl Fn(&str) -> Option<String>, feature: &str) -
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
+        "search.shortcuts" => crate::search::ShortcutRegistry::from_setting(value).is_some(),
         "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),
@@ -202,7 +219,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         // system material the system cannot install falls back on its own.
         "ui.material" => matches!(
             value,
-            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "mica" | "none"
+            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "mica" | "mica_alt" | "none"
         ),
         "ui.newtab-background" => matches!(value, "sky" | "image"),
         // An admitted local blob, never a URL or a filesystem path. The media
@@ -231,7 +248,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.theme-contrast" => crate::theme::contrast_allowed(value),
         "tabs.new-position" => matches!(value, "end" | "after-current"),
         // Where a link handed over by another application opens.
-        "tabs.external-position" => matches!(value, "new-tab" | "end" | "after-current"),
+        "tabs.external-position" => {
+            matches!(value, "new-tab" | "end" | "after-current" | "mini")
+        }
         // How long a Today tab may sit unused before it closes into History.
         "tabs.archive" => matches!(value, "never" | "12h" | "1d" | "7d"),
         "tabs.close-button" => matches!(value, "hover" | "always"),
@@ -255,6 +274,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "network.proxy" => matches!(value, "system" | "http" | "socks5"),
         "network.proxy-address" => value.is_empty() || crate::proxy::parse_address(value).is_some(),
         "tabs.home" => value.is_empty() || home_page(value).is_some(),
+        "tabs.new-page" => value.is_empty() || new_tab_page(value).is_some(),
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
@@ -484,6 +504,10 @@ mod tests {
         assert!(!value_allowed("ui.accent", "purple"));
         assert!(value_allowed("ui.material", "vibrancy"));
         assert!(value_allowed("ui.material", "mica"));
+        assert!(value_allowed("ui.material", "mica_alt"));
+        for value in ["MicaAlt", "mica-alt", " mica_alt", "mica_alt "] {
+            assert!(!value_allowed("ui.material", value));
+        }
         assert!(!value_allowed("ui.material", "sky"));
         assert!(value_allowed("ui.newtab-clock-format", "24h"));
         assert!(value_allowed("ui.newtab-tasks", "false"));
@@ -597,7 +621,7 @@ mod tests {
         for value in ["", "0", "30d", "12 hours", "Never"] {
             assert!(!value_allowed("tabs.archive", value), "{value:?}");
         }
-        for value in ["new-tab", "end", "after-current"] {
+        for value in ["new-tab", "end", "after-current", "mini"] {
             assert!(value_allowed("tabs.external-position", value));
         }
         assert!(!value_allowed("tabs.external-position", "window"));
@@ -623,6 +647,59 @@ mod tests {
             );
         }
         writes
+    }
+
+    #[test]
+    fn saved_shortcuts_migrate_without_retired_entries_once() {
+        let mut entries = crate::search::ShortcutRegistry::default()
+            .entries()
+            .to_vec();
+        entries[0].enabled = false;
+        let expected = serde_json::to_string(&entries).unwrap();
+        let mut retired = entries[0].clone();
+        retired.id = "npm".into();
+        entries.push(retired);
+        let raw = serde_json::to_string(&entries).unwrap();
+        let writes = migrations(|key| (key == "search.shortcuts").then(|| raw.clone()));
+        assert_eq!(writes, vec![("search.shortcuts", expected.clone())]);
+        for value in [expected.as_str(), "", "not json", "null"] {
+            assert!(migrations(|key| (key == "search.shortcuts").then(|| value.into())).is_empty());
+        }
+    }
+
+    #[test]
+    fn near_limit_shortcut_migration_remains_readable() {
+        use crate::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+        let mut entries: Vec<_> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom:near-limit-{index}"),
+                    "name": "Near limit",
+                    "keywords": [format!("near{index}")],
+                    "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                    "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                    "domain": "example.com",
+                    "enabled": false
+                })
+            })
+            .collect();
+        let excess =
+            serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let home = entries.last_mut().unwrap()["home_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+        let writes = migrations(|key| (key == "search.shortcuts").then(|| raw.clone()));
+        let saved = writes.first().map_or(raw.as_str(), |(_, value)| value);
+        assert!(saved.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+        assert_eq!(
+            ShortcutRegistry::from_setting(saved).unwrap().entries(),
+            registry.entries()
+        );
     }
 
     #[test]
@@ -754,6 +831,34 @@ mod tests {
             Some("https://example.com/")
         );
         assert_eq!(home_page(""), None);
+    }
+
+    #[test]
+    fn new_tab_destination_is_empty_or_a_web_address_without_search_fallback() {
+        for value in [
+            "",
+            "example.com",
+            "https://example.com/start?q=1",
+            "http://localhost:8080/",
+        ] {
+            assert!(value_allowed("tabs.new-page", value), "{value:?}");
+        }
+        for value in [
+            "two words",
+            "javascript:alert(1)",
+            "file:///etc/hosts",
+            "/Users/me/home.html",
+            "C:\\dev\\home.html",
+            "about:blank",
+            "https://user:pass@example.com",
+            "https://tauri.localhost/",
+        ] {
+            assert!(!value_allowed("tabs.new-page", value), "{value:?}");
+        }
+        assert!(!value_allowed(
+            "tabs.new-page",
+            &format!("https://example.com/{}", "a".repeat(2048))
+        ));
     }
 
     #[test]

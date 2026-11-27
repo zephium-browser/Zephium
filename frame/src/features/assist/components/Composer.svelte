@@ -18,6 +18,7 @@
     Target02Icon,
   } from "../lib/icons";
   import AddMenu from "./AddMenu.svelte";
+  import { parkCaret } from "$shared/lib/parked-caret";
 
   let {
     session,
@@ -68,6 +69,8 @@
 
   // Opening the panel, from ⌘E or the dock, lands the caret in the field.
   onMount(() => field?.focus());
+  // A blinking caret keeps WebKit drawing; an idle empty field parks it.
+  $effect(() => (field ? parkCaret(field) : undefined));
 
   /** Moves the caret into the field; the host calls it when the panel is asked for again. */
   export function focus() {
@@ -288,7 +291,8 @@
     transition: box-shadow var(--motion-fast) var(--ease-out);
   }
 
-  .composer:focus-within {
+  .composer:focus-within,
+  .composer:has(:global(textarea[data-caret-parked])) {
     box-shadow: var(--shine-top), var(--shadow-raised), var(--shadow-field-focus);
   }
 

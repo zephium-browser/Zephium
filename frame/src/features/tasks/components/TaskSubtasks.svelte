@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isComposing } from "$shared/lib/keyboard";
   import { tick } from "svelte";
   import type { TaskStep } from "$domain/resources";
   import Icon from "$shared/ui/Icon";
@@ -72,6 +73,7 @@
         oninput={(event) => onrename(step.id, event.currentTarget.value)}
         onblur={() => onsettle?.()}
         onkeydown={(event) => {
+          if (isComposing(event)) return;
           if (event.key === "Enter") {
             event.preventDefault();
             field?.focus();
