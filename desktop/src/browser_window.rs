@@ -27,25 +27,6 @@ fn after_engine_attach(attach: impl FnOnce() -> bool, install_monitor: impl FnOn
     true
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::after_engine_attach;
-    use std::cell::Cell;
-
-    #[test]
-    fn failed_attach_skips_monitor() {
-        let installed = Cell::new(false);
-        assert!(!after_engine_attach(|| false, || installed.set(true)));
-        assert!(!installed.get());
-    }
-
-    #[test]
-    fn attached_window_gets_monitor() {
-        let installed = Cell::new(false);
-        assert!(after_engine_attach(|| true, || installed.set(true)));
-        assert!(installed.get());
-    }
-}
 static ALLOWED_CLOSES: OnceLock<Mutex<BTreeSet<u64>>> = OnceLock::new();
 
 fn allowed_closes() -> &'static Mutex<BTreeSet<u64>> {
@@ -374,6 +355,22 @@ pub(crate) fn navigation_allowed(label: &str, url: &tauri::Url) -> Option<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_attach_skips_monitor() {
+        let installed = std::cell::Cell::new(false);
+        assert!(!after_engine_attach(|| false, || installed.set(true)));
+        assert!(!installed.get());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn attached_window_gets_monitor() {
+        let installed = std::cell::Cell::new(false);
+        assert!(after_engine_attach(|| true, || installed.set(true)));
+        assert!(installed.get());
+    }
 
     #[test]
     fn browser_window_labels_are_canonical() {

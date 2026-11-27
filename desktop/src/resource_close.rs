@@ -403,12 +403,7 @@ pub(super) fn cancel_prepared(app: &tauri::AppHandle) {
         std::mem::take(&mut gate.flushed)
     };
     for (label, token) in flushed {
-        super::try_emit_to_privileged_only(
-            app,
-            &label,
-            "zephium:resource-close-cancelled",
-            &token,
-        );
+        super::try_emit_to_privileged_only(app, &label, "zephium:resource-close-cancelled", &token);
     }
 }
 

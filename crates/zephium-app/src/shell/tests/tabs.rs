@@ -72,7 +72,9 @@ fn close_uses_free_successor() {
     let first_window = shell.windows.focused().unwrap().id;
 
     assert_eq!(
-        shell.handle_operation(Command::Run("window.new".into())).outcome,
+        shell
+            .handle_operation(Command::Run("window.new".into()))
+            .outcome,
         OperationOutcome::Deferred
     );
     let other_window = shell

@@ -205,10 +205,7 @@ impl Shell {
                 && window.kind == zephium_core::windows::WindowKind::Main
                 && window.profile == profile
                 && (window.active == Some(id)
-                    || window
-                        .splits
-                        .as_ref()
-                        .is_some_and(|tree| tree.contains(id)))
+                    || window.splits.as_ref().is_some_and(|tree| tree.contains(id)))
         })
     }
 

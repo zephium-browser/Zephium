@@ -103,17 +103,19 @@ fn a_tab_active_in_another_browser_window_cannot_blank_its_content_stage() {
 
 #[test]
 fn previous_cycle_skips_busy_tabs() {
-    let (mut shell, _engine, screen) = setup();
+    let (mut shell, _engine, _screen) = setup();
     shell.handle(Command::Bootstrap);
-    let first = active_id(&screen);
     shell.handle(Command::Open);
-    let second = active_id(&screen);
-    shell.handle(Command::Open);
-    let third = active_id(&screen);
 
-    let first_window = shell.windows.focused().unwrap().id;
+    let (first_window, space) = shell
+        .windows
+        .focused()
+        .map(|window| (window.id, window.space))
+        .unwrap();
     assert_eq!(
-        shell.handle_operation(Command::Run("window.new".into())).outcome,
+        shell
+            .handle_operation(Command::Run("window.new".into()))
+            .outcome,
         OperationOutcome::Deferred
     );
     let other_window = shell
@@ -126,8 +128,16 @@ fn previous_cycle_skips_busy_tabs() {
         window: other_window,
         size: Size::new(1100.0, 720.0),
     });
-    shell.windows.get_mut(other_window).unwrap().active = Some(first);
-    shell.windows.get_mut(first_window).unwrap().active = Some(second);
+    if shell.keyboard_tabs(space).len() < 3 {
+        shell.handle(Command::Open);
+    }
+    let ordered = shell.keyboard_tabs(space);
+    assert!(ordered.len() >= 3);
+    let occupied = ordered[0];
+    let current = ordered[1];
+    let expected = *ordered.last().unwrap();
+    shell.windows.get_mut(other_window).unwrap().active = Some(occupied);
+    shell.windows.get_mut(first_window).unwrap().active = Some(current);
     shell.handle(Command::BrowserWindowFocused {
         window: first_window,
         focused: true,
@@ -135,8 +145,14 @@ fn previous_cycle_skips_busy_tabs() {
 
     shell.handle(Command::Run("tab.previous".into()));
 
-    assert_eq!(shell.windows.get(first_window).unwrap().active, Some(third));
-    assert_eq!(shell.windows.get(other_window).unwrap().active, Some(first));
+    assert_eq!(
+        shell.windows.get(first_window).unwrap().active,
+        Some(expected)
+    );
+    assert_eq!(
+        shell.windows.get(other_window).unwrap().active,
+        Some(occupied)
+    );
 }
 
 #[test]
@@ -149,7 +165,9 @@ fn split_drop_reject_cross_window_panes() {
     let first_window = shell.windows.focused().unwrap().id;
 
     assert_eq!(
-        shell.handle_operation(Command::Run("window.new".into())).outcome,
+        shell
+            .handle_operation(Command::Run("window.new".into()))
+            .outcome,
         OperationOutcome::Deferred
     );
     let other_window = shell

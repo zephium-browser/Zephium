@@ -9066,7 +9066,10 @@ mod tests {
 
     #[test]
     fn projections_follow_owner_window() {
-        assert_eq!(super::browser_projection_label(Some("1")), super::MAIN_LABEL);
+        assert_eq!(
+            super::browser_projection_label(Some("1")),
+            super::MAIN_LABEL
+        );
         assert_eq!(super::browser_projection_label(Some("2")), "browser-2");
         assert_eq!(super::browser_projection_label(None), super::MAIN_LABEL);
         assert_eq!(
