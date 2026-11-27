@@ -127,6 +127,11 @@ non-private session. History and favicon data use per-profile databases.
 Profiles therefore have explicit logical and native-engine boundaries, but are
 not separate operating-system users or wholly separate file-level principals.
 
+Bookmarks have a separate sharing boundary: the shared metadata store maps each
+profile to a top-level bookmark folder. A profile can use its own folder or map
+to an existing one; profiles mapped to the same folder see the same bookmark
+changes. This does not combine their history, cookies, or website data.
+
 The persistence adapter excludes private-session state from durable session,
 history, and favicon storage. That guarantee does not describe every temporary
 artifact a system engine or the operating system may create.
