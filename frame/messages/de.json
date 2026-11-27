@@ -3379,7 +3379,7 @@
   "profiles_save": "Sichern",
   "profiles_delete_open": "Profil löschen…",
   "profiles_delete_title": "„{name}“ löschen?",
-  "profiles_delete_body": "Sein Verlauf, seine Cookies und Websitedaten, Tabs, Erweiterungen und seine Arbeit werden dauerhaft von diesem Gerät entfernt. Dein Zephium-Account ist davon nicht betroffen.",
+  "profiles_delete_body": "Seine Lesezeichen, sein Verlauf, seine Cookies und Websitedaten, Tabs, Erweiterungen und seine Arbeit werden dauerhaft von diesem Gerät entfernt. Dein Zephium-Account ist davon nicht betroffen. Gemeinsam genutzte Lesezeichen bleiben erhalten, wenn ein anderes Profil den Ordner verwendet.",
   "profiles_delete_confirm": "Profil löschen",
   "profiles_delete_default": "Das Standardprofil kann nicht gelöscht werden.",
   "profiles_delete_current": "Wechsle dieses Fenster zu einem anderen Profil, um dieses zu löschen.",

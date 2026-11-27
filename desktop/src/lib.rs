@@ -2143,6 +2143,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             blocker_refresh_sources,
             profiles_delete,
             profiles::profiles_get,
+            profiles::profiles_bookmark_folders,
             profiles::profiles_create,
             profiles::profiles_switch,
             profiles::profiles_rename,

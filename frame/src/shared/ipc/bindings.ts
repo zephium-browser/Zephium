@@ -441,7 +441,8 @@ export const commands = {
 	private_tabs?: number | null,
 	profiles: ProfileEntryView[],
 } | null, null>(__TAURI_INVOKE("profiles_get")),
-	profilesCreate: (name: string, avatar: ProfileAvatarInputV1, andSwitch: boolean) => __TAURI_INVOKE<OperationAdmission>("profiles_create", { name, avatar, andSwitch }),
+	profilesBookmarkFolders: (profile: string) => __TAURI_INVOKE<BookmarkFolderView[]>("profiles_bookmark_folders", { profile }),
+	profilesCreate: (name: string, avatar: ProfileAvatarInputV1, andSwitch: boolean, bookmarkFolder: string | null) => __TAURI_INVOKE<OperationAdmission>("profiles_create", { name, avatar, andSwitch, bookmarkFolder }),
 	profilesSwitch: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_switch", { profile }),
 	profilesRename: (profile: string, name: string) => __TAURI_INVOKE<OperationAdmission>("profiles_rename", { profile, name }),
 	profilesSetAvatar: (profile: string, avatar: ProfileAvatarInputV1) => __TAURI_INVOKE<OperationAdmission>("profiles_set_avatar", { profile, avatar }),
@@ -1230,6 +1231,11 @@ export type BookmarkError = "missing" |
 "full" |
 /**  A folder cannot move into itself. */
 "cycle" | "invalid" | "unavailable" | "capacity";
+
+export type BookmarkFolderView = {
+	id: string,
+	title: string,
+};
 
 export type BookmarkResponse = { kind: "listing"; folder: string | null;
 /**  Folders from the top level down to `folder`, `folder` last. */

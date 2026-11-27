@@ -59,6 +59,13 @@ impl Hub {
                 ));
             }
             self.validate_session_transition(&prepared.registry)?;
+            self.prepare_shared_bookmarks()?;
+            if !self.bookmark_migration_complete(profile)
+                && !self.degraded_bookmark_profiles.contains(&profile)
+                && !self.degraded_profiles.contains(&profile)
+            {
+                return Ok(ProfileDeletionAuthorizeOutcome::Failed);
+            }
             // Only the live, validated deletion request may establish this
             // protected cleanup intent. Imported AppData tombstones alone
             // cannot authorize deleting bodies from the private Work journal.

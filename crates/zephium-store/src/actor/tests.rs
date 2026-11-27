@@ -54,7 +54,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         #[cfg(feature = "work-execution")]
         work_admission: OnceLock::new(),
         tx,
-        latest_session: Arc::new(Mutex::new(None)),
+        latest_session: Arc::new(Mutex::new(SessionMailbox::default())),
         pending_visits: Arc::new(Mutex::new(PendingVisits::new())),
         pending_settings: Arc::new(Mutex::new(PendingSettings::default())),
         userscript_mutation_admission: Arc::new(Mutex::new(UserscriptMutationAdmission::default())),
@@ -112,6 +112,49 @@ fn non_session_history_admission_keeps_the_eight_kib_queue_bound() {
     assert!(
         matches!(receive.try_recv(), Ok(Cmd::AmendVisitTitle(owner, url, _)) if owner == profile && url == at_limit)
     );
+}
+
+#[test]
+fn bookmark_folder_lookups_preserve_success_and_report_admission_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    store.save_session(sample());
+    assert!(store.flush());
+    let profile = ProfileId::from(1);
+    assert!(store.bookmark_folders(profile).is_some());
+    let (reply, receive) = mpsc::channel();
+    store.bookmark_folders_async(
+        profile,
+        Box::new(move |folders| {
+            let _ = reply.send(folders);
+        }),
+    );
+    assert!(receive.recv_timeout(REPLY_TIMEOUT).unwrap().is_some());
+    assert_eq!(
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+    let (reply, receive) = mpsc::channel();
+    store.bookmark_folders_async(
+        profile,
+        Box::new(move |folders| {
+            let _ = reply.send(folders);
+        }),
+    );
+    assert_eq!(receive.recv_timeout(REPLY_TIMEOUT).unwrap(), None);
+
+    let (sender, _receiver) = mpsc::sync_channel(1);
+    sender.try_send(Cmd::SaveWake).unwrap();
+    let saturated = test_store_with_sender(sender);
+    assert_eq!(saturated.bookmark_folders(profile), None);
+    let (reply, receive) = mpsc::channel();
+    saturated.bookmark_folders_async(
+        profile,
+        Box::new(move |folders| {
+            let _ = reply.send(folders);
+        }),
+    );
+    assert_eq!(receive.recv_timeout(REPLY_TIMEOUT).unwrap(), None);
 }
 
 #[cfg(feature = "work-execution")]
@@ -287,6 +330,7 @@ fn sample() -> SessionState {
             name: "Personal".into(),
             kind: ProfileKind::Default,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: space,
             profile,
@@ -1569,7 +1613,7 @@ fn first_visit_lands_even_inside_the_save_debounce() {
 #[test]
 fn failed_save_uses_capped_exponential_backoff_and_keeps_latest() {
     let started = Instant::now();
-    let mut pending = PendingSession::new(sample(), started);
+    let mut pending = PendingSession::new(1, sample(), started);
     assert_eq!(pending.deadline(), started + DEBOUNCE);
 
     for delay in [1, 2, 4, 8, 16, 30, 30] {
@@ -1579,13 +1623,60 @@ fn failed_save_uses_capped_exponential_backoff_and_keeps_latest() {
 
     let mut latest = sample();
     latest.active_item = None;
-    let mailbox = Mutex::new(Some(latest.clone()));
+    let mailbox = Mutex::new(SessionMailbox {
+        next_sequence: 2,
+        latest: Some((2, latest.clone())),
+    });
     let retry_at = pending.retry_at;
     let mut slot = Some(pending);
     absorb_latest_session(&mailbox, &mut slot);
     let pending = slot.unwrap();
     assert_eq!(pending.state, latest);
     assert_eq!(pending.retry_at, retry_at, "new snapshots retain backoff");
+}
+
+#[test]
+fn a_later_ordinary_session_is_saved_after_an_earlier_checked_barrier() {
+    let mut hub = Hub::in_memory().unwrap();
+    let checked = sample();
+    let mut later = sample();
+    later.active_item = None;
+    let started = Instant::now();
+    let mut pending = Some(PendingSession::new(3, later.clone(), started));
+    let mut committed_sequence = 0;
+
+    assert!(save_checked_session(
+        &mut hub,
+        &mut pending,
+        &mut committed_sequence,
+        2,
+        &checked
+    ));
+    assert_eq!(pending.as_ref().map(|save| save.sequence), Some(3));
+    assert!(flush(&mut hub, &mut pending, &mut committed_sequence));
+    assert_eq!(hub.load().unwrap().unwrap(), later);
+}
+
+#[test]
+fn checked_session_does_not_overwrite_a_newer_flushed_snapshot() {
+    let mut hub = Hub::in_memory().unwrap();
+    let mut newer = sample();
+    newer.active_item = None;
+    let older = sample();
+    let mut pending = Some(PendingSession::new(7, newer.clone(), Instant::now()));
+    let mut committed_sequence = 0;
+
+    assert!(flush(&mut hub, &mut pending, &mut committed_sequence));
+    assert_eq!(committed_sequence, 7);
+    assert!(save_checked_session(
+        &mut hub,
+        &mut pending,
+        &mut committed_sequence,
+        6,
+        &older
+    ));
+
+    assert_eq!(hub.load().unwrap().unwrap(), newer);
 }
 
 #[test]
@@ -3274,6 +3365,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
             name: "Personal".into(),
             kind: ProfileKind::Default,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: space,
             profile,
@@ -3732,6 +3824,7 @@ fn profile_deletion_rejects_a_hard_link_to_another_profile_database() {
             name: "Work".into(),
             kind: ProfileKind::Named,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: SpaceId::from(4),
             profile: survivor,

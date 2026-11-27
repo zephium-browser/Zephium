@@ -3379,7 +3379,7 @@
   "profiles_save": "儲存",
   "profiles_delete_open": "刪除設定檔…",
   "profiles_delete_title": "要刪除「{name}」嗎？",
-  "profiles_delete_body": "其瀏覽記錄、Cookie 與網站資料、分頁、擴充功能與工作，都將從這台裝置永久移除。你的 Zephium 帳戶不受影響。",
+  "profiles_delete_body": "其書籤、瀏覽記錄、Cookie 與網站資料、分頁、擴充功能與工作，都將從這台裝置永久移除。你的 Zephium 帳戶不受影響。 與其他設定檔共用資料夾中的書籤會保留在此裝置上。",
   "profiles_delete_confirm": "刪除設定檔",
   "profiles_delete_default": "無法刪除預設設定檔。",
   "profiles_delete_current": "請先將此視窗切換為其他設定檔，才能刪除此設定檔。",

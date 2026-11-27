@@ -29,6 +29,8 @@ pub const MAX_EXACT_MS: u64 = 9_007_199_254_740_991;
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionState {
     pub profiles: Vec<PersistedProfile>,
+    #[serde(default)]
+    pub shared_bookmark_folders: Vec<PersistedBookmarkFolder>,
     pub spaces: Vec<PersistedSpace>,
     /// DFS order: parents precede children.
     pub items: Vec<PersistedItem>,
@@ -37,6 +39,12 @@ pub struct SessionState {
     pub splits: Option<Pane>,
     #[serde(default)]
     pub recently_closed: Vec<PersistedClosedTab>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedBookmarkFolder {
+    pub profile: ProfileId,
+    pub folder: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -144,6 +152,18 @@ pub fn snapshot_with_recently_closed(
             kind: profile.kind,
         });
     }
+    state.shared_bookmark_folders = state
+        .profiles
+        .iter()
+        .filter_map(|profile| {
+            profiles
+                .bookmark_folder(profile.id)
+                .map(|folder| PersistedBookmarkFolder {
+                    profile: profile.id,
+                    folder,
+                })
+        })
+        .collect();
     for space in spaces.iter() {
         if !state.profiles.iter().any(|p| p.id == space.profile) {
             continue;
@@ -277,6 +297,13 @@ pub fn restore(state: SessionState) -> Restored {
             name: bounded_name(&p.name, "Profile"),
             kind: p.kind,
         });
+    }
+    for choice in state
+        .shared_bookmark_folders
+        .iter()
+        .take(MAX_SESSION_PROFILES)
+    {
+        profiles.set_bookmark_folder(choice.profile, Some(choice.folder));
     }
 
     let mut spaces = Spaces::default();
@@ -971,6 +998,22 @@ mod tests {
     }
 
     #[test]
+    fn shared_bookmark_folder_choice_survives_session_restore() {
+        let (mut profiles, spaces, items, profile, space) = seed();
+        assert!(profiles.set_bookmark_folder(profile, Some(42)));
+        let state = snapshot(&profiles, &spaces, &items, Some(space), None, None);
+        assert_eq!(
+            state.shared_bookmark_folders,
+            vec![PersistedBookmarkFolder {
+                profile,
+                folder: 42
+            }]
+        );
+        let restored = restore(state);
+        assert_eq!(restored.profiles.bookmark_folder(profile), Some(42));
+    }
+
+    #[test]
     fn restore_drops_dangling_references() {
         let state = SessionState {
             profiles: vec![],
@@ -995,6 +1038,7 @@ mod tests {
             active_item: Some(ItemId::from(10)),
             splits: Some(Pane::leaf(ItemId::from(10))),
             recently_closed: Vec::new(),
+            shared_bookmark_folders: Vec::new(),
         };
         let restored = restore(state);
         assert!(restored.spaces.is_empty());
@@ -1083,6 +1127,7 @@ mod tests {
                 b: Box::new(Pane::Leaf(kept)),
             }),
             recently_closed: Vec::new(),
+            shared_bookmark_folders: Vec::new(),
         };
 
         let clean = canonicalize(state);

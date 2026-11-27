@@ -74,6 +74,7 @@ pub fn profile_name(name: &str) -> Option<String> {
 pub struct Profiles {
     order: Vec<ProfileId>,
     map: HashMap<ProfileId, Profile>,
+    bookmark_folders: HashMap<ProfileId, i64>,
 }
 
 impl Profiles {
@@ -88,6 +89,22 @@ impl Profiles {
         true
     }
 
+    pub fn bookmark_folder(&self, id: ProfileId) -> Option<i64> {
+        self.bookmark_folders.get(&id).copied()
+    }
+
+    pub fn set_bookmark_folder(&mut self, id: ProfileId, folder: Option<i64>) -> bool {
+        if !self.map.contains_key(&id) || folder.is_some_and(|folder| folder <= 0) {
+            return false;
+        }
+        if let Some(folder) = folder {
+            self.bookmark_folders.insert(id, folder);
+        } else {
+            self.bookmark_folders.remove(&id);
+        }
+        true
+    }
+
     pub fn get(&self, id: ProfileId) -> Option<&Profile> {
         self.map.get(&id)
     }
@@ -96,6 +113,7 @@ impl Profiles {
     /// deliberately left to the application layer.
     pub fn remove(&mut self, id: ProfileId) -> Option<Profile> {
         let profile = self.map.remove(&id)?;
+        self.bookmark_folders.remove(&id);
         self.order.retain(|candidate| *candidate != id);
         Some(profile)
     }
@@ -135,6 +153,24 @@ impl Profiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bookmark_folder_selection_requires_a_profile_and_positive_id_and_clears_on_remove() {
+        let mut profiles = Profiles::default();
+        let first = ProfileId::from(1);
+        assert!(!profiles.set_bookmark_folder(first, Some(1)));
+        assert!(profiles.insert(Profile {
+            id: first,
+            name: "Personal".into(),
+            kind: ProfileKind::Default,
+        }));
+        assert!(!profiles.set_bookmark_folder(first, Some(0)));
+        assert!(!profiles.set_bookmark_folder(first, Some(-1)));
+        assert!(profiles.set_bookmark_folder(first, Some(42)));
+        assert_eq!(profiles.bookmark_folder(first), Some(42));
+        assert!(profiles.remove(first).is_some());
+        assert_eq!(profiles.bookmark_folder(first), None);
+    }
 
     #[test]
     fn profile_count_is_bounded_at_the_aggregate_boundary() {

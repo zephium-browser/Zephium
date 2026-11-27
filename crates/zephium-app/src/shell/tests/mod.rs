@@ -1207,6 +1207,9 @@ pub(crate) struct FakeStore {
         Mutex<std::collections::HashMap<ProfileId, zephium_core::blocker::BlockerStatistics>>,
     pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
     saved: Mutex<Option<SessionState>>,
+    checked_save_result: Mutex<Option<bool>>,
+    checked_save_started: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+    checked_save_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     events: Mutex<Vec<&'static str>>,
     flush_result: Mutex<Option<bool>>,
     shutdown_outcome: Mutex<Option<StoreShutdownOutcome>>,
@@ -1271,6 +1274,8 @@ pub(crate) struct FakeStore {
     pub(crate) app_link_sites: Mutex<
         std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
     >,
+    pub(crate) bookmark_folders:
+        Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::bookmarks::BookmarkFolder>>>,
     /// Every durable read of a pop-up, download or app-link list, by list.
     pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
     /// Application link writes report failure, as a store that timed out.
@@ -1339,6 +1344,21 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn bookmark_folders(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<zephium_core::bookmarks::BookmarkFolder>> {
+        self.bookmark_folders.lock().unwrap().get(&profile).cloned()
+    }
+
+    fn bookmark_folders_async(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
+    ) {
+        done(self.bookmark_folders(profile));
+    }
+
     fn popup_sites(
         &self,
         profile: ProfileId,
@@ -1552,6 +1572,19 @@ impl Store for FakeStore {
         );
         *self.saved.lock().unwrap() = Some(session);
         self.events.lock().unwrap().push("save");
+    }
+    fn save_session_checked(&self, session: SessionState) -> bool {
+        if let Some(started) = self.checked_save_started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = self.checked_save_release.lock().unwrap().take() {
+            let _ = release.recv();
+        }
+        if self.checked_save_result.lock().unwrap().take() == Some(false) {
+            return false;
+        }
+        self.save_session(session);
+        true
     }
     fn flush(&self) -> bool {
         if let Some(order) = self.barrier_order.lock().unwrap().as_ref() {

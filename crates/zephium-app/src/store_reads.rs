@@ -1146,8 +1146,7 @@ fn run_with(
                 profile,
                 work,
             } => {
-                let observe = queue.interest(profile).bookmarks;
-                let (reply, made) = bookmark_work(&*store, profile, work, observe);
+                let (reply, made) = bookmark_work(&*store, profile, work, true);
                 change = made.map(|made| (profile, ExtensionDataChange::Bookmark(made)));
                 StoreReadResult::Bookmarks {
                     token,
@@ -1164,11 +1163,7 @@ fn run_with(
                 added: match work {
                     ImportWork::Bookmarks { folder, nodes } => {
                         let request = BookmarkRequest::Import { folder, nodes };
-                        let (reply, made) = if queue.interest(profile).bookmarks {
-                            store.bookmarks_observed(profile, request)
-                        } else {
-                            (store.bookmarks(profile, request), None)
-                        };
+                        let (reply, made) = store.bookmarks_observed(profile, request);
                         change = made.map(|made| (profile, ExtensionDataChange::Bookmark(made)));
                         match reply {
                             BookmarkReply::Imported { added, partial } => Some((added, partial)),
@@ -1290,11 +1285,7 @@ fn extension_work(
             (ExtensionDataReply::History(reply), change)
         }
         ExtensionDataWork::Bookmarks(request) => {
-            let (reply, change) = if interest.bookmarks {
-                store.bookmarks_observed(profile, request)
-            } else {
-                (store.bookmarks(profile, request), None)
-            };
+            let (reply, change) = store.bookmarks_observed(profile, request);
             (
                 ExtensionDataReply::Bookmarks(reply),
                 change.map(ExtensionDataChange::Bookmark),

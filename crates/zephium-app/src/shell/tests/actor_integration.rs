@@ -118,6 +118,36 @@ fn actor_panic_terminalizes_pending_and_later_shutdown_requests() {
 }
 
 #[test]
+fn profile_creation_rejection_projection_panic_does_not_skip_shutdown_barriers() {
+    let store = Arc::new(FakeStore::default());
+    let engine = Arc::new(FakeEngine::default());
+    let mut shell = Shell::new(
+        engine,
+        store.clone(),
+        Arc::new(FakeChrome),
+        Box::new(|projection| {
+            if matches!(projection, Projection::OperationProcessed(_)) {
+                panic!("injected rejection projection panic");
+            }
+        }),
+    );
+    shell
+        .pending_profile_creations
+        .insert(1, Some("pending-operation".into()));
+    let (ack, result) = sync_channel(1);
+
+    shell.shutdown_until(test_shutdown_deadline(), ack);
+
+    assert_eq!(result.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        store
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+#[test]
 fn initial_blocker_catalog_panic_keeps_full_shell_under_terminal_cleanup() {
     let store = Arc::new(FakeStore::default());
     let order = Arc::new(Mutex::new(Vec::new()));

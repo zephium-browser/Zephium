@@ -454,6 +454,7 @@ pub enum Command {
         name: String,
         avatar: zephium_core::profiles::ProfileAvatar,
         photo: Option<Arc<Vec<u8>>>,
+        bookmark_folder: Option<i64>,
         /// Shows the new profile in the window once it exists.
         switch: bool,
     },
@@ -462,6 +463,26 @@ pub enum Command {
     RenameProfile {
         profile: ProfileId,
         name: String,
+    },
+    ProfileBookmarkFolderValidated {
+        generation: u64,
+        operation_id: Option<String>,
+        source: ProfileId,
+        name: String,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        folder: i64,
+        switch: bool,
+        exists: Option<bool>,
+    },
+    ProfileCreationPublished {
+        generation: u64,
+        profile: ProfileId,
+        space: zephium_core::ids::SpaceId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        switch: bool,
+        durable: bool,
     },
     /// A photo style carries its already downscaled bytes.
     SetProfileAvatar {

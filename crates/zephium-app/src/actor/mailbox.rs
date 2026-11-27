@@ -131,12 +131,12 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 // terminal view-state, zoom settlement, native-action failure, media-capture,
 // audio and fullscreen fact. Each profile can independently have one process-exit
 // fact, compiler-result wake, preference-store wake, native-policy settlement,
-// and durable-deletion callback wakeup. The current single-window shell can
-// have one native split fact, and the process can have one sticky
-// runtime-update fact. Reserve all of those independently of the
-// already-accepted user FIFO.
+// durable-deletion callback wakeup, and profile-creation completion. The
+// current single-window shell can have one native split fact, and the process
+// can have one sticky runtime-update fact. Reserve all of those independently
+// of the already-accepted user FIFO.
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 11
-    + zephium_core::session::MAX_SESSION_PROFILES * 7
+    + zephium_core::session::MAX_SESSION_PROFILES * 8
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
     + 6 // Includes the single preview capture and replaceable memory-pressure and guide-cleanup facts.
@@ -1342,6 +1342,7 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::SidebarResizeGuide(None)
             | Command::BlockerStoreReady(_)
             | Command::ProfileDeletionReady(_)
+            | Command::ProfileBookmarkFolderValidated { .. }
             | Command::PagePermissionCatalogLoaded { .. }
             | Command::PagePermissionCatalogMutated { .. }
             | Command::PagePermissionTimeout { .. }

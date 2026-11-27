@@ -260,12 +260,14 @@ impl PendingActivityWrites {
         profile: ProfileId,
         hub: &mut Hub,
         session: &mut Option<PendingSession>,
+        committed_sequence: &mut u64,
         explicit_retry: bool,
     ) -> bool {
         self.flush_scope(
             ActivityScope::Profile(profile),
             hub,
             session,
+            committed_sequence,
             explicit_retry,
         )
     }
@@ -274,8 +276,15 @@ impl PendingActivityWrites {
         &mut self,
         hub: &mut Hub,
         session: &mut Option<PendingSession>,
+        committed_sequence: &mut u64,
     ) -> bool {
-        self.flush_scope(ActivityScope::Focus, hub, session, false)
+        self.flush_scope(
+            ActivityScope::Focus,
+            hub,
+            session,
+            committed_sequence,
+            false,
+        )
     }
 
     /// True when everything still queued is recorded time or focus that
@@ -299,6 +308,7 @@ impl PendingActivityWrites {
         &mut self,
         hub: &mut Hub,
         session: &mut Option<PendingSession>,
+        committed_sequence: &mut u64,
         explicit_retry: bool,
     ) -> bool {
         let scopes: Vec<_> = self.lanes.keys().copied().collect();
@@ -306,7 +316,7 @@ impl PendingActivityWrites {
         for scope in scopes {
             // Always visit every scope: an unrelated failure cannot prevent
             // another profile's or the person's focus data from committing.
-            durable &= self.flush_scope(scope, hub, session, explicit_retry);
+            durable &= self.flush_scope(scope, hub, session, committed_sequence, explicit_retry);
         }
         durable
     }
@@ -316,6 +326,7 @@ impl PendingActivityWrites {
         scope: ActivityScope,
         hub: &mut Hub,
         session: &mut Option<PendingSession>,
+        committed_sequence: &mut u64,
         explicit_retry: bool,
     ) -> bool {
         let blocked = matches!(scope, ActivityScope::Profile(profile)
@@ -349,7 +360,7 @@ impl PendingActivityWrites {
                                 return false;
                             }
                         }
-                        if !flush(hub, session) {
+                        if !flush(hub, session, committed_sequence) {
                             lane.retry.failed(Instant::now());
                             return false;
                         }

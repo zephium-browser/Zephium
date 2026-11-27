@@ -407,6 +407,7 @@ fn import_rejects_private_and_removed_destinations_without_retargeting() {
 fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
     use zephium_core::bookmarks::{BookmarkReply, BookmarkRequest};
     use zephium_core::ports::store::ImportedVisit;
+    use zephium_core::profiles::{ProfileAvatar, ProfileAvatarStyle};
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
     let mut shell = Shell::new(
@@ -417,9 +418,44 @@ fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
     );
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     shell.handle(Command::Bootstrap);
+    let callback_queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(callback_queue.clone());
     let destination = shell.import_destination().unwrap();
-    let other = add_inactive_named_profile(&mut shell, 89_400);
     shell.persist();
+    assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
+    let shared_folder = store.bookmark_folders(destination.profile).unwrap()[0].id;
+    let before: Vec<_> = shell.profiles.iter().map(|profile| profile.id).collect();
+    let created = shell.handle_operation(Command::CreateProfile {
+        name: "Shared".into(),
+        avatar: ProfileAvatar {
+            style: ProfileAvatarStyle::Symbol,
+            color: 2,
+            symbol: 5,
+            revision: 0,
+        },
+        photo: None,
+        bookmark_folder: Some(shared_folder),
+        switch: false,
+    });
+    assert_eq!(created.outcome, OperationOutcome::Deferred);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let completion = loop {
+        if let Some(command) = callback_queue.try_recv() {
+            break command;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "bookmark folder read timed out"
+        );
+        std::thread::yield_now();
+    };
+    shell.handle(completion);
+    let other = shell
+        .profiles
+        .iter()
+        .map(|profile| profile.id)
+        .find(|id| !before.contains(id))
+        .unwrap();
     assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
     let queue = crate::store_reads::StoreReadQueue::new();
     shell.store_reads = Some(queue.clone());
@@ -476,7 +512,7 @@ fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
         matches!(store.bookmarks(destination.profile, BookmarkRequest::All), BookmarkReply::Nodes(nodes) if !nodes.is_empty())
     );
     assert!(
-        matches!(store.bookmarks(other, BookmarkRequest::All), BookmarkReply::Nodes(nodes) if nodes.is_empty())
+        matches!(store.bookmarks(other, BookmarkRequest::All), BookmarkReply::Nodes(nodes) if nodes.iter().any(|node| node.url.as_deref() == Some("https://bookmark.example/")))
     );
     assert_eq!(
         store

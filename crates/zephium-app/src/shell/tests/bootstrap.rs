@@ -355,6 +355,7 @@ fn qa_settings_tab_is_dropped_and_first_bootstrap_opens_a_usable_new_tab() {
                 name: "Personal".into(),
                 kind: ProfileKind::Default,
             }],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![PersistedSpace {
                 id: space,
                 profile,
@@ -429,6 +430,7 @@ fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
                     kind: ProfileKind::Named,
                 },
             ],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![
                 PersistedSpace {
                     id: local_space,

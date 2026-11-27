@@ -80,8 +80,33 @@ impl Shell {
         if !self.bootstrapped {
             return;
         }
+        if let Some(state) = self.current_ordinary_session_snapshot() {
+            self.store.save_session(state);
+        }
+    }
+
+    pub(super) fn publish_current_session_including_pending(&self) {
+        if !self.bootstrapped {
+            return;
+        }
+        if let Some(state) = self.current_session_snapshot() {
+            self.store.save_session(state);
+        }
+    }
+
+    pub(super) fn publish_current_session_checked(&self) -> bool {
+        let Some(state) = self.current_session_snapshot() else {
+            return false;
+        };
+        self.store.save_session_checked(state)
+    }
+
+    pub(super) fn current_session_snapshot(&self) -> Option<zephium_core::session::SessionState> {
+        if !self.bootstrapped {
+            return None;
+        }
         let (space, active, splits) = self.persisted_scope();
-        let state = session::snapshot_with_recently_closed(
+        Some(session::snapshot_with_recently_closed(
             &self.profiles,
             &self.spaces,
             &self.items,
@@ -89,7 +114,31 @@ impl Shell {
             active,
             splits,
             &self.recently_closed,
-        );
-        self.store.save_session(state);
+        ))
+    }
+
+    fn current_ordinary_session_snapshot(&self) -> Option<zephium_core::session::SessionState> {
+        let mut state = self.current_session_snapshot()?;
+        let pending: std::collections::HashSet<_> = self
+            .pending_profile_rollbacks
+            .values()
+            .map(|pending| pending.profile)
+            .collect();
+        if pending.is_empty() {
+            return Some(state);
+        }
+        state
+            .profiles
+            .retain(|profile| !pending.contains(&profile.id));
+        state
+            .spaces
+            .retain(|space| !pending.contains(&space.profile));
+        state
+            .shared_bookmark_folders
+            .retain(|folder| !pending.contains(&folder.profile));
+        state
+            .recently_closed
+            .retain(|entry| !pending.contains(&entry.profile));
+        Some(state)
     }
 }

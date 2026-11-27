@@ -2,7 +2,9 @@ import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import "$styles/global.css";
+import { uiCommands } from "$domain/ui-commands";
 import type { BookmarkCall, BookmarkResponse, BookmarkView } from "$shared/ipc/bindings";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import * as compose from "../lib/compose.svelte";
 import * as reveal from "../lib/reveal.svelte";
 import BookmarksPanel from "../components/BookmarksPanel.svelte";
@@ -42,8 +44,28 @@ function answer(call: BookmarkCall): BookmarkResponse {
 }
 
 afterEach(() => {
+  uiCommands.dispose();
   vi.clearAllMocks();
   reveal.take();
+});
+
+test("refreshes shared bookmarks when another profile changes them", async () => {
+  await uiCommands.init();
+  let shared = [...top];
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => {
+    if (call.kind === "list" && call.folder === null) {
+      return { kind: "listing", folder: null, path: [], items: shared };
+    }
+    return answer(call);
+  });
+  const screen = await render(BookmarksPanel, { profile: "profile-a", query: "" });
+  await expect.element(screen.getByRole("button", { name: /Zephium/u })).toBeVisible();
+
+  shared = [...top, view("9", "Saved in profile b", "https://shared.example/")];
+  emitNativeEvent("uiCommand", "bookmark.changed");
+
+  await expect.element(screen.getByRole("button", { name: /Saved in profile b/u })).toBeVisible();
+  expect(native.call).toHaveBeenLastCalledWith("profile-a", { kind: "list", folder: null });
 });
 
 test("browses folders, opens links, and renames in place", async () => {

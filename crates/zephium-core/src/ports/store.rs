@@ -371,6 +371,19 @@ pub trait Store {
     ) {
         done(None);
     }
+    fn bookmark_folders(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<crate::bookmarks::BookmarkFolder>> {
+        None
+    }
+    fn bookmark_folders_async(
+        &self,
+        _profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<crate::bookmarks::BookmarkFolder>>) + Send>,
+    ) {
+        done(None);
+    }
     /// Notes kept in the profile database before notes became Markdown
     /// files, for their one-time move into the notes folder. `None` when they
     /// cannot be read now.
@@ -387,6 +400,10 @@ pub trait Store {
         done(false);
     }
     fn save_session(&self, session: SessionState);
+    #[must_use = "true confirms the session snapshot is durable"]
+    fn save_session_checked(&self, _session: SessionState) -> bool {
+        false
+    }
     /// Ordered session-durability barrier for shutdown and other process
     /// boundaries. Returns only after the latest session snapshot queued
     /// before this call has committed (`true`) or the adapter reports failure.

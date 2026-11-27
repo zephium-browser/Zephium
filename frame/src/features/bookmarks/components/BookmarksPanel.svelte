@@ -283,6 +283,10 @@
     const command = uiCommands.uiCommand();
     if (command.seq === handledCommand) return;
     handledCommand = command.seq;
+    if (command.id === "bookmark.changed") {
+      untrack(() => void session.storeChanged());
+      return;
+    }
     if (command.id.startsWith("bookmark.menu."))
       untrack(() => runMenu(command.id.slice("bookmark.menu.".length)));
   });

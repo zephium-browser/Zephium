@@ -19,6 +19,8 @@ pub(super) struct PreparedSession {
 struct BoundedSessionState {
     #[serde(deserialize_with = "deserialize_bounded_profiles")]
     profiles: Vec<BoundedProfile>,
+    #[serde(default, deserialize_with = "deserialize_bounded_bookmark_folders")]
+    shared_bookmark_folders: Vec<zephium_core::session::PersistedBookmarkFolder>,
     #[serde(deserialize_with = "deserialize_bounded_spaces")]
     spaces: Vec<BoundedSpace>,
     #[serde(deserialize_with = "deserialize_bounded_items")]
@@ -28,6 +30,17 @@ struct BoundedSessionState {
     splits: Option<bounded_json::BoundedPane>,
     #[serde(default, deserialize_with = "deserialize_bounded_recently_closed")]
     recently_closed: Vec<BoundedClosedTab>,
+}
+
+fn deserialize_bounded_bookmark_folders<'de, D>(
+    deserializer: D,
+) -> Result<Vec<zephium_core::session::PersistedBookmarkFolder>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_PROFILES, |choice| {
+        choice.folder > 0
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -254,6 +267,7 @@ impl BoundedSessionState {
                     kind: profile.kind,
                 })
                 .collect(),
+            shared_bookmark_folders: self.shared_bookmark_folders,
             spaces,
             items,
             active_space: self.active_space,
@@ -516,6 +530,7 @@ mod qa_settings_recovery_tests {
                 name: "QA".into(),
                 kind: ProfileKind::Default,
             }],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![PersistedSpace {
                 id: space,
                 profile,
@@ -1767,6 +1782,35 @@ mod unchanged_session_tests {
         assert!(hub.meta.total_changes() > written);
         assert_eq!(hub.load().unwrap().unwrap().profiles[0].name, "Home");
     }
+
+    #[test]
+    fn multibyte_profile_name_is_safely_bounded_for_bookmark_folder_title() {
+        let mut hub = Hub::in_memory().unwrap();
+        let session = SessionState {
+            profiles: vec![PersistedProfile {
+                id: 1.into(),
+                name: "界".repeat(200),
+                kind: ProfileKind::Default,
+            }],
+            ..SessionState::default()
+        };
+
+        hub.save(&session).unwrap();
+
+        let (title, bytes): (String, i64) = hub
+            .meta
+            .query_row(
+                "SELECT b.title, length(CAST(b.title AS BLOB)) FROM bookmarks b
+                 JOIN profile_bookmark_folders pbf ON pbf.folder_id=b.id
+                 WHERE pbf.profile_id=?1",
+                [session.profiles[0].id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bytes, 510);
+        assert_eq!(title, "界".repeat(170));
+        assert!(hub.load().unwrap().is_some());
+    }
 }
 
 #[cfg(test)]
@@ -1999,6 +2043,21 @@ impl Hub {
                 ));
             }
         }
+        let removed_bookmark_roots: Vec<i64> = self
+            .registry
+            .difference(&registry)
+            .map(|profile| {
+                tx.query_row(
+                    "SELECT folder_id FROM profile_bookmark_folders WHERE profile_id=?1",
+                    [profile.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         {
             let mut ins = tx.prepare_cached(
                 "INSERT INTO profiles(id, name, kind, position) VALUES (?1, ?2, ?3, ?4)
@@ -2018,6 +2077,51 @@ impl Hub {
                 ])?;
             }
         }
+        for profile in &state.profiles {
+            let requested = state
+                .shared_bookmark_folders
+                .iter()
+                .find(|choice| choice.profile == profile.id)
+                .map(|choice| choice.folder);
+            if let Some(folder) = requested {
+                let valid: bool = tx.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM bookmarks b JOIN profile_bookmark_folders pbf ON pbf.folder_id=b.id
+                         WHERE b.id=?1 AND b.parent_id IS NULL AND b.url IS NULL
+                     )",
+                    [folder],
+                    |row| row.get(0),
+                )?;
+                if !valid {
+                    return Err(invalid_data(
+                        "shared bookmark folder is missing or not top-level",
+                    ));
+                }
+                tx.execute(
+                    "INSERT INTO profile_bookmark_folders(profile_id, folder_id) VALUES (?1, ?2)
+                     ON CONFLICT(profile_id) DO UPDATE SET folder_id=excluded.folder_id",
+                    params![profile.id.to_string(), folder],
+                )?;
+            } else {
+                let mapped: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM profile_bookmark_folders WHERE profile_id=?1)",
+                    [profile.id.to_string()],
+                    |row| row.get(0),
+                )?;
+                if !mapped {
+                    tx.execute(
+                        "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                         VALUES (NULL, coalesce((SELECT max(position)+1 FROM bookmarks WHERE parent_id IS NULL),0), ?1, NULL, ?2)",
+                        params![bookmark_profile_title(&profile.name), now_secs()],
+                    )?;
+                    let folder = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO profile_bookmark_folders(profile_id, folder_id) VALUES (?1, ?2)",
+                        params![profile.id.to_string(), folder],
+                    )?;
+                }
+            }
+        }
         for removed in self.registry.difference(&registry) {
             let deleted =
                 tx.execute("DELETE FROM profiles WHERE id = ?1", [removed.to_string()])?;
@@ -2025,6 +2129,16 @@ impl Hub {
                 return Err(invalid_data(
                     "profile registry changed during authoritative session commit",
                 ));
+            }
+        }
+        for root in removed_bookmark_roots {
+            let shared: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM profile_bookmark_folders WHERE folder_id=?1)",
+                [root],
+                |row| row.get(0),
+            )?;
+            if !shared {
+                tx.execute("DELETE FROM bookmarks WHERE id=?1", [root])?;
             }
         }
         Self::reconcile_blocker_cohort_for_session_commit(&tx, &registry)?;
@@ -2526,6 +2640,16 @@ impl Hub {
     }
 }
 
+fn bookmark_profile_title(name: &str) -> &str {
+    let mut end = name.len().min(MAX_BOOKMARK_TITLE_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
+const MAX_BOOKMARK_TITLE_BYTES: usize = 512;
+
 /// The largest unreadable snapshot copied out when no recovery bytes exist.
 const MAX_SET_ASIDE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -2663,6 +2787,163 @@ fn kind_from_str(s: &str) -> Option<ProfileKind> {
 }
 
 #[cfg(test)]
+mod profile_bookmark_mapping_tests {
+    use super::*;
+    use zephium_core::session::{PersistedBookmarkFolder, PersistedProfile};
+
+    fn profile(id: u128, name: &str, kind: ProfileKind) -> PersistedProfile {
+        PersistedProfile {
+            id: ProfileId::from(id),
+            name: name.into(),
+            kind,
+        }
+    }
+
+    fn session(
+        profiles: Vec<PersistedProfile>,
+        shared_bookmark_folders: Vec<PersistedBookmarkFolder>,
+    ) -> SessionState {
+        SessionState {
+            profiles,
+            shared_bookmark_folders,
+            ..SessionState::default()
+        }
+    }
+
+    fn mapped_root(hub: &Hub, profile: ProfileId) -> i64 {
+        hub.meta
+            .query_row(
+                "SELECT folder_id FROM profile_bookmark_folders WHERE profile_id=?1",
+                [profile.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn bookmark_exists(hub: &Hub, folder: i64) -> bool {
+        hub.meta
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE id=?1)",
+                [folder],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn session_commit_rejects_missing_and_nested_shared_folders() {
+        let mut hub = Hub::in_memory().unwrap();
+        let first = ProfileId::from(1);
+        let second = ProfileId::from(2);
+        hub.save(&session(
+            vec![profile(1, "Personal", ProfileKind::Default)],
+            Vec::new(),
+        ))
+        .unwrap();
+        let root = mapped_root(&hub, first);
+        hub.meta
+            .execute(
+                "INSERT INTO bookmarks(parent_id,position,title,url,added_at) VALUES (?1,0,'Nested',NULL,1)",
+                [root],
+            )
+            .unwrap();
+        let nested = hub.meta.last_insert_rowid();
+        let profiles = vec![
+            profile(1, "Personal", ProfileKind::Default),
+            profile(2, "Work", ProfileKind::Named),
+        ];
+        for folder in [999_999, nested] {
+            assert!(hub
+                .save(&session(
+                    profiles.clone(),
+                    vec![PersistedBookmarkFolder {
+                        profile: second,
+                        folder,
+                    }],
+                ))
+                .is_err());
+            assert_eq!(hub.load().unwrap().unwrap().profiles.len(), 1);
+        }
+    }
+
+    #[test]
+    fn an_unmapped_profile_gets_a_new_top_level_bookmark_folder() {
+        let mut hub = Hub::in_memory().unwrap();
+        let first = ProfileId::from(1);
+        let second = ProfileId::from(2);
+        hub.save(&session(
+            vec![profile(1, "Personal", ProfileKind::Default)],
+            Vec::new(),
+        ))
+        .unwrap();
+        let first_root = mapped_root(&hub, first);
+        hub.save(&session(
+            vec![
+                profile(1, "Personal", ProfileKind::Default),
+                profile(2, "Work", ProfileKind::Named),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        let second_root = mapped_root(&hub, second);
+        let parent: Option<i64> = hub
+            .meta
+            .query_row(
+                "SELECT parent_id FROM bookmarks WHERE id=?1 AND url IS NULL",
+                [second_root],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None);
+        assert_ne!(first_root, second_root);
+    }
+
+    #[test]
+    fn removing_profiles_deletes_only_unshared_bookmark_roots() {
+        let mut hub = Hub::in_memory().unwrap();
+        let first = ProfileId::from(1);
+        let second = ProfileId::from(2);
+        let third = ProfileId::from(3);
+        hub.save(&session(
+            vec![profile(1, "Personal", ProfileKind::Default)],
+            Vec::new(),
+        ))
+        .unwrap();
+        let shared_root = mapped_root(&hub, first);
+        hub.save(&session(
+            vec![
+                profile(1, "Personal", ProfileKind::Default),
+                profile(2, "Shared", ProfileKind::Named),
+                profile(3, "Work", ProfileKind::Named),
+            ],
+            vec![PersistedBookmarkFolder {
+                profile: second,
+                folder: shared_root,
+            }],
+        ))
+        .unwrap();
+        let work_root = mapped_root(&hub, third);
+        assert_eq!(mapped_root(&hub, second), shared_root);
+        let remaining = session(
+            vec![
+                profile(1, "Personal", ProfileKind::Default),
+                profile(2, "Shared", ProfileKind::Named),
+            ],
+            vec![PersistedBookmarkFolder {
+                profile: second,
+                folder: shared_root,
+            }],
+        );
+        assert_eq!(
+            hub.authorize_profile_deletion(third, &remaining).unwrap(),
+            zephium_core::ports::store::ProfileDeletionAuthorizeOutcome::Authorized
+        );
+        assert!(bookmark_exists(&hub, shared_root));
+        assert!(!bookmark_exists(&hub, work_root));
+    }
+}
+
+#[cfg(test)]
 mod bounded_snapshot_tests {
     use super::*;
 
@@ -2754,6 +3035,7 @@ mod essentials_per_space_tests {
                 profile(PERSONAL, "Personal", ProfileKind::Default),
                 profile(WORK_PROFILE, "Work", ProfileKind::Named),
             ],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![
                 space(HOME, PERSONAL),
                 space(SECOND, PERSONAL),

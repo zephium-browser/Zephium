@@ -74,7 +74,8 @@ export class BookmarksSession {
     }
     if (this.refreshPending) {
       this.refreshPending = false;
-      if (response.kind === "listing" || response.kind === "results") await this.refresh();
+      if (response.kind === "error") await this.read(call);
+      else await this.refresh();
     }
   }
 
@@ -111,6 +112,11 @@ export class BookmarksSession {
     return this.searching
       ? this.read({ kind: "search", query: this.query })
       : this.read({ kind: "list", folder: this.folder });
+  }
+
+  storeChanged() {
+    if (this.loading) this.refreshPending = true;
+    else return this.refresh();
   }
 
   /** A write either applies and the view is read again, or reports why not. */

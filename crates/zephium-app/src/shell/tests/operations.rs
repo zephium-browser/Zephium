@@ -1389,6 +1389,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
                 name: "Personal".into(),
                 kind: ProfileKind::Default,
             }],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![PersistedSpace {
                 id: space,
                 profile,

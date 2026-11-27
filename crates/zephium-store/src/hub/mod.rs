@@ -89,7 +89,7 @@ use filesystem::{
 
 /// 2 gave every space its own Essentials. A session saved as 1 holds one set
 /// per profile; reading it copies that set into each of the profile's spaces.
-const SESSION_SCHEMA_VERSION: i64 = 2;
+const SESSION_SCHEMA_VERSION: i64 = 3;
 pub(crate) const MAX_SESSION_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_URL_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_TITLE_BYTES: usize = zephium_core::item::MAX_PAGE_TITLE_CHARS * 4;
@@ -115,6 +115,12 @@ pub struct Hub {
     /// files are preserved and never retried, opened read-write, or recreated
     /// during this process.
     degraded_profiles: HashSet<ProfileId>,
+    /// Profiles whose legacy bookmark data could not be migrated. Keep this
+    /// independent from ancillary database degradation so bookmarks cannot
+    /// disable history, favicons, or other profile data.
+    degraded_bookmark_profiles: HashSet<ProfileId>,
+    #[cfg(test)]
+    bookmark_busy_reads: HashMap<ProfileId, usize>,
     /// Visits recorded per profile since history was last held to its row
     /// cap; the cap's ordered walk runs once per batch of visits, not each.
     visits_since_prune: HashMap<ProfileId, u32>,
@@ -215,6 +221,9 @@ impl Hub {
             registry: HashSet::new(),
             session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
+            degraded_bookmark_profiles: HashSet::new(),
+            #[cfg(test)]
+            bookmark_busy_reads: HashMap::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,
@@ -338,6 +347,9 @@ impl Hub {
             registry: HashSet::new(),
             session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
+            degraded_bookmark_profiles: HashSet::new(),
+            #[cfg(test)]
+            bookmark_busy_reads: HashMap::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,

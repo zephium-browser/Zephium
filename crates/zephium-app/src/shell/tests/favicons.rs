@@ -1035,6 +1035,7 @@ fn icons_survive_switching_profiles_and_coming_back() {
             revision: 0,
         },
         photo: None,
+        bookmark_folder: None,
         switch: false,
     });
     let work = shell
@@ -1075,6 +1076,7 @@ fn a_returning_profile_is_announced_even_when_every_icon_is_already_held() {
                 revision: 0,
             },
             photo: None,
+            bookmark_folder: None,
             switch: false,
         });
         shell

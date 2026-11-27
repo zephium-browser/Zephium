@@ -65,6 +65,7 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
                     kind: ProfileKind::Named,
                 },
             ],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![
                 PersistedSpace {
                     id: space,

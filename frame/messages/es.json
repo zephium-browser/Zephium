@@ -3379,7 +3379,7 @@
   "profiles_save": "Guardar",
   "profiles_delete_open": "Eliminar perfil…",
   "profiles_delete_title": "¿Eliminar “{name}”?",
-  "profiles_delete_body": "Su historial, cookies y datos de sitios, pestañas, extensiones y Trabajo se eliminan de forma permanente de este dispositivo. Tu cuenta de Zephium no se ve afectada.",
+  "profiles_delete_body": "Sus marcadores, historial, cookies y datos de sitios, pestañas, extensiones y Trabajo se eliminan de forma permanente de este dispositivo. Tu cuenta de Zephium no se ve afectada. Los marcadores de carpetas compartidas con otro perfil permanecen en este dispositivo.",
   "profiles_delete_confirm": "Eliminar perfil",
   "profiles_delete_default": "El perfil predeterminado no se puede eliminar.",
   "profiles_delete_current": "Cambia esta ventana a otro perfil para eliminar este.",

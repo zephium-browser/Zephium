@@ -8,6 +8,7 @@ import {
   commands,
   type ProfileAvatarInputV1,
   type ProfileEntryView,
+  type BookmarkFolderView,
   type ProfilesView,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -77,11 +78,29 @@ export function release() {
 
 export type AvatarDraft = ProfileAvatarInputV1;
 
+export const bookmarkFolders = async (profile: string): Promise<BookmarkFolderView[]> => {
+  try {
+    return await commands.profilesBookmarkFolders(profile);
+  } catch {
+    return [];
+  }
+};
+
 const applied = (result: Settlement) => result.outcome === "applied" || result.outcome === "no_op";
 
 /** With `andSwitch`, the window shows the new profile once it exists. */
-export const create = async (name: string, avatar: AvatarDraft, andSwitch = false) =>
-  applied(await settle(commands.profilesCreate(name, avatar, andSwitch), andSwitch ? 8000 : 5000));
+export const create = async (
+  name: string,
+  avatar: AvatarDraft,
+  andSwitch = false,
+  bookmarkFolder: string | null = null,
+) =>
+  applied(
+    await settle(
+      commands.profilesCreate(name, avatar, andSwitch, bookmarkFolder),
+      andSwitch ? 8000 : 5000,
+    ),
+  );
 export const switchTo = async (id: string) =>
   applied(await settle(commands.profilesSwitch(id), 8000));
 export const rename = async (id: string, name: string) =>

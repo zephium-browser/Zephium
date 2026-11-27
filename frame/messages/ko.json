@@ -3379,7 +3379,7 @@
   "profiles_save": "저장",
   "profiles_delete_open": "프로필 삭제…",
   "profiles_delete_title": "“{name}” 프로필을 삭제할까요?",
-  "profiles_delete_body": "방문 기록, 쿠키와 사이트 데이터, 탭, 확장 프로그램, 작업이 이 기기에서 영구적으로 삭제돼요. Zephium 계정에는 영향이 없어요.",
+  "profiles_delete_body": "북마크, 방문 기록, 쿠키와 사이트 데이터, 탭, 확장 프로그램, 작업이 이 기기에서 영구적으로 삭제돼요. Zephium 계정에는 영향이 없어요. 다른 프로필과 공유하는 폴더의 북마크는 이 기기에 남아요.",
   "profiles_delete_confirm": "프로필 삭제",
   "profiles_delete_default": "기본 프로필은 삭제할 수 없어요.",
   "profiles_delete_current": "이 프로필을 삭제하려면 이 창을 다른 프로필로 전환하세요.",
