@@ -128,3 +128,27 @@ test("Delete clears a shortcut, Escape keeps it, and Reset restores the default"
   await screen.getByRole("button", { name: "Reset" }).click();
   await vi.waitFor(() => expect(native.reset).toHaveBeenLastCalledWith("page.print"));
 });
+
+test("composition keys leave shortcut recording active", async () => {
+  native.bind.mockResolvedValue({ kind: "applied" });
+  const screen = await render(KeyboardPage);
+  const close = screen.getByRole("button", { name: "Change the shortcut for Close tab" });
+  await close.click();
+
+  for (const event of [
+    { key: "Backspace", isComposing: true },
+    { key: "Escape", keyCode: 229 },
+  ]) {
+    expect(
+      close
+        .element()
+        .dispatchEvent(new KeyboardEvent("keydown", { ...event, bubbles: true, cancelable: true })),
+    ).toBe(true);
+    await expect.element(close).toHaveAttribute("aria-pressed", "true");
+  }
+  expect(native.bind).not.toHaveBeenCalled();
+  expect(native.record.mock.calls).toEqual([[true]]);
+
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  expect(native.bind).toHaveBeenLastCalledWith("tab.close", "Cmd+KeyK", false);
+});

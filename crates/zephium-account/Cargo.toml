@@ -11,7 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 url.workspace = true
-zeroize = "=1.9.1"
+zeroize = "=1.9.2"
 zephium-credentials.workspace = true
 
 [dev-dependencies]
