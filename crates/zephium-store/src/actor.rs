@@ -244,6 +244,13 @@ impl PendingSession {
         self.failures = self.failures.saturating_add(1);
         self.retry_at = Some(now + delay);
     }
+
+    fn defer_until(&mut self, deadline: Instant) {
+        self.retry_at = Some(
+            self.retry_at
+                .map_or(deadline, |retry_at| retry_at.max(deadline)),
+        );
+    }
 }
 
 #[derive(Default)]
@@ -1955,6 +1962,14 @@ fn actor(
                         .is_some_and(|pending| pending.due(Instant::now()))
                 {
                     let _ = flush(&mut hub, &mut pending);
+                } else if !settings_durable {
+                    if let (Some(pending), Some(retry_at)) =
+                        (pending.as_mut(), setting_retry.retry_at)
+                    {
+                        if pending.due(Instant::now()) {
+                            pending.defer_until(retry_at);
+                        }
+                    }
                 }
                 let _ = flush_visits(
                     &mut hub,

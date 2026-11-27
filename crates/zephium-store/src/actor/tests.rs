@@ -1590,6 +1590,36 @@ fn failed_save_uses_capped_exponential_backoff_and_keeps_latest() {
 }
 
 #[test]
+fn due_session_waits_for_failed_settings_retry() {
+    let now = Instant::now();
+    let mut pending = PendingSession::new(sample(), now - MAX_PENDING_AGE);
+    assert!(pending.due(now));
+
+    let mut hub = Hub::in_memory().unwrap();
+    hub.fail_setting_writes();
+    let mailbox = Mutex::new(PendingSettings::default());
+    mailbox
+        .lock()
+        .unwrap()
+        .pending
+        .insert("keymap".into(), "custom".into());
+    let mut setting_retry = WriteRetry::default();
+    assert!(!flush_settings(
+        &mut hub,
+        &mailbox,
+        &mut setting_retry,
+        false
+    ));
+    let retry_at = setting_retry.retry_at.unwrap();
+    pending.defer_until(retry_at);
+
+    assert!(!pending.due(now));
+    assert_eq!(pending.deadline(), retry_at);
+    assert_eq!(pending.state, sample());
+    assert!(mailbox.lock().unwrap().pending.contains_key("keymap"));
+}
+
+#[test]
 fn visit_requeue_preserves_concurrent_newer_value() {
     let profile = ProfileId::from(1);
     let same = (profile, "https://same.example/".to_owned());
