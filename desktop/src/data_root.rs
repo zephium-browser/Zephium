@@ -99,6 +99,7 @@ fn is_default_data_root(identifier: &str, root: &Path, data_dir: Option<PathBuf>
         == Some(root)
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn work_storage_root(identifier: &str, root: &Path) -> Option<PathBuf> {
     if !CUSTOM_ROOT.load(Ordering::Acquire) {
         return None;
@@ -106,6 +107,7 @@ pub(crate) fn work_storage_root(identifier: &str, root: &Path) -> Option<PathBuf
     work_storage_root_for_data_dir(identifier, root, dirs::data_dir())
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn work_storage_root_for_data_dir(
     identifier: &str,
     root: &Path,
@@ -114,6 +116,7 @@ fn work_storage_root_for_data_dir(
     (!is_default_data_root(identifier, root, data_dir)).then(|| root.to_owned())
 }
 
+#[cfg(test)]
 pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     resolve_for_application(path, None)
 }
@@ -162,6 +165,7 @@ fn resolve_for_application(
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_default_root_request(
     path: &Path,
     identifier: &str,
@@ -356,33 +360,6 @@ fn validate_unix_root(metadata: &std::fs::Metadata) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn validate_unix_ancestors(path: &Path) -> std::io::Result<()> {
-    for ancestor in path
-        .ancestors()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let metadata = match std::fs::symlink_metadata(ancestor) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        validate_unix_directory_ancestor(&metadata).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "user data directory has an unsafe ancestor: {}",
-                    ancestor.display()
-                ),
-            )
-        })?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 fn validate_unix_directory_ancestor(metadata: &std::fs::Metadata) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -516,6 +493,7 @@ where
         .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn prepare_logs(root: &Path) -> std::io::Result<PathBuf> {
     let logs = root.join("logs");
     match std::fs::symlink_metadata(&logs) {
@@ -556,6 +534,7 @@ fn redirected_metadata(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn startup_log_directory(
     custom_root: Option<&Path>,
     identifier: &str,
