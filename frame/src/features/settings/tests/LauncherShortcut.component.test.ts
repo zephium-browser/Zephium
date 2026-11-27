@@ -86,6 +86,31 @@ test("closing settings during a save releases the launcher even if the shortcut 
   expect(native.record.mock.calls).toEqual([[true], [false]]);
 });
 
+test("composition keys leave launcher shortcut recording active", async () => {
+  native.state.mockResolvedValue(trigger("CmdOrCtrl+Shift+Space"));
+  native.set.mockResolvedValue({ type: "applied", trigger: trigger("Ctrl+Alt+Space") });
+  const screen = await render(LauncherShortcut);
+  await screen.getByRole("button", { name: "Record a shortcut" }).click();
+  const recorder = screen.getByRole("button", { name: "Press the new shortcut. Esc cancels." });
+
+  for (const event of [
+    { key: "Escape", isComposing: true },
+    { key: "k", code: "KeyK", ctrlKey: true, keyCode: 229 },
+  ]) {
+    expect(
+      recorder
+        .element()
+        .dispatchEvent(new KeyboardEvent("keydown", { ...event, bubbles: true, cancelable: true })),
+    ).toBe(true);
+    await expect.element(recorder).toHaveAttribute("aria-pressed", "true");
+  }
+  expect(native.set).not.toHaveBeenCalled();
+  expect(native.record.mock.calls).toEqual([[true]]);
+
+  await userEvent.keyboard("{Control>}{Alt>}{Space}{/Alt}{/Control}");
+  expect(native.set).toHaveBeenLastCalledWith("Ctrl+Alt+Space");
+});
+
 test("double tap says what it is waiting for, and where to grant it", async () => {
   native.state.mockResolvedValue({ ...trigger("CmdOrCtrl+Shift+Space"), double_tap: "command" });
   const screen = await render(LauncherShortcut);
