@@ -104,6 +104,7 @@
   }
   async function assign(container: string | null) {
     if (!currentTab) return;
+    removeRetry = null;
     operationError = false;
     try {
       const result = await tabDomain.assignTabContainer(currentTab.id, container);
