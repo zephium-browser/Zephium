@@ -169,6 +169,66 @@ fn windows_watch(tier: zephium_core::ports::engine::MemoryPressure) -> (bool, bo
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn windows_wait_timeout(
+    effective: zephium_core::ports::engine::MemoryPressure,
+    os_recheck: bool,
+) -> u32 {
+    use zephium_core::ports::engine::MemoryPressure;
+
+    const CRITICAL_RECHECK_MS: u32 = 10_000;
+    const SELF_SAMPLE_NORMAL_MS: u32 = 30_000;
+    const SELF_SAMPLE_ELEVATED_MS: u32 = 5_000;
+    let self_ms = if effective == MemoryPressure::Normal {
+        SELF_SAMPLE_NORMAL_MS
+    } else {
+        SELF_SAMPLE_ELEVATED_MS
+    };
+    if os_recheck {
+        CRITICAL_RECHECK_MS.min(self_ms)
+    } else {
+        self_ms
+    }
+}
+
+/// A complete snapshot is needed before querying the browser family. Dropping
+/// edges from newer parents avoids following a reused parent PID.
+#[cfg(any(test, target_os = "windows"))]
+fn sum_family_private_bytes<E>(
+    root: u32,
+    processes: impl IntoIterator<Item = Result<(u32, u32), E>>,
+    mut query: impl FnMut(u32) -> Option<(u64, u64)>,
+) -> Option<u64> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for process in processes {
+        let (pid, parent) = process.ok()?;
+        children.entry(parent).or_default().push(pid);
+    }
+
+    let (mut total, root_start) = query(root)?;
+    let mut stack = vec![(root, root_start)];
+    let mut seen = HashSet::from([root]);
+    while let Some((parent, parent_start)) = stack.pop() {
+        let Some(kids) = children.get(&parent) else {
+            continue;
+        };
+        for &pid in kids {
+            if !seen.insert(pid) {
+                continue;
+            }
+            let (bytes, start) = query(pid)?;
+            if parent_start > start {
+                continue;
+            }
+            total = total.saturating_add(bytes);
+            stack.push((pid, start));
+        }
+    }
+    Some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +255,39 @@ mod tests {
         assert_eq!(windows_watch(MemoryPressure::Critical), (false, true, true));
         assert!(!windows_watch(MemoryPressure::Normal).2);
         assert!(!windows_watch(MemoryPressure::Warning).2);
+    }
+
+    #[test]
+    fn windows_sampling_wait_tracks_effective_pressure() {
+        assert_eq!(windows_wait_timeout(MemoryPressure::Normal, false), 30_000);
+        assert_eq!(windows_wait_timeout(MemoryPressure::Warning, false), 5_000);
+        assert_eq!(windows_wait_timeout(MemoryPressure::Critical, true), 5_000);
+    }
+
+    #[test]
+    fn incomplete_enumeration_cannot_produce_a_family_sample() {
+        let processes = [Ok((1, 0)), Ok((2, 1)), Err(())];
+        assert_eq!(
+            sum_family_private_bytes(1, processes, |_| panic!("partial snapshot was queried")),
+            None
+        );
+    }
+
+    #[test]
+    fn family_sample_ignores_reused_parent_edges_and_rejects_missing_queries() {
+        let processes = [(1, 0), (2, 1), (3, 2), (4, 1), (5, 4), (6, 0)].map(Ok::<_, ()>);
+        let query = |pid| match pid {
+            1 => Some((100, 10)),
+            2 => Some((200, 20)),
+            3 => Some((300, 30)),
+            4 => Some((400, 5)),
+            _ => panic!("queried a process outside the family"),
+        };
+        assert_eq!(sum_family_private_bytes(1, processes, query), Some(600));
+        assert_eq!(
+            sum_family_private_bytes(1, processes, |pid| if pid == 3 { None } else { query(pid) }),
+            None
+        );
     }
 
     #[test]
@@ -245,10 +338,9 @@ mod tests {
 
 #[cfg(target_os = "windows")]
 mod native {
-    use std::collections::{HashMap, HashSet};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::sync::{Arc, Mutex};
     use windows::core::PCWSTR;
-    use windows::core::HRESULT;
     use windows::Win32::Foundation::{
         CloseHandle, ERROR_NO_MORE_FILES, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
@@ -270,12 +362,6 @@ mod native {
     use zephium_app::{Command, Handle};
     use zephium_core::ports::engine::MemoryPressure;
 
-    /// How often a critical OS state is read again to notice it easing.
-    const CRITICAL_RECHECK_MS: u32 = 10_000;
-    /// Self-budget sample while residency is still Normal.
-    const SELF_SAMPLE_NORMAL_MS: u32 = 30_000;
-    /// Faster sample once Warning (self or OS) is elevated.
-    const SELF_SAMPLE_ELEVATED_MS: u32 = 5_000;
     /// Family PrivateUsage soft floor. Private overstates WS on WebView2; 8 GiB
     /// sits above a typical 50-tab private floor (~4–7 GiB) so Warning is not sticky.
     const SELF_SOFT_PRIVATE: u64 = 8 << 30;
@@ -309,7 +395,8 @@ mod native {
             let _ = CloseHandle(handle);
             times.ok()?;
             counted.ok()?;
-            let start = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            let start =
+                (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
             Some((memory.PrivateUsage as u64, start))
         }
     }
@@ -320,70 +407,29 @@ mod native {
     /// cannot be queried — callers keep the previous self tier so a partial
     /// undercount cannot clear Warning.
     fn family_private_bytes(root: u32) -> Option<u64> {
-        // SAFETY: snapshot handle is owned and closed below.
+        // SAFETY: the new snapshot handle is transferred to one owner.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.0) };
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        // SAFETY: Toolhelp enumeration against the live snapshot.
-        // ERROR_NO_MORE_FILES is normal exhaustion; any other error rejects the
-        // sample so a partial tree cannot clear Warning.
-        let no_more = HRESULT::from_win32(ERROR_NO_MORE_FILES.0);
-        match unsafe { Process32FirstW(snapshot, &mut entry) } {
-            Ok(()) => {}
-            Err(err) if err.code() == no_more => {
-                let _ = unsafe { CloseHandle(snapshot) };
-                return None;
+        // SAFETY: Toolhelp enumeration uses a live snapshot and a sized entry.
+        unsafe { Process32FirstW(HANDLE(snapshot.as_raw_handle()), &mut entry) }.ok()?;
+        let first = (entry.th32ProcessID, entry.th32ParentProcessID);
+        let rest = std::iter::from_fn(move || {
+            // SAFETY: same live snapshot and sized entry.
+            match unsafe { Process32NextW(HANDLE(snapshot.as_raw_handle()), &mut entry) } {
+                Ok(()) => Some(Ok((entry.th32ProcessID, entry.th32ParentProcessID))),
+                Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => None,
+                Err(error) => Some(Err(error)),
             }
-            Err(_) => {
-                let _ = unsafe { CloseHandle(snapshot) };
-                return None;
-            }
-        }
-        loop {
-            children
-                .entry(entry.th32ParentProcessID)
-                .or_default()
-                .push(entry.th32ProcessID);
-            match unsafe { Process32NextW(snapshot, &mut entry) } {
-                Ok(()) => {}
-                Err(err) if err.code() == no_more => break,
-                Err(_) => {
-                    let _ = unsafe { CloseHandle(snapshot) };
-                    return None;
-                }
-            }
-        }
-        let _ = unsafe { CloseHandle(snapshot) };
-
-        let (root_private, root_start) = process_private_and_start(root)?;
-        let mut total = root_private;
-        let mut starts = HashMap::new();
-        starts.insert(root, root_start);
-        let mut stack = vec![root];
-        let mut seen = HashSet::new();
-        seen.insert(root);
-        while let Some(parent) = stack.pop() {
-            let Some(kids) = children.get(&parent) else {
-                continue;
-            };
-            let parent_start = starts[&parent];
-            for &pid in kids {
-                if !seen.insert(pid) {
-                    continue;
-                }
-                let (bytes, start) = process_private_and_start(pid)?;
-                if parent_start > start {
-                    continue;
-                }
-                starts.insert(pid, start);
-                total = total.saturating_add(bytes);
-                stack.push(pid);
-            }
-        }
-        Some(total)
+        });
+        super::sum_family_private_bytes(
+            root,
+            std::iter::once(Ok(first)).chain(rest),
+            process_private_and_start,
+        )
     }
 
     struct Event(HANDLE);
@@ -429,11 +475,11 @@ mod native {
                     let Some(mut os_tier) = read_os() else {
                         return;
                     };
-                    let mut self_tier = family_private_bytes(root)
-                        .map(|bytes| {
-                            super::self_budget_tier(bytes, MemoryPressure::Normal, SELF_SOFT_PRIVATE)
-                        })
-                        .unwrap_or(MemoryPressure::Normal);
+                    let mut self_tier = super::self_tier_after_sample(
+                        family_private_bytes(root),
+                        MemoryPressure::Normal,
+                        SELF_SOFT_PRIVATE,
+                    );
                     let mut effective = os_tier.max(self_tier);
                     // Launching under pressure is not a normal machine.
                     if effective != MemoryPressure::Normal {
@@ -445,16 +491,7 @@ mod native {
                         // Self-budget sampling always needs a finite timeout:
                         // Normal OS pressure previously waited forever.
                         let (watch_low, watch_high, os_recheck) = super::windows_watch(os_tier);
-                        let self_ms = if effective == MemoryPressure::Normal {
-                            SELF_SAMPLE_NORMAL_MS
-                        } else {
-                            SELF_SAMPLE_ELEVATED_MS
-                        };
-                        let timeout = if os_recheck {
-                            CRITICAL_RECHECK_MS.min(self_ms)
-                        } else {
-                            self_ms
-                        };
+                        let timeout = super::windows_wait_timeout(effective, os_recheck);
                         let mut handles = vec![stopped.handle()];
                         if watch_low {
                             handles.push(low.handle());

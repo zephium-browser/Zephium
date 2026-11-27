@@ -470,18 +470,8 @@ impl EngineHost {
         if !stage.apply(region, tree, &tabs) {
             return false;
         }
-        // Hidden content tabs sleep through TrySuspend alone. Microsoft advises
-        // not mixing MemoryUsageTargetLevel with TrySuspend/Resume; TrySuspend
-        // sets Low itself. Low is reserved for tabs that refuse suspension
-        // (see discard). Only those refuse-path Lows restore Normal here —
-        // successful suspend/resume must not get a MemoryUsageTargetLevel poke.
-        // Sequence authority: `windows_dormancy` (hide → TrySuspend, refuse →
-        // Low, show → Normal only after refuse Low).
         #[cfg(target_os = "windows")]
         {
-            use super::windows_dormancy::{
-                ops_on_show, DormancyNativeOp, RefuseMemoryLow,
-            };
             use wry::{MemoryUsageLevel, WebViewExtWindows as _};
 
             let mut woken = Vec::new();
@@ -494,21 +484,16 @@ impl EngineHost {
                     continue;
                 }
                 if off {
-                    // Hide never pokes MemoryUsageTargetLevel; TrySuspend
-                    // follows via pump (`ops_on_hide` = TrySuspend only).
-                    debug_assert_eq!(
-                        super::windows_dormancy::ops_on_hide(),
-                        &[super::windows_dormancy::DormancyNativeOp::TrySuspend]
-                    );
                     self.hidden.insert(*id);
                 } else {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
                     self.desired_dormant.remove(id);
+                    self.dormant_cycles.remove(id);
                     // Keep the in-flight slot until its exact callback settles.
                     // A rapid show/hide must not issue overlapping TrySuspend
                     // operations against the same native view.
-                    self.suspend_failed.remove(id);
+                    self.suspend_failures.clear_failure(*id);
                     self.suspend_retries.remove(id);
                     woken.push(*id);
                 }
@@ -518,35 +503,12 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
                 self.resume_store_button_poll(id);
             }
-            // Clear refuse-path Low only after Normal succeeds. Retry on later
-            // layouts even when visibility is unchanged (failed setter).
-            let pending: Vec<_> = self
-                .refuse_memory_low
-                .iter()
-                .copied()
-                .filter(|id| !self.hidden.contains(id))
-                .collect();
-            for id in pending {
-                let owed = RefuseMemoryLow::from_recorded(true);
-                for op in ops_on_show(owed) {
-                    if !matches!(op, DormancyNativeOp::MemoryNormal) {
-                        continue;
-                    }
-                    match self.views.get(&id) {
-                        Some(view)
-                            if view
-                                .set_memory_usage_level(MemoryUsageLevel::Normal)
-                                .is_ok() =>
-                        {
-                            self.refuse_memory_low.remove(&id);
-                        }
-                        None => {
-                            self.refuse_memory_low.remove(&id);
-                        }
-                        Some(_) => {}
-                    }
-                }
-            }
+            self.suspend_failures.restore_visible(&self.hidden, |id| {
+                self.views.get(&id).is_none_or(|view| {
+                    view.set_memory_usage_level(MemoryUsageLevel::Normal)
+                        .is_ok()
+                })
+            });
         }
         self.refresh_visible_generic_styles();
         true

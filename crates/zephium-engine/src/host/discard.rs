@@ -8,6 +8,8 @@ use super::dispatch::{with_suspend_deadline, with_suspend_result, with_suspend_r
 use super::permits::EventPermit;
 #[cfg(any(not(target_os = "windows"), test))]
 use super::scripts::DISCARD_SAFETY_QUERY_JS;
+#[cfg(target_os = "windows")]
+use super::windows_dormancy::{settle_suspend_completion, SuspendCompletion, SuspendFailureAction};
 use super::EngineHost;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1310,7 +1312,7 @@ impl EngineHost {
                 self.dormant.remove(&id);
                 self.refresh_missed_styles(id);
             }
-            self.suspend_failed.retain(|id| next.contains(id));
+            self.suspend_failures.retain_desired(&next);
             self.suspend_retries.retain(|id, _| next.contains(id));
             self.dormant_cycles.retain(|id, _| next.contains(id));
             for id in &next {
@@ -1410,11 +1412,11 @@ impl EngineHost {
             return;
         }
         self.suspending.remove(&id);
-        // Mark uncertain before refusal handling so a timed-out attempt cannot
-        // set Low / emit DormancyRefused while TrySuspend may still settle.
+        // Release the batch slot, but keep this view out of admission until
+        // the exact callback settles or the view closes.
         self.suspend_uncertain.insert(id);
         if self.attempt_is_current(id, &attempt) {
-            self.suspend_refused(id);
+            self.suspend_refused(id, false);
         }
         let timer = self
             .views
@@ -1455,7 +1457,7 @@ impl EngineHost {
             && self.native_owned_state_allows_discard(id)
             && self.windows_audio_idle(id);
         if !current {
-            self.on_guarded_suspend_result(id, attempt, false);
+            self.on_guarded_suspend_result(id, attempt, None);
             return;
         }
         if attempt
@@ -1466,19 +1468,19 @@ impl EngineHost {
         }
         let weak = std::sync::Arc::downgrade(&attempt);
         let started = self.views.get(&id).is_some_and(|view| {
-            crate::platform::imp::try_suspend(view, move |suspended| {
+            crate::platform::imp::try_suspend(view, move |result| {
                 if let Some(attempt) = weak.upgrade() {
                     // Best effort: WebView2 resumes a suspended view itself
                     // when it becomes visible, so a refused completion (queue
                     // overload or shutdown) cannot strand a frozen page.
                     let _ = with_suspend_result(id, move |host| {
-                        host.on_guarded_suspend_result(id, attempt, suspended)
+                        host.on_guarded_suspend_result(id, attempt, result)
                     });
                 }
             })
         });
         if !started {
-            self.on_guarded_suspend_result(id, attempt, false);
+            self.on_guarded_suspend_result(id, attempt, None);
         }
     }
 
@@ -1487,7 +1489,7 @@ impl EngineHost {
         &mut self,
         id: ItemId,
         attempt: std::sync::Arc<SuspendAttempt>,
-        suspended: bool,
+        native_result: Option<bool>,
     ) {
         if !self.suspend_attempt_matches(id, &attempt) {
             return;
@@ -1501,11 +1503,9 @@ impl EngineHost {
                 attempt.epoch,
             )
         });
-        let still_desired = !attempt.expired.load(std::sync::atomic::Ordering::Acquire)
-            && std::time::Instant::now() < attempt.deadline
-            && current_document
-            && self.desired_dormant.contains(&id)
-            && self.hidden.contains(&id);
+        let current_cycle = self.attempt_is_current(id, &attempt);
+        let within_deadline = !attempt.expired.load(std::sync::atomic::Ordering::Acquire)
+            && std::time::Instant::now() < attempt.deadline;
         self.suspending.remove(&id);
         self.suspend_uncertain.remove(&id);
         let timer = if let Some(view) = self.views.get_mut(&id) {
@@ -1515,19 +1515,26 @@ impl EngineHost {
             None
         };
         drop(timer);
-        if suspended && still_desired {
-            self.dormant.insert(id);
-        } else {
-            if suspended {
+        match settle_suspend_completion(
+            native_result,
+            current_cycle,
+            current_document,
+            within_deadline,
+            || {
                 // Even a late successful callback only belongs to this exact
                 // native view. Resume it if focus, document or desired state moved.
                 if let Some(view) = self.views.get(&id) {
                     crate::platform::imp::resume(view);
                 }
+            },
+        ) {
+            SuspendCompletion::Dormant => {
+                self.dormant.insert(id);
             }
-            if self.desired_dormant.contains(&id) && self.attempt_is_current(id, &attempt) {
-                self.suspend_refused(id);
+            SuspendCompletion::Refused { native_refusal } => {
+                self.suspend_refused(id, native_refusal);
             }
+            SuspendCompletion::Stale => {}
         }
         self.refresh_missed_styles(id);
         self.pump_suspends();
@@ -1538,19 +1545,27 @@ impl EngineHost {
     #[cfg(target_os = "windows")]
     fn attempt_is_current(&self, id: ItemId, attempt: &SuspendAttempt) -> bool {
         self.dormant_cycles.get(&id) == Some(&attempt.cycle)
+            && self.desired_dormant.contains(&id)
+            && self.hidden.contains(&id)
     }
 
     /// A refused suspension is asked once more after a pause; refused again,
     /// the page runs until it is shown or no longer meant to sleep.
     #[cfg(target_os = "windows")]
-    fn suspend_refused(&mut self, id: ItemId) {
-        self.suspend_failed.insert(id);
-        match self
+    fn suspend_refused(&mut self, id: ItemId, native_refusal: bool) {
+        use wry::{MemoryUsageLevel, WebViewExtWindows as _};
+
+        let retry_pending = self
             .suspend_retries
             .get(&id)
-            .map(|retry| retry.timer.is_some())
-        {
-            None => {
+            .map(|retry| retry.timer.is_some());
+        let view = self.views.get(&id);
+        match self
+            .suspend_failures
+            .record(id, retry_pending, native_refusal, || {
+                view.is_some_and(|view| view.set_memory_usage_level(MemoryUsageLevel::Low).is_ok())
+            }) {
+            SuspendFailureAction::ScheduleRetry => {
                 let generation = SUSPEND_RETRY_GENERATION.fetch_add(1, Ordering::Relaxed);
                 let timer =
                     crate::platform::imp::schedule_browser_timeout(SUSPEND_RETRY, move || {
@@ -1560,32 +1575,12 @@ impl EngineHost {
                 self.suspend_retries
                     .insert(id, SuspendRetry { generation, timer });
             }
-            Some(true) => {}
-            Some(false) => {
-                // A timed-out attempt may still settle with TrySuspend. Keep Low
-                // for its exact negative callback, which clears uncertainty first.
-                if self.suspend_uncertain.contains(&id) {
-                    return;
-                }
+            SuspendFailureAction::Wait => {}
+            SuspendFailureAction::Report => {
                 eprintln!("suspend: refused after its retry; the page stays awake");
-                // TrySuspend cannot run: Low is the Microsoft-supported path
-                // when scripts must keep going. Do not set Low on ordinary hide
-                // (that would mix with TrySuspend). Show restores Normal.
-                if let Some(view) = self.views.get(&id) {
-                    use super::windows_dormancy::{ops_on_final_refuse, DormancyNativeOp};
-                    use wry::{MemoryUsageLevel, WebViewExtWindows as _};
-                    for op in ops_on_final_refuse() {
-                        if matches!(op, DormancyNativeOp::MemoryLow) {
-                            let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
-                            self.refuse_memory_low.insert(id);
-                        }
-                    }
-                }
                 // The shell then stops asking, so its desired set says what
                 // is really suspended.
-                if let (Some(view), Some(partition)) =
-                    (self.views.get(&id), self.partitions.get(&id))
-                {
+                if let (Some(view), Some(partition)) = (view, self.partitions.get(&id)) {
                     view.event_permit.emit(
                         &self.sink,
                         EngineEvent::DormancyRefused {
@@ -1620,7 +1615,7 @@ impl EngineHost {
             return;
         };
         retry.timer = None;
-        self.suspend_failed.remove(&id);
+        self.suspend_failures.clear_failure(id);
         self.pump_suspends();
     }
 
@@ -1633,23 +1628,18 @@ impl EngineHost {
                 .filter(|id| {
                     !self.dormant.contains(id)
                         && !self.suspending.contains(id)
-                        && !self.suspend_failed.contains(id)
                         && !self.suspend_uncertain.contains(id)
-                        && super::windows_dormancy::may_admit_try_suspend(
-                            super::windows_dormancy::RefuseMemoryLow::from_recorded(
-                                self.refuse_memory_low.contains(id),
-                            ),
-                        )
+                        && self.suspend_failures.allows_suspend(**id)
                 })
                 .copied()
                 .min();
             let Some(id) = candidate else { break };
             let Some(view) = self.views.get(&id) else {
-                self.suspend_refused(id);
+                self.suspend_refused(id, false);
                 continue;
             };
             let Some(epoch) = view.navigation.current_committed() else {
-                self.suspend_refused(id);
+                self.suspend_refused(id, false);
                 continue;
             };
             let attempt = std::sync::Arc::new(SuspendAttempt {
@@ -1682,7 +1672,7 @@ impl EngineHost {
             );
             let Some(timer) = timer else {
                 self.suspending.remove(&id);
-                self.suspend_refused(id);
+                self.suspend_refused(id, false);
                 if let Some(view) = self.views.get_mut(&id) {
                     view.suspend_attempt = None;
                 }
@@ -1704,7 +1694,7 @@ impl EngineHost {
                 view.suspend_deadline = Some(timer);
             } else {
                 drop(timer);
-                self.on_guarded_suspend_result(id, attempt, false);
+                self.on_guarded_suspend_result(id, attempt, None);
                 continue;
             }
             let weak = std::sync::Arc::downgrade(&attempt);
@@ -1724,7 +1714,7 @@ impl EngineHost {
             });
             if !started {
                 self.suspending.remove(&id);
-                self.suspend_refused(id);
+                self.suspend_refused(id, false);
                 let timer = self.views.get_mut(&id).and_then(|view| {
                     view.suspend_attempt = None;
                     view.suspend_deadline.take()
