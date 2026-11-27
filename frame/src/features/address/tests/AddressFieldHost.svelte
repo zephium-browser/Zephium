@@ -1,10 +1,8 @@
 <script lang="ts">
   import AddressField from "../components/AddressField.svelte";
 
-  let {
-    compact = false,
-    sidebarVisible = true,
-  }: { compact?: boolean; sidebarVisible?: boolean } = $props();
+  let { compact = false, sidebarVisible = true }: { compact?: boolean; sidebarVisible?: boolean } =
+    $props();
 </script>
 
 <AddressField {compact} {sidebarVisible}>
