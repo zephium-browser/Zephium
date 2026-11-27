@@ -280,7 +280,7 @@ pub(super) fn forget_window(app: &tauri::AppHandle, label: &str) {
         .unwrap_or_else(|e| e.into_inner())
         .forget_window(label);
     for (participant, token) in flushed {
-        super::emit_to_privileged(
+        super::try_emit_to_privileged_only(
             app,
             &participant,
             "zephium:resource-close-cancelled",
@@ -403,7 +403,12 @@ pub(super) fn cancel_prepared(app: &tauri::AppHandle) {
         std::mem::take(&mut gate.flushed)
     };
     for (label, token) in flushed {
-        super::emit_to_privileged(app, &label, "zephium:resource-close-cancelled", &token);
+        super::try_emit_to_privileged_only(
+            app,
+            &label,
+            "zephium:resource-close-cancelled",
+            &token,
+        );
     }
 }
 
@@ -500,7 +505,7 @@ fn request_flush(
         panel.wake();
     }
     for (label, token) in &requests {
-        super::emit_to_privileged(&app, label, "zephium:resource-close", token);
+        super::try_emit_to_privileged_only(&app, label, "zephium:resource-close", token);
     }
     tauri::async_runtime::spawn(async move {
         let mut participants = participants;
@@ -525,7 +530,12 @@ fn request_flush(
                         panel.wake();
                     }
                     for (label, token) in &additional {
-                        super::emit_to_privileged(&app, label, "zephium:resource-close", token);
+                        super::try_emit_to_privileged_only(
+                            &app,
+                            label,
+                            "zephium:resource-close",
+                            token,
+                        );
                     }
                     requests.extend(additional);
                     receivers = waiting;
@@ -581,7 +591,7 @@ fn request_flush(
                     return;
                 }
                 for (label, token) in &requests {
-                    super::emit_to_privileged(
+                    super::try_emit_to_privileged_only(
                         &app,
                         label,
                         "zephium:resource-close-cancelled",
