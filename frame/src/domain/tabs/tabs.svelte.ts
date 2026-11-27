@@ -1,7 +1,14 @@
 import { listenAll } from "$shared/lib/lifecycle";
 import { forgetDrafts } from "$shared/lib/drafts";
 import { flushSync } from "svelte";
-import type { ContainerView, ItemsState, SpaceIconView, SpaceLookInputV1, TabMenuContext, TabView } from "$shared/ipc/bindings";
+import type {
+  ContainerView,
+  ItemsState,
+  SpaceIconView,
+  SpaceLookInputV1,
+  TabMenuContext,
+  TabView,
+} from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -249,10 +256,20 @@ export const reorderSpace = (id: string, before: string | null) =>
   settle(commands.spacesReorder(id, before));
 export const moveTabToSpace = (tab: string, space: string) =>
   settle(commands.spacesMoveTab(tab, space));
-export const createContainer = (name: string, icon: SpaceIconView | null, color: number, spaces: string[] | null) =>
-  settle(commands.containersCreate(name, icon, color, spaces));
-export const updateContainer = (container: ContainerView, name: string, icon: SpaceIconView | null, color: number, spaces: string[] | null) =>
-  settle(commands.containersUpdate(container.id, name, icon, color, spaces));
-export const removeContainerFromSpace = (id: string) => settle(commands.containersRemoveFromSpace(id));
+export const createContainer = (
+  name: string,
+  icon: SpaceIconView | null,
+  color: number,
+  spaces: string[] | null,
+) => settle(commands.containersCreate(name, icon, color, spaces));
+export const updateContainer = (
+  container: ContainerView,
+  name: string,
+  icon: SpaceIconView | null,
+  color: number,
+  spaces: string[] | null,
+) => settle(commands.containersUpdate(container.id, name, icon, color, spaces));
+export const removeContainerFromSpace = (id: string) =>
+  settle(commands.containersRemoveFromSpace(id));
 export const assignTabContainer = (tab: string, container: string | null) =>
   settle(commands.containersAssignTab(tab, container));

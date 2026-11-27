@@ -164,9 +164,7 @@ impl Shell {
                     }
                 }
                 let effects = self.items.set_container(tab, container);
-                if !effects.is_empty() {
-                    self.schedule_container_recreate(tab, container);
-                } else if self.container_recreates.contains_key(&tab) {
+                if !effects.is_empty() || self.container_recreates.contains_key(&tab) {
                     self.schedule_container_recreate(tab, container);
                 }
                 if effects.is_empty()

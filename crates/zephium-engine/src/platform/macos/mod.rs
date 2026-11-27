@@ -626,7 +626,7 @@ fn erase_named_profile_data(erasure: ProfileErasure) {
     }
     // The profile's own store, then Work's own store for the profile.
     let identifiers = vec![
-        erasure.profile.bytes(),
+        browsing_data::profile_store_identifier(erasure.profile),
         crate::work_website_data::identifier(erasure.profile),
     ];
     remove_named_stores(identifiers, Vec::new(), erasure);

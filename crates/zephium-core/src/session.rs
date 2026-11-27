@@ -348,7 +348,7 @@ pub fn restore(state: SessionState) -> Restored {
                 };
                 tab.last_active_ms =
                     last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
-                ItemKind::Tab(tab)
+                ItemKind::Tab(Box::new(tab))
             }
             PersistedKind::ContainerTab {
                 url,
@@ -374,7 +374,7 @@ pub fn restore(state: SessionState) -> Restored {
                 tab.last_active_ms =
                     last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
                 tab.container = Some(container);
-                ItemKind::Tab(tab)
+                ItemKind::Tab(Box::new(tab))
             }
             PersistedKind::BrowserTab { page } => {
                 let Placement::Space { space, .. } = i.placement else {
@@ -386,7 +386,7 @@ pub fn restore(state: SessionState) -> Restored {
                 {
                     continue;
                 }
-                ItemKind::Tab(TabState::browser_owned(page))
+                ItemKind::Tab(Box::new(TabState::browser_owned(page)))
             }
         };
         // insert() enforces parent existence and placement consistency; DFS

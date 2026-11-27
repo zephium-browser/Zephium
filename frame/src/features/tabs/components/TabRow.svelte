@@ -90,7 +90,9 @@
     style:padding-inline-start={`${indent}px`}
     aria-current={active ? "page" : undefined}
     aria-pressed={multiSelecting ? selected : undefined}
-    aria-label={container ? `${tab.title || m.untitled_tab()}, ${container.name} container` : tab.title || m.untitled_tab()}
+    aria-label={container
+      ? `${tab.title || m.untitled_tab()}, ${container.name} container`
+      : tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
     onpointerdown={(event) => onPointerDown(event, tab)}
     onpointermove={onPointerMove}
@@ -142,6 +144,7 @@
 
 <style>
   @import "./space-hue.css";
+
   /*
     The close control is absolutely positioned rather than reserved in the
     layout. Reserving it cost 28px of every row permanently to a button that
@@ -289,10 +292,6 @@
       color var(--motion-fast) var(--ease-out);
   }
 
-  .browse-tab[data-container]:has(.tab-close) .tab-close {
-    inset-inline-end: 18px;
-  }
-
   .browse-tab[data-container]:is(:hover, :focus-within) .tab-label,
   :global([data-close-buttons="always"]) .browse-tab[data-container]:has(.tab-close) .tab-label {
     margin-inline-end: 40px;
@@ -310,6 +309,10 @@
 
   .browse-tab:hover .tab-close {
     opacity: 1;
+  }
+
+  .browse-tab[data-container]:has(.tab-close) .tab-close {
+    inset-inline-end: 18px;
   }
 
   @media (forced-colors: active) {

@@ -683,6 +683,7 @@ impl Engine for FakeEngine {
         let kind = match partition {
             Partition::Default(_) => "default",
             Partition::Persistent(_) => "persistent",
+            Partition::Container(_, _) => "container",
             Partition::Ephemeral(_) => "ephemeral",
         };
         self.log(format!("create {id} {url} [{kind}]"));
@@ -1125,6 +1126,7 @@ impl Engine for FakeEngine {
         let kind = match partition {
             Partition::Default(_) => "default",
             Partition::Persistent(_) => "persistent",
+            Partition::Container(_, _) => "container",
             Partition::Ephemeral(_) => "ephemeral",
         };
         self.log(format!("prepare-profile {kind} {}", partition.profile()));
@@ -2350,6 +2352,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::Focus(_) => {}
         Projection::OperationProcessed(_) => {}
         Projection::Profiles(_) => {}
+        Projection::Containers(_) => {}
         Projection::RecentlyClosed(_) => {}
         Projection::MediaPlayer(_) => {}
         Projection::OpenNote { .. } => {}
@@ -2719,6 +2722,7 @@ mod work_pane;
 mod zoom;
 
 mod blocker_sites;
+mod containers;
 
 mod webext;
 

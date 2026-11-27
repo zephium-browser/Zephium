@@ -250,7 +250,7 @@ impl Items {
             id,
             parent: None,
             placement,
-            kind: ItemKind::Tab(TabState::new()),
+            kind: ItemKind::Tab(Box::new(TabState::new())),
         })
     }
 
@@ -274,7 +274,7 @@ impl Items {
             id,
             parent: None,
             placement,
-            kind: ItemKind::Tab(tab),
+            kind: ItemKind::Tab(Box::new(tab)),
         })
     }
 
@@ -296,7 +296,7 @@ impl Items {
             id,
             parent: None,
             placement,
-            kind: ItemKind::Tab(TabState::browser_owned(page)),
+            kind: ItemKind::Tab(Box::new(TabState::browser_owned(page))),
         })
     }
 
@@ -309,7 +309,7 @@ impl Items {
             id,
             parent: None,
             placement,
-            kind: ItemKind::Tab(tab),
+            kind: ItemKind::Tab(Box::new(tab)),
         })
     }
 
@@ -320,7 +320,7 @@ impl Items {
             id,
             parent: None,
             placement,
-            kind: ItemKind::Tab(TabState::extension_owned()),
+            kind: ItemKind::Tab(Box::new(TabState::extension_owned())),
         })
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
             id: id(10_000),
             parent: Some(parent),
             placement: today(),
-            kind: ItemKind::Tab(TabState::new()),
+            kind: ItemKind::Tab(Box::new(TabState::new())),
         }));
         assert_eq!(items.items.len(), crate::session::MAX_ITEM_TREE_DEPTH + 1);
     }
@@ -1419,13 +1419,13 @@ mod tests {
             id: id(2),
             parent: Some(id(1)),
             placement: today(),
-            kind: ItemKind::Tab(TabState::new()),
+            kind: ItemKind::Tab(Box::new(TabState::new())),
         }));
         assert!(!items.insert(Item {
             id: id(3),
             parent: Some(id(99)),
             placement: today(),
-            kind: ItemKind::Tab(TabState::new()),
+            kind: ItemKind::Tab(Box::new(TabState::new())),
         }));
     }
 
@@ -1437,7 +1437,7 @@ mod tests {
             id: id(11),
             parent: Some(f),
             placement: today(),
-            kind: ItemKind::Tab(TabState::new()),
+            kind: ItemKind::Tab(Box::new(TabState::new())),
         }));
         items.navigate(id(11), "example.com");
         assert!(items.insert_tab(id(12), today()));
@@ -1525,7 +1525,7 @@ mod tests {
                                 id: id(n),
                                 parent: Some(parent),
                                 placement: today(),
-                                kind: ItemKind::Tab(TabState::new()),
+                                kind: ItemKind::Tab(Box::new(TabState::new())),
                             };
                             if items.insert(item) {
                                 ids.push(id(n));

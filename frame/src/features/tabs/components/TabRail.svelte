@@ -185,7 +185,9 @@
               data-plate
               title={tab.title || m.untitled_tab()}
               aria-current={active ? "page" : undefined}
-              aria-label={container ? `${tab.title || m.untitled_tab()}, ${container.name} container` : tab.title || m.untitled_tab()}
+              aria-label={container
+                ? `${tab.title || m.untitled_tab()}, ${container.name} container`
+                : tab.title || m.untitled_tab()}
               oncontextmenu={(event) => handleContextMenu(event, tab)}
               onpointerdown={(event) => drag.down(event, tab.id)}
               onpointermove={(event) => drag.move(event)}
@@ -265,6 +267,7 @@
 
 <style>
   @import "./space-hue.css";
+
   /* Close under the head's rule, so the spaces read as the first thing of
      the column rather than a thing apart from it. */
   .rail-spaces-slot {
@@ -289,7 +292,10 @@
     content: "";
     pointer-events: none;
   }
-  .rail-entry { position: relative; }
+
+  .rail-entry {
+    position: relative;
+  }
 
   .rail-stage {
     position: relative;

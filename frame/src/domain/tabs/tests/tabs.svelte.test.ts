@@ -6,11 +6,12 @@ const harness = vi.hoisted(() => {
   const order: string[] = [];
   const listeners: {
     restore?: (event: { payload: ItemsState }) => void;
+    containers?: (event: { payload: unknown[] }) => void;
     items?: (event: { payload: ItemsState }) => void;
     tab?: (event: { payload: TabView }) => void;
     presentation?: (event: { payload: { tab: TabView; active: string | null } }) => void;
   } = {};
-  const stops = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+  const stops = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
 
   return {
     order,
@@ -47,6 +48,13 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 vi.mock("$shared/ipc/native-events", () => ({
   events: {
+    containersChanged: {
+      listen: vi.fn((listener: (event: { payload: unknown[] }) => void) => {
+        harness.order.push("containers");
+        harness.listeners.containers = listener;
+        return Promise.resolve(harness.stops[4]);
+      }),
+    },
     itemsChanged: {
       listen: vi.fn((listener: (event: { payload: ItemsState }) => void) => {
         harness.order.push("items");
@@ -102,6 +110,7 @@ describe("Svelte tab state lifecycle", () => {
     vi.resetModules();
     harness.order.length = 0;
     delete harness.listeners.items;
+    delete harness.listeners.containers;
     delete harness.listeners.tab;
     delete harness.listeners.presentation;
     harness.flushSync.mockClear();
@@ -115,14 +124,21 @@ describe("Svelte tab state lifecycle", () => {
     const second = state.init();
 
     expect(first).toBe(second);
-    expect(harness.order).toEqual(["items", "tab", "restore", "presentation"]);
+    expect(harness.order).toEqual(["containers", "items", "tab", "restore", "presentation"]);
 
     await first;
-    expect(harness.order).toEqual(["items", "tab", "restore", "presentation", "bootstrap"]);
+    expect(harness.order).toEqual([
+      "containers",
+      "items",
+      "tab",
+      "restore",
+      "presentation",
+      "bootstrap",
+    ]);
 
     state.dispose();
     state.dispose();
-    expect(harness.stops.map((stop) => stop.mock.calls.length)).toEqual([1, 1, 1, 1]);
+    expect(harness.stops.map((stop) => stop.mock.calls.length)).toEqual([1, 1, 1, 1, 1]);
   });
 
   it("offers no close on the window's one empty new tab", async () => {

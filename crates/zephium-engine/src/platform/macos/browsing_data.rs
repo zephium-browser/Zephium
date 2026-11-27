@@ -20,10 +20,15 @@ use objc2_web_kit::{
 use zephium_core::browsing_data::{
     host_is_on_site, EngineDataCompletion, EngineDataFailure, EngineDataKinds, EngineDataReply,
 };
+use zephium_core::ids::ProfileId;
 
 use crate::data_kinds::{
     merge_sites, webkit_plan, WebKitDataType, WebKitStep, WEBKIT_CACHE, WEBKIT_SITE_DATA,
 };
+
+pub(super) fn profile_store_identifier(profile: ProfileId) -> [u8; 16] {
+    profile.bytes()
+}
 
 /// The native identifier of the profile's own store. Work's store is named by
 /// a different, derived identifier and never by this one.

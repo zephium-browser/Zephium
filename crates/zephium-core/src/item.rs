@@ -253,7 +253,7 @@ impl TabState {
 #[derive(Clone, Debug)]
 pub enum ItemKind {
     Folder { name: String },
-    Tab(TabState),
+    Tab(Box<TabState>),
 }
 
 #[derive(Clone, Debug)]
