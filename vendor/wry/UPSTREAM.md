@@ -39,6 +39,10 @@ Its security-relevant deltas currently enforce these invariants:
   debt is transferred immediately into a bounded apartment-local registry.
   The public error carries only a `Send + Sync` incident identifier and
   failure description, never an apartment-bound native object.
+- The Windows stage can park keyboard focus on its parent HWND during a page
+  handoff. Wry skips its chrome redirect for the matching synchronous focus
+  notification and can forward focus to the parent's registered controller if
+  the parent still holds it.
 - `native_bounds.rs` bounds untrusted native title, URL, version, and filename
   strings before copying them into Rust. Privileged IPC accepts only primitive
   strings up to 64 KiB (checked in both native units and UTF-8 bytes) on all

@@ -422,8 +422,9 @@ use self::webview2::*;
 
 #[cfg(target_os = "windows")]
 pub use self::webview2::{
-  pending_webview2_cleanup_debts, webview2_cleanup_overflowed, ScrollBarStyle, WebView2CleanupDebt,
-  WebView2CleanupFailure, WebView2CleanupStep, WebView2ConstructionCleanupIncident,
+  forward_webview2_parent_focus, park_webview2_parent_focus, pending_webview2_cleanup_debts,
+  webview2_cleanup_overflowed, ScrollBarStyle, WebView2CleanupDebt, WebView2CleanupFailure,
+  WebView2CleanupStep, WebView2ConstructionCleanupIncident,
 };
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{

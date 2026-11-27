@@ -32,7 +32,11 @@ use windows::{
     Globalization::*,
     Graphics::Gdi::*,
     System::{Com::*, LibraryLoader::GetModuleHandleW},
-    UI::{Input::KeyboardAndMouse::SetFocus, Shell::*, WindowsAndMessaging::*},
+    UI::{
+      Input::KeyboardAndMouse::{GetFocus, SetFocus},
+      Shell::*,
+      WindowsAndMessaging::*,
+    },
   },
 };
 
@@ -122,6 +126,7 @@ fn bounded_stream_read_len(cb_read: u32, buffer_len: usize) -> Option<usize> {
 }
 
 thread_local! {
+  static PARKING_PARENT_FOCUS: Cell<Option<(HWND, HWND)>> = const { Cell::new(None) };
   // WebView2's projected COM interfaces are apartment-bound and deliberately
   // do not implement Send. Keep their ownership on the creating UI thread;
   // asynchronous protocol workers receive only a numeric lookup token.
@@ -141,6 +146,56 @@ thread_local! {
   // never forget an obligation or abort from a destructor.
   static ORPHANED_CLEANUP_DEBTS: RefCell<Vec<(NonZeroU64, NativeCleanupDebt)>> = const { RefCell::new(Vec::new()) };
   static ORPHANED_CLEANUP_OVERFLOWED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Moves keyboard focus from the current child to its parent without Wry
+/// forwarding that one focus notification to the parent's WebView2.
+/// Call on the window's UI thread.
+pub fn park_webview2_parent_focus(parent: HWND, outgoing: HWND) {
+  // SAFETY: queries the current thread's keyboard focus without changing it.
+  if unsafe { GetFocus() } != outgoing {
+    return;
+  }
+  PARKING_PARENT_FOCUS.with(|parking| {
+    let previous = parking.replace(Some((parent, outgoing)));
+    // SAFETY: this synchronous focus change is scoped to the caller's UI thread.
+    let _ = unsafe { SetFocus(Some(parent)) };
+    parking.set(previous);
+  });
+}
+
+fn take_parked_parent_focus(parent: HWND, outgoing: HWND) -> bool {
+  PARKING_PARENT_FOCUS.with(|parking| {
+    if parking.get() != Some((parent, outgoing)) {
+      return false;
+    }
+    parking.set(None);
+    true
+  })
+}
+
+/// Forwards focus from the focused parent to its registered WebView2, as Wry
+/// ordinarily does when the parent gains focus. Call on the window's UI thread.
+pub fn forward_webview2_parent_focus(parent: HWND) {
+  let mut data = 0;
+  // SAFETY: on the window's UI thread. The exact Wry registration owns its
+  // refdata. Clone the controller before calling COM, which can reenter Wry.
+  unsafe {
+    if GetFocus() != parent
+      || !GetWindowSubclass(
+        parent,
+        Some(InnerWebView::parent_subclass_proc),
+        PARENT_SUBCLASS_ID as _,
+        Some(&mut data),
+      )
+      .as_bool()
+      || data == 0
+    {
+      return;
+    }
+    let controller = (*(data as *const ParentSubclassState)).controller.clone();
+    let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+  }
 }
 
 const MAX_ORPHANED_CLEANUP_DEBTS: usize = 4_096;
@@ -3118,7 +3173,8 @@ impl InnerWebView {
       }
 
       WM_SETFOCUS | WM_ENTERSIZEMOVE => {
-        if let Some(state) = state.as_ref() {
+        let parked = msg == WM_SETFOCUS && take_parked_parent_focus(hwnd, HWND(wparam.0 as _));
+        if let Some(state) = state.as_ref().filter(|_| !parked) {
           let _ = state
             .controller
             .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
@@ -3884,6 +3940,20 @@ fn is_windows_7() -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn parent_focus_parking_skips_only_the_matching_notification_once() {
+    let mut slots = [0_u8; 3];
+    let [parent, outgoing, other] = slots
+      .each_mut()
+      .map(|slot| HWND(std::ptr::from_mut(slot).cast()));
+    PARKING_PARENT_FOCUS.set(Some((parent, outgoing)));
+
+    assert!(!take_parked_parent_focus(other, outgoing));
+    assert!(!take_parked_parent_focus(parent, other));
+    assert!(take_parked_parent_focus(parent, outgoing));
+    assert!(!take_parked_parent_focus(parent, outgoing));
+  }
 
   #[test]
   fn stopped_navigation_does_not_destroy_a_download_destination_context() {

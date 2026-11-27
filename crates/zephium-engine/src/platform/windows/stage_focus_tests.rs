@@ -410,7 +410,7 @@ fn closing_a_focused_tab_returns_focus_before_teardown_and_focuses_the_successor
     FOCUS.with(|record| {
         assert_eq!(record.borrow().as_ref().unwrap().targets, vec![owner]);
     });
-    assert!(stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_some());
 
     assert!(stage.apply(
         Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
@@ -428,7 +428,7 @@ fn closing_a_focused_tab_returns_focus_before_teardown_and_focuses_the_successor
             vec![("b", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
         );
     });
-    assert!(!stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_none());
 
     // Subsequent layout syncs must not re-steal focus once handed off.
     stage.state.borrow_mut().dirty.insert(tab_b);
@@ -604,11 +604,11 @@ fn empty_stage_clears_pending_focus_handoff_so_chrome_keeps_focus() {
     });
 
     stage.remove_view(tab_a);
-    assert!(stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_some());
 
     // Switching onto an empty stage (e.g. built-in New Tab) clears the handoff.
     assert!(stage.apply(None, None, &[], None));
-    assert!(!stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_none());
     sync(&stage.state);
 
     // Revealing a page later must not fire the cleared handoff.
@@ -696,7 +696,7 @@ fn removing_focused_split_pane_schedules_sync_when_surviving_pane_is_clean() {
 
     stage.remove_view(tab_a);
     assert!(stage.state.borrow().dirty.is_empty());
-    assert!(stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_some());
     // Timer must be armed (or already drained synchronously if SetTimer failed).
     let scheduled = stage.state.borrow().layout_timer.is_some();
     if scheduled {
@@ -708,12 +708,13 @@ fn removing_focused_split_pane_schedules_sync_when_surviving_pane_is_clean() {
             vec![("b", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
         );
     });
-    assert!(!stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_none());
 }
 
 #[test]
 fn focus_transfer_refuses_background_minimized_or_already_focused_windows() {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE, SW_RESTORE};
+
     let mut windows = Windows(Vec::new());
     let owner = windows.create(None);
     let other = windows.create(None);
@@ -721,72 +722,48 @@ fn focus_transfer_refuses_background_minimized_or_already_focused_windows() {
     let target = windows.create(Some(owner));
     let sibling = windows.create(Some(owner));
     let sibling_renderer = windows.create(Some(sibling));
+    let handoff = FocusHandoff::install(owner).unwrap();
 
-    assert!(can_focus_revealed_page(
-        owner,
-        target,
-        &[sibling],
-        chrome,
-        owner
-    ));
-    assert!(can_focus_revealed_page(
-        owner,
-        target,
-        &[sibling],
-        HWND::default(),
-        owner
-    ));
-    assert!(!can_focus_revealed_page(
-        owner,
-        target,
-        &[sibling],
-        chrome,
-        other
-    ));
-    assert!(!can_focus_revealed_page(
-        owner,
-        target,
-        &[sibling],
-        target,
-        owner
-    ));
-    assert!(!can_focus_revealed_page(
-        owner,
-        target,
-        &[sibling],
-        sibling_renderer,
-        owner
-    ));
+    for (focus, foreground, owns_keyboard) in [
+        (owner, owner, true),
+        (owner, other, false),
+        (HWND::default(), owner, false),
+        (chrome, owner, false),
+        (target, owner, false),
+        (sibling_renderer, owner, false),
+    ] {
+        FOCUS.with(|record| {
+            *record.borrow_mut() = Some(FocusRecord {
+                focus,
+                foreground,
+                targets: Vec::new(),
+                moved: Vec::new(),
+            });
+        });
+        assert_eq!(handoff.owns_keyboard(), owns_keyboard);
+    }
 
+    FOCUS.with(|record| record.borrow_mut().as_mut().unwrap().focus = owner);
     // SAFETY: test-owned offscreen window, restored before drop.
     unsafe {
         let _ = ShowWindow(owner, SW_MINIMIZE);
-        assert!(!can_focus_revealed_page(
-            owner,
-            target,
-            &[sibling],
-            chrome,
-            owner
-        ));
+        assert!(!handoff.owns_keyboard());
         let _ = ShowWindow(owner, SW_RESTORE);
     }
 
-    // Losing foreground while waiting on replacement readiness clears pending handoff.
+    // Losing foreground while the stage waits also discards the receipt.
     let stage = Stage::new(owner, 8.0, |_, _| {});
-    let tab_b = ItemId::generate();
-    stage.state.borrow_mut().hidden = false;
-    stage.state.borrow_mut().visible.insert(tab_b);
-    stage.state.borrow_mut().pending_page_focus = true;
-    FOCUS.with(|record| {
-        *record.borrow_mut() = Some(FocusRecord {
-            focus: chrome,
-            foreground: other,
-            targets: Vec::new(),
-            moved: Vec::new(),
-        });
-    });
+    let tab = ItemId::generate();
+    {
+        let mut state = stage.state.borrow_mut();
+        state.hidden = false;
+        state.visible.insert(tab);
+        state.active = Some(tab);
+        state.pending_page_focus = Some(FocusHandoff::install(owner).unwrap());
+    }
+    FOCUS.with(|record| record.borrow_mut().as_mut().unwrap().foreground = other);
     restore_page_focus(&stage.state, 0);
-    assert!(!stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_none());
 }
 
 #[test]
@@ -860,12 +837,12 @@ fn closing_focused_split_pane_focuses_the_intended_successor_not_first_tree_leaf
     // Closing the active pane must wait for the replacement layout's successor
     // instead of prematurely focusing the first surviving tree leaf.
     stage.remove_view(tab_b);
-    assert!(stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_some());
     sync(&stage.state);
     FOCUS.with(|record| {
         assert!(record.borrow().as_ref().unwrap().moved.is_empty());
     });
-    assert!(stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_some());
 
     // Apply the surviving split [tab_a, tab_c] with tab_c as the shell's successor.
     assert!(stage.apply(
@@ -887,15 +864,54 @@ fn closing_focused_split_pane_focuses_the_intended_successor_not_first_tree_leaf
             vec![("c", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
         );
     });
-    assert!(!stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_none());
 }
 
 #[test]
 fn pending_focus_waits_for_unready_successor_instead_of_falling_back_to_earlier_leaf() {
+    delayed_split_handoff(|_, _, _| {}, true);
+}
+
+#[test]
+fn chrome_takes_focus_while_the_successor_is_waiting_for_reveal() {
+    delayed_split_handoff(
+        |_, chrome, _| {
+            FOCUS.with(|record| record.borrow_mut().as_mut().unwrap().focus = chrome);
+        },
+        false,
+    );
+}
+
+#[test]
+fn losing_and_regaining_foreground_during_reveal_discards_the_handoff() {
+    delayed_split_handoff(
+        |owner, _, other| {
+            use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+            FOCUS.with(|record| record.borrow_mut().as_mut().unwrap().foreground = other);
+            // SAFETY: this sends deactivation to the test-owned window without
+            // moving the desktop's actual foreground window.
+            unsafe {
+                SendMessageW(
+                    owner,
+                    WM_ACTIVATE,
+                    Some(WPARAM(WA_INACTIVE as usize)),
+                    Some(LPARAM(other.0 as isize)),
+                );
+            }
+            FOCUS.with(|record| record.borrow_mut().as_mut().unwrap().foreground = owner);
+        },
+        false,
+    );
+}
+
+fn delayed_split_handoff(interrupt: impl FnOnce(HWND, HWND, HWND), should_focus: bool) {
     use zephium_core::split::Axis;
 
     let mut windows = Windows(Vec::new());
     let owner = windows.create(None);
+    let chrome = windows.create(Some(owner));
+    let other = windows.create(None);
     let page_a = windows.create(Some(owner));
     let page_b = windows.create(Some(owner));
     let renderer_b = windows.create(Some(page_b));
@@ -968,15 +984,19 @@ fn pending_focus_waits_for_unready_successor_instead_of_falling_back_to_earlier_
     FOCUS.with(|record| {
         assert!(record.borrow().as_ref().unwrap().moved.is_empty());
     });
-    assert!(stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_some());
 
+    // No layout pass runs between the focus change and the replacement's reveal.
+    interrupt(owner, chrome, other);
     assert!(stage.set_ready(tab_c));
     sync(&stage.state);
     FOCUS.with(|record| {
-        assert_eq!(
-            record.borrow().as_ref().unwrap().moved,
+        let expected = if should_focus {
             vec![("c", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
-        );
+        } else {
+            Vec::new()
+        };
+        assert_eq!(record.borrow().as_ref().unwrap().moved, expected);
     });
-    assert!(!stage.state.borrow().pending_page_focus);
+    assert!(stage.state.borrow().pending_page_focus.is_none());
 }
