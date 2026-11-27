@@ -14,6 +14,18 @@ fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
     }
 }
 
+fn report_find_refusal(
+    accepted: bool,
+    request: Option<FindRequest>,
+    report: impl FnOnce(String, u32, Option<u32>),
+) {
+    if !accepted {
+        if let Some(request) = request {
+            report(request.query, 0, None);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
     read.and_then(|(html, truncated)| (!truncated).then_some(html))
@@ -232,6 +244,34 @@ impl EngineHost {
         }
     }
 
+    /// Gives the page the keyboard inside the window that shows it. False
+    /// when it is in no window yet.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn focus_page(&self, id: ItemId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let page = crate::platform::imp::native_webview(view);
+            page.window()
+                .is_some_and(|window| window.makeFirstResponder(Some(&page)))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+            use wry::WebViewExtWindows;
+            // SAFETY: the controller belongs to this live view and this runs
+            // on its UI thread.
+            unsafe {
+                view.view
+                    .controller()
+                    .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+            }
+            .is_ok()
+        }
+    }
+
     /// One step of finding text in `id`. Results travel the view's own event
     /// permit, so a result from a view since replaced is never delivered.
     pub(crate) fn find(&mut self, id: ItemId, request: Option<FindRequest>) {
@@ -268,9 +308,12 @@ impl EngineHost {
             use wry::WebViewExtUnix;
             view.view.webview()
         };
-        if !crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report) {
+        let accepted =
+            crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report.clone());
+        if !accepted {
             eprintln!("engine: find is unavailable in this web engine");
         }
+        report_find_refusal(accepted, request, report());
     }
 
     pub(crate) fn print(&self, id: ItemId) {
@@ -288,6 +331,29 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refused_find_reports_no_results_but_accepted_find_waits_for_native() {
+        for accepted in [false, true] {
+            let mut results = Vec::new();
+            super::report_find_refusal(
+                accepted,
+                Some(FindRequest {
+                    query: "needle".into(),
+                    forward: true,
+                }),
+                |query, matches, active| results.push((query, matches, active)),
+            );
+            assert_eq!(
+                results,
+                if accepted {
+                    vec![]
+                } else {
+                    vec![("needle".into(), 0, None)]
+                }
+            );
+            super::report_find_refusal(false, None, |_, _, _| panic!("closing find has no result"));
+        }
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn truncated_html_is_not_offered_for_saving() {

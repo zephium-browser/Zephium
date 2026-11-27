@@ -18,6 +18,55 @@ def job(text, name):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def assert_macos_import_check(self, workflow):
+        macos = job(workflow, 'macos')
+        steps = re.split(r'^      - ', macos, flags=re.M)[1:]
+        build = next(i for i, step in enumerate(steps)
+                     if step.startswith('name: Build, sign and notarize\n'))
+        check = steps[build + 1]
+        self.assertTrue(check.startswith('name: Check macOS WebKit imports\n'))
+        self.assertIn('cargo run --locked -p xtask -- check-macos-imports', check)
+        self.assertIn('target/aarch64-apple-darwin/release/bundle/macos/'
+                      'Zephium.app/Contents/MacOS/zephium-desktop', check)
+        self.assertNotRegex(check, r'(?m)^        if:')
+        self.assertNotIn('continue-on-error:', check)
+
+    def test_macos_checks_binary_imports_immediately_after_build(self):
+        self.assert_macos_import_check(WORKFLOW.read_text())
+
+    def test_macos_import_check_rejects_every_intervening_step_form(self):
+        marker = '      - name: Check macOS WebKit imports\n'
+        for step in ['name: Intervening\n        run: true',
+                     'run: true', 'uses: ./local-action']:
+            with self.subTest(step=step), self.assertRaises(AssertionError):
+                self.assert_macos_import_check(WORKFLOW.read_text().replace(
+                    marker, f'      - {step}\n' + marker, 1))
+
+    def test_macos_import_check_rejects_optional_gates(self):
+        marker = '      - name: Check macOS WebKit imports\n'
+        for field in ['if: false', 'continue-on-error: true']:
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.assert_macos_import_check(WORKFLOW.read_text().replace(
+                    marker, marker + f'        {field}\n', 1))
+
+    def test_release_guide_keeps_betas_off_stable_clients_after_bootstrap(self):
+        guide = (ROOT / '.github/RELEASE.md').read_text()
+        self.assertIn('After a stable release exists, publish betas with "Set as a pre-release"\n   checked and "Set as the latest release" unchecked', guide)
+        self.assertIn('prerelease=true', WORKFLOW.read_text())
+
+    def test_stable_publisher_checks_downloaded_assets_before_publishing(self):
+        publish = job((ROOT / '.github/workflows/publish-stable.yml').read_text(), 'publish')
+        command = 'cargo run --locked -p xtask -- check-release-assets dist "${TAG}" "${GITHUB_REPOSITORY}"'
+        self.assertIn(command, publish)
+        self.assertLess(publish.index('gh release download'), publish.index(command))
+        self.assertLess(publish.index(command), publish.index('gh release edit'))
+        validation = '      - name: Verify the complete draft and updater manifest\n'
+        publication = '      - name: Publish the verified draft\n'
+        step = publish.split(validation, 1)[1].split('\n      - ', 1)[0]
+        self.assertIn(command, step)
+        self.assertNotIn('continue-on-error:', step)
+        self.assertLess(publish.index(validation), publish.index(publication))
+
     def test_components_have_one_retry_and_an_explicit_emergency_opt_out(self):
         workflow = WORKFLOW.read_text()
         self.assertRegex(workflow, r'emergency:\n(?:.*\n){1,4}?        type: boolean')

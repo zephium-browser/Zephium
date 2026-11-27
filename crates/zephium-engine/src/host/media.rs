@@ -7,16 +7,30 @@
 //! is the chrome's arithmetic, not the page's.
 
 /// Finds the media element the player follows: in the document and up to
-/// seven same-origin frames, the one playing and heard, else one paused part
-/// way, else one finished; the longest wins a tie. Both scripts use it, so
+/// seven same-origin frames and their open shadow roots (eight levels, 64
+/// roots and 4096 inspected elements at most), the one playing and heard, else
+/// one paused part way, else one finished; the longest wins a tie. Both scripts use it, so
 /// they agree on the element without sharing any state.
 const CHOOSE_JS: &str = r#"
   function documents() {
-    var list = [document];
-    for (var i = 0; i < list.length && list.length < 8; i++) {
-      var frames = list[i].querySelectorAll('iframe,frame');
-      for (var j = 0; j < frames.length && j < 16 && list.length < 8; j++) {
-        try { if (frames[j].contentDocument) list.push(frames[j].contentDocument); } catch (_) {}
+    var list = [document], depths = [0], docCount = 1, nodeCount = 0;
+    for (var i = 0; i < list.length; i++) {
+      var root = list[i], doc = root.ownerDocument || root;
+      var walker = doc.createTreeWalker(root, 1), node;
+      while (nodeCount < 4096 && (node = walker.nextNode())) {
+        nodeCount++;
+        if (node.shadowRoot && depths[i] < 8 && list.length < 64) {
+          list.push(node.shadowRoot); depths.push(depths[i] + 1);
+        }
+      }
+      var frames = root.querySelectorAll('iframe,frame');
+      for (var f = 0; f < frames.length && f < 64 && docCount < 8; f++) {
+        var frame = frames[f];
+        try {
+          if (frame.contentDocument && list.indexOf(frame.contentDocument) < 0 && list.length < 64) {
+            list.push(frame.contentDocument); depths.push(0); docCount++;
+          }
+        } catch (_) {}
       }
     }
     return list;
@@ -81,6 +95,7 @@ pub(super) const MEDIA_WATCH_JS: &str = r#"(function(last){
     var playing = !el.paused && !el.ended;
     var video = el.localName === 'video', owner = el.ownerDocument;
     var pip = video && (owner.pictureInPictureElement === el ||
+        el.getRootNode().pictureInPictureElement === el ||
         el.webkitPresentationMode === 'picture-in-picture');
     var canPip = video && !el.disablePictureInPicture && el.videoWidth > 0 &&
         ((owner.pictureInPictureEnabled && typeof el.requestPictureInPicture === 'function') ||
@@ -164,7 +179,8 @@ pub(super) const MEDIA_ACTION_JS: &str = r#"(async (action, value) => {
     } else if (action === 'pip') {
       if (el.localName !== 'video') return false;
       const doc = el.ownerDocument;
-      if (doc.pictureInPictureElement === el) await doc.exitPictureInPicture();
+      if (doc.pictureInPictureElement === el || el.getRootNode().pictureInPictureElement === el)
+        await doc.exitPictureInPicture();
       else if (el.webkitPresentationMode === 'picture-in-picture') el.webkitSetPresentationMode('inline');
       else if (doc.pictureInPictureEnabled && typeof el.requestPictureInPicture === 'function')
         await el.requestPictureInPicture();
@@ -336,6 +352,23 @@ impl super::EngineHost {
 mod tests {
     use super::*;
     use zephium_core::ports::engine::MediaAction;
+
+    #[test]
+    fn media_and_automatic_pip_scripts_preserve_bounded_frame_discovery() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test-automatic-pip.mjs");
+        let output = std::process::Command::new("node")
+            .arg("--test")
+            .arg(script)
+            .output()
+            .expect("Node runs the media script tests");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn the_watch_resumes_only_from_a_short_hex_token() {

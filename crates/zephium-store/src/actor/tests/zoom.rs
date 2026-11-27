@@ -47,6 +47,12 @@ fn unusable_levels_are_refused_before_they_reach_the_queue() {
 }
 
 #[test]
+fn a_zoom_write_to_an_unavailable_profile_reports_failure() {
+    let store = SqliteStore::in_memory().unwrap();
+    assert!(!store.save_zoom_level(profile(), "example.com".into(), Some(150), 1));
+}
+
+#[test]
 fn clearing_history_drops_the_levels_it_covers() {
     warm_schema_cache();
     let store = SqliteStore::in_memory().unwrap();

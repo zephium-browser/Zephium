@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import { emitNativeEvent } from "$shared/testing/native-events";
@@ -12,12 +12,14 @@ import TabRail from "../components/TabRail.svelte";
 import * as requests from "../lib/space-requests.svelte";
 
 const switched = vi.hoisted((): string[] => []);
+const openTab = vi.hoisted(() => vi.fn());
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const ok = async () => ({ accepted: true, operation_id: null });
   return mockBindings({
     tabsBootstrap: async () => {},
+    tabsOpen: openTab.mockImplementation(ok),
     sidebarSetHidden: async () => {},
     sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
@@ -33,6 +35,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 afterEach(() => {
+  openTab.mockClear();
   switched.length = 0;
   sidebar.setMode("default");
   tabs.dispose();
@@ -70,6 +73,19 @@ test("the spaces button leads the rail and the new tab button follows the last t
   const rows = [...screen.container.querySelectorAll(".rail-list > li")];
   expect(rows.at(-1)!.querySelector(".rail-new")).not.toBeNull();
   expect(rows).toHaveLength(2);
+});
+
+test("middle-click opens a tab below the compact rail without activating its controls", async () => {
+  const screen = await rail();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
+  const background = screen.container.querySelector<HTMLElement>(".rail-scroller")!;
+  await userEvent.click(background, {
+    button: "middle",
+    position: { x: 24, y: background.clientHeight - 20 },
+  });
+  expect(openTab).toHaveBeenCalledOnce();
+  await userEvent.click(screen.getByRole("button", { name: "New tab" }), { button: "middle" });
+  expect(openTab).toHaveBeenCalledOnce();
 });
 
 test("the spaces button opens a stack beside the rail and switching happens there", async () => {

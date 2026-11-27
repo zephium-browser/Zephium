@@ -16,7 +16,7 @@
   import * as m from "$shared/i18n/messages";
   import Icon from "$shared/ui/Icon";
   import { WORDMARK } from "$shared/lib/wordmark";
-  import { placeSky, SCENES, type Scene } from "$shared/sky";
+  import { PICTURE, placeSky, SkyPrint, type Scene } from "$shared/sky";
   import { NEWTAB, PAGE } from "../lib/camera";
   import type { Site } from "../lib/catalog";
   import Mark from "$shared/ui/BrandMark";
@@ -29,6 +29,7 @@
     playing,
     modes = true,
     scene,
+    skyZoom = 1,
     space,
     named = true,
     timed = true,
@@ -45,6 +46,8 @@
     playing: boolean;
     /** The new tab's sky. */
     scene: Scene;
+    /** How far the camera ever closes in on the page. */
+    skyZoom?: number;
     /** The name of the space the tabs are in. */
     space: string;
     /** Whether the new tab's name and its time line show. */
@@ -139,12 +142,17 @@
     <!-- The new tab as it opens: the sky, the field hanging in its notch,
          the name low in the sky and the time under it. -->
     <div class="newtab" data-sky={scene}>
-      <div
-        class="sky"
-        style:background-image={`url("${SCENES[scene]}")`}
-        style:background-size={`${sky.w}px ${sky.h}px`}
-        style:background-position={`${sky.x}px ${sky.y}px`}
-      ></div>
+      <div class="sky">
+        <SkyPrint
+          {scene}
+          width={PAGE.width}
+          height={PAGE.height}
+          {sky}
+          horizon={NEWTAB.horizon}
+          pictureHorizon={PICTURE.horizon}
+          zoom={skyZoom}
+        />
+      </div>
       <div
         class="search"
         style:width={`${NEWTAB.notch.width}px`}
@@ -510,7 +518,6 @@
   .sky {
     position: absolute;
     inset: 0;
-    background-repeat: no-repeat;
   }
 
   .search {
@@ -551,7 +558,7 @@
     color: var(--sky-ink);
     font-size: 9px;
     font-variant-numeric: tabular-nums;
-    text-shadow: 0 1px 10px var(--sky-shadow);
+    text-shadow: 0 1px 10px var(--sky-type-halo);
     transition: opacity 600ms var(--ease-out);
   }
 

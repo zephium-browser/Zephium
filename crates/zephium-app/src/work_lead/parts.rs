@@ -812,6 +812,7 @@ where
         let honesty = objects::Honesty {
             sourced: !proposed.evidence.is_empty(),
             failed: Vec::new(),
+            unread: false,
         };
         if objects::honest(&proposed.data, &honesty).is_err() {
             proposed.data = objects::mend(&proposed.data, &honesty)?.0;
@@ -1059,15 +1060,12 @@ where
                     .as_ref()
                     .and_then(|service| service.host.as_deref()),
             );
-            if !pages.is_empty() {
-                brief.push_str("Results pages with the search already in them, the part's own site first; browse the first as start, its goal to read the results shown as records (open an item only for a field the list lacks). If it will not load, use the next one before any form:\n");
-                for (name, url) in pages {
-                    // Built by Rust from a fixed template on a known store,
-                    // not an address the model wrote.
-                    self.run.allow_url(&url);
-                    brief.push_str(&format!("- {name}: {url}\n"));
-                }
+            for (_, url) in &pages {
+                // Built by Rust from a fixed template on a known store, not
+                // an address the model wrote.
+                self.run.allow_url(url);
             }
+            brief.push_str(&results_pages(&pages));
         }
         let folders = self.run.folders();
         if matches!(kit, Kit::Files | Kit::Registered(_)) {
@@ -1116,6 +1114,7 @@ where
             super::lead::compact(
                 &mut messages,
                 super::lead::conversation_budget(&model.entry),
+                super::lead::Used::Behind,
             );
             let request = WorkModelRequest {
                 image_fence: None,
@@ -1187,6 +1186,7 @@ where
             idle = 0;
             let mut results: Vec<Option<WorkModelToolResult>> = vec![None; calls.len()];
             let mut requests = Vec::new();
+            let mut creates = Vec::new();
             let mut finished: Option<(String, String, bool, Option<WorkPartNeedV1>)> = None;
             let mut enough: Option<bool> = None;
             for (index, tool_call) in calls.iter().enumerate() {
@@ -1252,18 +1252,8 @@ where
                             Err(fault) => results[index] = Some(answer(fault, true)),
                         }
                     }
-                    "create" => {
-                        let (content, error) =
-                            self.create(&tool_call.arguments, Some(part), true).await;
-                        if !error {
-                            if let Some(id) =
-                                content.split_whitespace().find_map(WorkArtifactId::parse)
-                            {
-                                placed.push(id);
-                            }
-                        }
-                        results[index] = Some(answer(content, error));
-                    }
+                    // Placed once the reads settle, this turn's and the run's.
+                    "create" => creates.push(index),
                     "finish" => {
                         let summary = text_arg(&tool_call.arguments, "summary").unwrap_or_default();
                         let digest = text_arg(&tool_call.arguments, "digest").unwrap_or_default();
@@ -1352,6 +1342,23 @@ where
                         )
                     }
                 }
+            }
+            if !creates.is_empty() {
+                self.run.reads_begun_settled().await;
+            }
+            for index in creates {
+                let tool_call = &calls[index];
+                let (content, error) = self.create(&tool_call.arguments, Some(part), true).await;
+                if !error {
+                    if let Some(id) = content.split_whitespace().find_map(WorkArtifactId::parse) {
+                        placed.push(id);
+                    }
+                }
+                results[index] = Some(WorkModelToolResult {
+                    call: tool_call.id.clone(),
+                    content,
+                    is_error: error,
+                });
             }
             let results: Vec<WorkModelToolResult> = results
                 .into_iter()
@@ -2584,6 +2591,19 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
 
 /// A goal that acts on the site for the person (a cart, a booking, a form
 /// to send) works in their session: what it changes is theirs.
+/// The brief's results pages: where a browser part starts, and what its
+/// records keep.
+fn results_pages(pages: &[(&str, String)]) -> String {
+    if pages.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("Results pages with the search already in them, the part's own site first; browse the first as start, its goal to read the results shown as records (open an item only for a field the list lacks), each price with the unit the page shows beside it (per night, monthly, total). If it will not load, use the next one before any form:\n");
+    for (name, url) in pages {
+        text.push_str(&format!("- {name}: {url}\n"));
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2689,6 +2709,29 @@ mod tests {
             .columns
             .iter()
             .all(|c| c.required == (c.name == "url")));
+    }
+
+    #[test]
+    fn a_results_page_brief_keeps_each_price_with_its_unit() {
+        assert!(results_pages(&[]).is_empty());
+        let search = super::super::recipes::SiteSearch {
+            place: Some("San Francisco".into()),
+            checkin: Some("2027-01-05".into()),
+            checkout: Some("2027-03-20".into()),
+            adults: Some(1),
+            ..Default::default()
+        };
+        let pages = super::super::recipes::pages(&search, Some("airbnb.com"));
+        assert!(pages[0].1.contains("monthly_stay"), "{pages:?}");
+        let brief = results_pages(&pages);
+        assert!(
+            brief.contains("each price with the unit the page shows"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains(&format!("- Airbnb: {}", pages[0].1)),
+            "{brief}"
+        );
     }
 
     #[test]
@@ -3040,7 +3083,7 @@ mod tests {
     }
 
     #[test]
-    fn a_site_operator_goes_last_so_the_search_is_sent() {
+    fn a_site_operator_is_preserved_in_search_at_either_position() {
         assert_eq!(
             operator_last("site:allegro.pl/oferta LEGO 42115 nowy"),
             "LEGO 42115 nowy site:allegro.pl/oferta"
@@ -3049,12 +3092,21 @@ mod tests {
             operator_last("LEGO 42115 site:x-kom.pl"),
             "LEGO 42115 site:x-kom.pl"
         );
-        assert!(zephium_core::search::SearchEngine::DuckDuckGo
-            .search("site:x-kom.pl LEGO 42115")
-            .is_none());
-        assert!(zephium_core::search::SearchEngine::DuckDuckGo
-            .search(&operator_last("site:x-kom.pl LEGO 42115"))
-            .is_some());
+        for query in [
+            "site:x-kom.pl LEGO 42115".to_owned(),
+            operator_last("site:x-kom.pl LEGO 42115"),
+        ] {
+            let url = zephium_core::search::SearchEngine::DuckDuckGo
+                .search(&query)
+                .expect("site operator is valid at either position");
+            assert_eq!(url.host_str(), Some("duckduckgo.com"));
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(name, _)| name == "q")
+                    .map(|(_, value)| value.into_owned()),
+                Some(query),
+            );
+        }
     }
 
     #[test]

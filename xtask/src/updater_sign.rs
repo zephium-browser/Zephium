@@ -1,5 +1,5 @@
-//! Release-only Windows updater signing. Secrets are accepted through the
-//! existing Tauri environment contract and never put on a command line.
+//! Release asset verification and Windows updater signing. Secrets are accepted
+//! through the existing Tauri environment contract, never on a command line.
 
 use base64::Engine as _;
 use minisign::{PublicKeyBox, SecretKeyBox};
@@ -9,6 +9,132 @@ use std::io::Write;
 use std::path::Path;
 
 const TARGET: &str = "windows-x86_64-nsis";
+
+pub(crate) fn check_release_assets(arguments: &[String]) -> Result<(), &'static str> {
+    let [directory, tag, repository] = arguments else {
+        return Err("usage: cargo xtask check-release-assets <directory> <tag> <owner/repo>");
+    };
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/tauri.conf.json"))
+            .map_err(|_| "cannot read the embedded updater public key")?,
+    )
+    .map_err(|_| "invalid application configuration")?;
+    let public = config
+        .pointer("/plugins/updater/pubkey")
+        .and_then(|key| key.as_str())
+        .ok_or("the embedded updater public key is missing")?;
+    check_assets(Path::new(directory), tag, repository, public)
+}
+
+fn check_assets(
+    directory: &Path,
+    tag: &str,
+    repository: &str,
+    public: &str,
+) -> Result<(), &'static str> {
+    const MAC: &str = "Zephium-macOS-arm64.app.tar.gz";
+    const WINDOWS: &str = "Zephium-Windows-x64-setup.exe";
+    let expected = std::collections::BTreeSet::from([
+        "SHA256SUMS".to_owned(),
+        "latest.json".to_owned(),
+        "Zephium-macOS-arm64.dmg".to_owned(),
+        MAC.to_owned(),
+        format!("{MAC}.sig"),
+        WINDOWS.to_owned(),
+        format!("{WINDOWS}.sig"),
+    ]);
+    let mut actual = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(directory).map_err(|_| "cannot read release assets")? {
+        let entry = entry.map_err(|_| "cannot read release asset")?;
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return Err("release assets must be regular files");
+        }
+        actual.insert(
+            entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "invalid asset name")?,
+        );
+    }
+    if actual != expected {
+        return Err("incomplete or unexpected release asset set");
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(directory.join("latest.json")).map_err(|_| "cannot read latest.json")?,
+    )
+    .map_err(|_| "invalid latest.json")?;
+    let version = tag.strip_prefix('v').ok_or("invalid release tag")?;
+    if manifest.get("version").and_then(|value| value.as_str()) != Some(version) {
+        return Err("latest.json version does not match the tag");
+    }
+    if let Some(date) = manifest.get("pub_date").filter(|date| !date.is_null()) {
+        let date = date.as_str().ok_or("invalid latest.json pub_date")?;
+        time::OffsetDateTime::parse(date, &time::format_description::well_known::Rfc3339)
+            .map_err(|_| "invalid latest.json pub_date")?;
+    }
+    let platforms = manifest
+        .get("platforms")
+        .and_then(|value| value.as_object())
+        .ok_or("latest.json platforms are missing")?;
+    let base = format!("https://github.com/{repository}/releases/download/{tag}/");
+    for (platform, asset) in [
+        ("darwin-aarch64", MAC),
+        ("darwin-aarch64-app", MAC),
+        ("windows-x86_64", WINDOWS),
+        ("windows-x86_64-nsis", WINDOWS),
+    ] {
+        let entry = platforms
+            .get(platform)
+            .ok_or("required updater platform is missing")?;
+        if entry.get("url").and_then(|url| url.as_str()) != Some(format!("{base}{asset}").as_str())
+        {
+            return Err("updater URL does not match this tag's platform asset");
+        }
+        let detached = std::fs::read_to_string(directory.join(format!("{asset}.sig")))
+            .map_err(|_| "cannot read detached updater signature")?;
+        if entry
+            .get("signature")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            != Some(detached.trim())
+        {
+            return Err("manifest and detached updater signatures differ");
+        }
+    }
+    let decode = |value: &str| {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value.trim())
+            .map_err(|_| "invalid updater signature or key encoding")?;
+        String::from_utf8(bytes).map_err(|_| "invalid updater signature or key encoding")
+    };
+    let public = PublicKeyBox::from_string(&decode(public)?)
+        .and_then(|key| key.into_public_key())
+        .map_err(|_| "invalid updater public key")?;
+    for entry in platforms.values() {
+        let asset = entry
+            .get("url")
+            .and_then(|url| url.as_str())
+            .and_then(|url| url.strip_prefix(&base))
+            .filter(|asset| [MAC, WINDOWS].contains(asset))
+            .ok_or("updater URL is not an updater asset of this tag")?;
+        let signature = entry
+            .get("signature")
+            .and_then(|value| value.as_str())
+            .ok_or("updater signature is missing")?;
+        let signature = minisign::SignatureBox::from_string(&decode(signature)?)
+            .map_err(|_| "invalid updater signature")?;
+        minisign::verify(
+            &public,
+            &signature,
+            File::open(directory.join(asset)).map_err(|_| "cannot open updater asset")?,
+            true,
+            false,
+            false,
+        )
+        .map_err(|_| "updater artifact signature verification failed")?;
+    }
+    Ok(())
+}
 
 pub(crate) fn run(arguments: &[String]) -> Result<(), &'static str> {
     let [installer, version] = arguments else {
@@ -106,6 +232,119 @@ fn sign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_manifest_requires_complete_assets_and_verified_platforms() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = directory.path();
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let encode = |value: String| base64::engine::general_purpose::STANDARD.encode(value);
+        let secret = encode(pair.sk.to_box(None).unwrap().to_string());
+        let public = encode(pair.pk.to_box().unwrap().to_string());
+        let mut platforms = serde_json::Map::new();
+        for (asset, keys) in [
+            (
+                "Zephium-macOS-arm64.app.tar.gz",
+                ["darwin-aarch64", "darwin-aarch64-app"],
+            ),
+            (
+                "Zephium-Windows-x64-setup.exe",
+                ["windows-x86_64", "windows-x86_64-nsis"],
+            ),
+        ] {
+            let path = directory.join(asset);
+            std::fs::write(&path, format!("harmless fixture: {asset}")).unwrap();
+            let signature = sign(&path, "1.2.4", &secret, String::new(), &public).unwrap();
+            std::fs::write(directory.join(format!("{asset}.sig")), &signature).unwrap();
+            for key in keys {
+                platforms.insert(key.into(), serde_json::json!({
+                    "url": format!("https://github.com/example/repo/releases/download/v1.2.4/{asset}"),
+                    "signature": signature,
+                }));
+            }
+        }
+        let good = serde_json::json!({ "version": "1.2.4", "platforms": platforms });
+        let check = |manifest: &serde_json::Value| {
+            std::fs::write(directory.join("latest.json"), manifest.to_string()).unwrap();
+            check_assets(directory, "v1.2.4", "example/repo", &public)
+        };
+        std::fs::write(directory.join("SHA256SUMS"), "fixture checksums").unwrap();
+        std::fs::write(directory.join("Zephium-macOS-arm64.dmg"), "fixture DMG").unwrap();
+        assert_eq!(check(&good), Ok(()));
+        for date in [
+            serde_json::Value::Null,
+            "2026-11-07T12:34:56Z".into(),
+            "2026-11-07T13:34:56+01:00".into(),
+        ] {
+            let mut dated = good.clone();
+            dated["pub_date"] = date;
+            assert_eq!(check(&dated), Ok(()));
+        }
+        for date in [
+            "not a date".into(),
+            "2026-02-30T12:34:56Z".into(),
+            "2026-11-07".into(),
+            123.into(),
+        ] {
+            let mut bad = good.clone();
+            bad["pub_date"] = date;
+            assert_eq!(check(&bad), Err("invalid latest.json pub_date"));
+        }
+        let extra = directory.join("unexpected.exe");
+        std::fs::write(&extra, "unexpected asset").unwrap();
+        assert_eq!(
+            check(&good),
+            Err("incomplete or unexpected release asset set")
+        );
+        std::fs::remove_file(extra).unwrap();
+        for key in platforms.keys() {
+            let mut bad = good.clone();
+            bad["platforms"].as_object_mut().unwrap().remove(key);
+            assert!(check(&bad).is_err(), "missing platform {key}");
+            for url in [
+                "https://github.com/example/repo/releases/download/v1.2.3/Zephium-Windows-x64-setup.exe",
+                "https://example.com/Zephium-Windows-x64-setup.exe",
+                "https://github.com/example/repo/releases/download/v1.2.4/../Zephium-Windows-x64-setup.exe",
+            ] {
+                let mut bad = good.clone();
+                bad["platforms"][key]["url"] = url.into();
+                assert!(check(&bad).is_err(), "wrong URL for {key}");
+            }
+            let mut bad = good.clone();
+            bad["platforms"][key]["signature"] = "invalid signature".into();
+            assert!(check(&bad).is_err(), "bad signature for {key}");
+        }
+        let mut bad = good.clone();
+        bad["version"] = "1.2.3".into();
+        assert!(check(&bad).is_err(), "wrong version");
+        assert_eq!(check(&good), Ok(()));
+        for asset in std::fs::read_dir(directory).unwrap() {
+            let asset = asset.unwrap().path();
+            let bytes = std::fs::read(&asset).unwrap();
+            std::fs::remove_file(&asset).unwrap();
+            assert!(
+                check_assets(directory, "v1.2.4", "example/repo", &public).is_err(),
+                "missing {asset:?}"
+            );
+            std::fs::write(&asset, bytes).unwrap();
+        }
+        // Keep each original signature while changing only its downloaded bytes.
+        for asset in [
+            "Zephium-macOS-arm64.app.tar.gz",
+            "Zephium-Windows-x64-setup.exe",
+        ] {
+            let path = directory.join(asset);
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, "tampered").unwrap();
+            assert_eq!(
+                check(&good),
+                Err("updater artifact signature verification failed"),
+                "tampered {asset}"
+            );
+            std::fs::write(path, bytes).unwrap();
+            assert_eq!(check(&good), Ok(()));
+        }
+    }
 
     #[test]
     fn signing_helper_binds_exact_version_and_platform_and_verifies_the_key() {

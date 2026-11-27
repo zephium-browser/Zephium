@@ -50,6 +50,10 @@
   aria-labelledby={`${uid}-title`}
   aria-describedby={description ? `${uid}-body` : undefined}
   onclose={closed}
+  oncancel={(event) => {
+    event.preventDefault();
+    open = false;
+  }}
   onclick={(event) => {
     if (event.target === dialog) open = false;
   }}

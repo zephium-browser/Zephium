@@ -44,7 +44,7 @@ const MAX_LIVE: usize = 12;
 /// Addresses a conversation may open, from its reads and the person's words.
 const MAX_LINKS: usize = 4096;
 /// Conversations the history list shows.
-const HISTORY: u32 = 100;
+const HISTORY: u32 = zephium_core::ports::store::MAX_CHATS as u32;
 /// Picked elements one tab keeps attached.
 const MAX_PICKS: usize = 3;
 
@@ -145,6 +145,10 @@ struct PendingStyle {
 struct ReplyData {
     book: CitationBook,
     reads: Vec<ReadRecord>,
+    /// Tab/site pairs disclosed directly or inherited through conversation history.
+    read_sites: std::collections::BTreeSet<(String, String)>,
+    /// Replayed history whose source sites are no longer available in memory.
+    unknown_read_sites: bool,
     /// `t1`, `t2`… in the order the reply met the tabs.
     handles: Vec<String>,
     outlines: HashMap<usize, Outline>,
@@ -258,10 +262,12 @@ enum Admitted {
     },
     Selection {
         tab: String,
+        site: String,
         text: String,
     },
     Element {
         tab: String,
+        site: String,
         host: String,
         label: String,
         pick: Pick,
@@ -579,6 +585,7 @@ impl PageAssist {
                 (
                     Admitted::Selection {
                         tab: tab.clone(),
+                        site: site_of(Some(&url)).ok_or(PageAssistFaultV1::NotWeb)?,
                         text,
                     },
                     PageAssistAttachmentV1::Selection { tab, excerpt, host },
@@ -604,6 +611,7 @@ impl PageAssist {
                 (
                     Admitted::Element {
                         tab: tab.clone(),
+                        site: site_of(Some(&url)).ok_or(PageAssistFaultV1::NotWeb)?,
                         host: host.clone(),
                         label: label.clone(),
                         pick: picked,
@@ -1044,14 +1052,26 @@ impl PageAssist {
         }
     }
 
-    /// The panel closed for `space`: its marks and picks leave the pages.
+    /// The panel closed for `space`: its reply stops and its marks and picks
+    /// leave the pages.
     pub fn close(&self, space: &str) {
+        self.stop(space);
         let current = self.state().current.get(space).cloned();
         if let Some(conversation) = current {
             self.release_marks(&conversation);
         }
-        let picks: Vec<(String, u64)> = self.state().picks.drain().map(|(key, _)| key).collect();
+        let picks: Vec<(String, u64)> = self.state().picks.keys().cloned().collect();
+        let picks: Vec<(String, u64)> = picks
+            .into_iter()
+            .filter(|(tab, _)| {
+                self.ports()
+                    .page
+                    .facts(tab)
+                    .is_some_and(|facts| facts.space.as_deref() == Some(space))
+            })
+            .collect();
         for (tab, pick) in picks {
+            self.state().picks.remove(&(tab.clone(), pick));
             self.ports().page.pick_cancel(&tab);
             self.ports().page.pick_clear(&tab, pick);
         }

@@ -1,6 +1,7 @@
 import { commands, type VoiceEngineV1, type VoiceStatusV1 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import * as m from "$shared/i18n/messages";
+import { listenAll } from "$shared/lib/lifecycle";
 import { observe } from "$shared/lib/observe";
 import { IS_MAC } from "$shared/platform";
 
@@ -40,22 +41,38 @@ export class VoiceSettings {
   busy = $state(false);
   private stops: (() => void)[] = [];
   private active = false;
+  private generation = 0;
   private sequence = 0;
   private lifetime = new AbortController();
 
   async start() {
     if (this.active) return;
     this.active = true;
+    const generation = ++this.generation;
     this.lifetime = new AbortController();
-    const stops = await Promise.all([
-      events.workModelsChanged.listen(() => void this.read()),
-      events.accountChanged.listen(() => void this.read()),
-    ]);
-    if (!this.active) {
+    let ready = false;
+    const refresh = () => {
+      if (ready && this.active && generation === this.generation) void this.read();
+    };
+    let stops: (() => void)[];
+    try {
+      stops = await listenAll([
+        events.workModelsChanged.listen(refresh),
+        events.accountChanged.listen(refresh),
+      ]);
+    } catch {
+      if (generation === this.generation) {
+        this.active = false;
+        this.unavailable = true;
+      }
+      return;
+    }
+    if (!this.active || generation !== this.generation) {
       for (const stop of stops) stop();
       return;
     }
     this.stops = stops;
+    ready = true;
     await this.read();
   }
 
@@ -89,6 +106,7 @@ export class VoiceSettings {
 
   dispose() {
     this.active = false;
+    this.generation++;
     this.lifetime.abort();
     for (const stop of this.stops) stop();
     this.stops = [];

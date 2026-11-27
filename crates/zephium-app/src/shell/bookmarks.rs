@@ -262,7 +262,7 @@ impl Shell {
             return;
         }
         if let ImportWork::Essentials(sites) = work {
-            done.finish(Some(self.keep_imported_sites(space, sites)));
+            done.finish(Some((self.keep_imported_sites(space, sites), false)));
             return;
         }
         if self.bookmarks.imports.len() >= MAX_PENDING_BOOKMARK_CALLS {
@@ -330,7 +330,7 @@ impl Shell {
         }
     }
 
-    pub(super) fn on_import_read(&mut self, token: u64, added: Option<u32>) {
+    pub(super) fn on_import_read(&mut self, token: u64, added: Option<(u32, bool)>) {
         if let Some(done) = self.bookmarks.imports.remove(&token) {
             done.finish(added);
         }

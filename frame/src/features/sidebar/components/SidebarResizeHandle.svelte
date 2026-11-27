@@ -1,12 +1,13 @@
 <script lang="ts">
   import {
     applyDragWidth,
+    isHidden,
     claimSidebarResizeOwner,
-    previewDragWidth,
     sidebarResizeRevision,
     beginSidebarResize,
     finishSidebarResize,
     cancelSidebarResize,
+    previewDragWidth,
     sidebarResizeActive,
     resolveDragWidth,
     COMPACT_WIDTH,
@@ -14,6 +15,7 @@
     MIN_EXPANDED_WIDTH,
   } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
+  import { IS_MAC } from "$shared/platform";
   import { onDestroy } from "svelte";
 
   let { width, disabled = false }: { width: number; disabled?: boolean } = $props();
@@ -23,6 +25,7 @@
   let guide = $state<number | null>(null);
   let startX = 0;
   let startWidth = $state(0);
+  let liveColumn = $state(false);
   let frame = 0;
   let pending = 0;
   let generation = 0;
@@ -65,6 +68,7 @@
     const value = width;
     const enabled = !disabled;
     configuredRevision = sidebarResizeRevision();
+    if (enabled && sidebarResizeActive()) return;
     queueConfiguration({
       width: value,
       enabled,
@@ -83,31 +87,38 @@
     document.body.style.cursor = previousCursor;
   }
   function handlePointerDown(event: PointerEvent) {
-    if (disabled || nativeCapture || event.button !== 0) return;
+    if (disabled || (nativeCapture && !isHidden()) || event.button !== 0) return;
     const target = event.currentTarget;
     if (!(target instanceof HTMLElement)) return;
     event.preventDefault();
     resizing = true;
     startX = event.clientX;
     startWidth = width;
+    liveColumn = IS_MAC && !isHidden() && width >= MIN_EXPANDED_WIDTH;
     pending = width;
     target.focus();
     target.setPointerCapture(event.pointerId);
     // Held for the whole drag, over tab rows and pages alike.
     previousCursor = document.body.style.cursor;
     document.body.style.cursor = "col-resize";
-    beginSidebarResize();
+    beginSidebarResize(liveColumn);
     updateGuide(width);
   }
   function updateGuide(value: number) {
-    pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
-    // Preview where release lands, including the snap to the rail.
-    const landing = resolveDragWidth(pending);
-    pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
-    // An expanded column follows the pointer and stops at its narrowest.
-    if (startWidth >= MIN_EXPANDED_WIDTH) {
-      pending = Math.round(Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
-      previewDragWidth(pending);
+    if (isHidden()) {
+      pending = Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      if (IS_MAC) {
+        applyDragWidth(pending);
+        return;
+      }
+      // On Windows the card keeps its width while the guide moves; release
+      // resizes it once, as the column does, and never snaps it to the rail.
+    } else {
+      pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      // Preview where release lands, including the snap to the rail.
+      const landing = resolveDragWidth(pending);
+      pending = landing.mode === "hidden" ? COMPACT_WIDTH : landing.expanded;
+      if (liveColumn) previewDragWidth(value);
     }
     guide = pending;
     if (frame !== 0) return;
@@ -132,9 +143,9 @@
     const target = event.currentTarget;
     if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId))
       target.releasePointerCapture(event.pointerId);
-    const landing = pending;
+    const requested = startWidth + event.clientX - startX;
+    const landing = liveColumn && Number.isFinite(requested) ? requested : pending;
     clearGuide();
-    // The guide showed where release lands, snap and bounds included.
     finishSidebarResize(landing);
   }
   function cancelPointerResize(event?: PointerEvent) {
@@ -171,7 +182,7 @@
   onDestroy(() => {
     generation++;
     clearGuide();
-    if (resizing) cancelSidebarResize();
+    if (resizing || configuredRevision === sidebarResizeRevision()) cancelSidebarResize();
     // The latest revision, not the one this handle last configured: opening a
     // tool advances it as the handle leaves, and native refuses a stale one,
     // which left the guide live at the old edge, inside the tool's panel.
@@ -179,13 +190,20 @@
   });
 </script>
 
-<svelte:window onblur={() => cancelPointerResize()} onresize={() => cancelPointerResize()} />
+<svelte:window
+  onblur={() => cancelPointerResize()}
+  onresize={() => {
+    // Following the column changes the chrome WebView's own viewport.
+    if (!liveColumn) cancelPointerResize();
+  }}
+/>
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div
   role="separator"
   aria-label="Resize sidebar"
   aria-orientation="vertical"
-  aria-valuemin={COMPACT_WIDTH}
+  data-tauri-drag-region="false"
+  aria-valuemin={isHidden() ? MIN_EXPANDED_WIDTH : COMPACT_WIDTH}
   aria-valuemax={MAX_EXPANDED_WIDTH}
   aria-valuenow={width}
   aria-disabled={disabled}
@@ -193,9 +211,14 @@
   class={[
     // Mostly in the gap beside the column, as the native target on macOS,
     // so the tab list's edge and scrollbar stay usable.
-    "group absolute inset-y-0 -right-1.5 z-20 w-2 cursor-col-resize touch-none outline-none",
-    // The native control owns the pointer; the tab list's edge stays usable.
-    nativeCapture && "pointer-events-none",
+    "group absolute inset-y-0 z-20 w-2 cursor-col-resize touch-none outline-none",
+    // On the hidden card it stays over the card's own padding, which is all
+    // the card there is to hold: past its edge is the page.
+    isHidden() ? "right-0" : "-right-1.5",
+    // The native control owns the pointer beside the column, so the tab
+    // list's edge stays usable. The card's padding stays held here as well:
+    // a press that native missed must never fall through to dragging the window.
+    nativeCapture && !isHidden() && "pointer-events-none",
   ]}
   onpointerdown={handlePointerDown}
   onpointermove={handlePointerMove}
@@ -208,7 +231,7 @@
       aria-hidden="true"
       class={[
         "absolute top-1/2 right-1.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
-        !nativeCapture && "group-hover:bg-text-muted",
+        (!nativeCapture || isHidden()) && "group-hover:bg-text-muted",
       ]}
     ></span>{/if}
 </div>
@@ -217,6 +240,6 @@
   <span
     aria-hidden="true"
     class="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-accent"
-    style:left={`${Math.min(startWidth - 2, guide - 2)}px`}
+    style:left={`${(liveColumn ? guide : Math.min(startWidth, guide)) - 2}px`}
   ></span>
 {/if}

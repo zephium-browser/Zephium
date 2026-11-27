@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { acceptPanelState } from "../lib/panel-model";
 import type { PanelState } from "$shared/ipc/bindings";
 const snapshot = (revision: string): PanelState => ({
+  switcher: null,
   window_id: "window",
   revision,
   session_id: revision,
@@ -12,6 +13,7 @@ const snapshot = (revision: string): PanelState => ({
   error: false,
   seed: null,
   seed_tab: null,
+  mini: false,
   corner_radius: 20,
 });
 describe("panel presentation and search identity", () => {

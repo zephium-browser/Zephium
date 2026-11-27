@@ -123,6 +123,7 @@ impl<T> EventHandler for EventLoopHandler<T> {
 #[derive(Default)]
 struct Handler {
   ready: AtomicBool,
+  termination_pending: AtomicBool,
   in_callback: AtomicBool,
   control_flow: Mutex<ControlFlow>,
   control_flow_prev: Mutex<ControlFlow>,
@@ -269,11 +270,40 @@ impl AppState {
     }));
   }
 
+  pub fn defer_system_termination(deadline: Instant) {
+    if HANDLER.termination_pending.swap(true, Ordering::AcqRel) {
+      return;
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if let Ok(when) = dispatch2::DispatchTime::try_from(remaining) {
+      let _ = dispatch2::DispatchQueue::main().after(when, || {
+        if HANDLER.termination_pending.load(Ordering::Acquire) && !HANDLER.should_exit() {
+          *HANDLER.control_flow.lock().unwrap() = ControlFlow::ExitWithCode(1);
+          unsafe {
+            let app = NSApp(MainThreadMarker::new().unwrap());
+            let () = msg_send![&app, stop: nil];
+            post_dummy_event(&app);
+          }
+        }
+      });
+    }
+  }
+
   pub fn exit() -> i32 {
+    if HANDLER.callback.lock().unwrap().is_none() {
+      return match HANDLER.get_old_and_new_control_flow().1 {
+        ControlFlow::ExitWithCode(code) => code,
+        _ => 0,
+      };
+    }
     HANDLER.set_in_callback(true);
     HANDLER.handle_nonuser_event(EventWrapper::StaticEvent(Event::LoopDestroyed));
     HANDLER.set_in_callback(false);
     HANDLER.callback.lock().unwrap().take();
+    if HANDLER.termination_pending.swap(false, Ordering::AcqRel) {
+      let app = NSApp(MainThreadMarker::new().unwrap());
+      app.replyToApplicationShouldTerminate(true);
+    }
     if let ControlFlow::ExitWithCode(code) = HANDLER.get_old_and_new_control_flow().1 {
       code
     } else {

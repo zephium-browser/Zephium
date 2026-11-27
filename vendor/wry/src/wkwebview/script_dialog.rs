@@ -8,7 +8,7 @@
 //! sure?" flow on the web.
 
 use std::{
-  cell::{Cell, RefCell},
+  cell::Cell,
   rc::Rc,
   time::{Duration, Instant},
 };
@@ -21,7 +21,7 @@ use objc2_app_kit::{
 use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize, NSString};
 use objc2_web_kit::{WKFrameInfo, WKWebView};
 
-use crate::native_bounds::{bounded_nsstring, NativeStringLimit, PAGE_TITLE_LIMIT, PAGE_URL_LIMIT};
+use crate::native_bounds::{bounded_nsstring, NativeStringLimit, PAGE_TITLE_LIMIT};
 
 const MAX_MESSAGE_CHARS: usize = 1024;
 const DIALOG_TEXT_LIMIT: NativeStringLimit = NativeStringLimit {
@@ -45,11 +45,33 @@ pub(crate) enum Answer {
 #[derive(Default)]
 pub(crate) struct ScriptDialogs {
   last: Cell<Option<Instant>>,
-  /// The document a person silenced. It stays silent until it navigates.
-  silenced: Rc<RefCell<Option<String>>>,
+  document: Rc<Cell<u64>>,
+  /// A committed-document generation, unaffected by URL/history changes.
+  silenced: Rc<Cell<Option<u64>>>,
+}
+
+fn silence_document(current: &Cell<u64>, silenced: &Cell<Option<u64>>, shown: u64) {
+  // A sheet may finish after its page navigated. It must neither silence nor
+  // erase an already silenced replacement document.
+  if current.get() == shown {
+    silenced.set(Some(shown));
+  }
 }
 
 impl ScriptDialogs {
+  pub(crate) fn document_committed(&self) {
+    self.last.set(None);
+    match self.document.get().checked_add(1) {
+      Some(next) => self.document.set(next),
+      // Exhaustion must not let a new document reuse a silenced identity.
+      None => self.silenced.set(Some(self.document.get())),
+    }
+  }
+
+  fn is_silenced(&self) -> bool {
+    self.silenced.get() == Some(self.document.get())
+  }
+
   pub(crate) fn present(
     &self,
     webview: &WKWebView,
@@ -64,10 +86,8 @@ impl ScriptDialogs {
     let Some(message) = dialog_text(message) else {
       return done(Answer::Dismissed);
     };
-    let page = unsafe { webview.URL() }
-      .and_then(|url| url.absoluteString())
-      .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT));
-    if page.is_some() && *self.silenced.borrow() == page {
+    let document = self.document.get();
+    if self.is_silenced() {
       return done(Answer::Dismissed);
     }
     // A hidden tab cannot be asked; its page gets the answer of a person
@@ -114,6 +134,7 @@ impl ScriptDialogs {
 
     let done = Cell::new(Some(done));
     let silenced = self.silenced.clone();
+    let current_document = self.document.clone();
     let shown = alert.clone();
     let handler = RcBlock::new(move |response: NSModalResponse| {
       let Some(done) = done.take() else {
@@ -124,7 +145,7 @@ impl ScriptDialogs {
           .suppressionButton()
           .is_some_and(|button| button.state() == NSControlStateValueOn)
       {
-        *silenced.borrow_mut() = page.clone();
+        silence_document(&current_document, &silenced, document);
       }
       done(if response == NSAlertFirstButtonReturn {
         match &field {
@@ -170,6 +191,28 @@ pub(crate) fn dialog_text(value: &NSString) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn silence_follows_the_committed_document_and_ignores_stale_sheet_completion() {
+    let dialogs = ScriptDialogs::default();
+    dialogs.document_committed();
+    let first = dialogs.document.get();
+    silence_document(&dialogs.document, &dialogs.silenced, first);
+    assert!(dialogs.is_silenced());
+    // Hash and pushState changes invoke no main-document commit and cannot
+    // alter the suppression identity.
+    assert!(dialogs.is_silenced());
+    dialogs.document_committed();
+    assert!(!dialogs.is_silenced());
+    silence_document(&dialogs.document, &dialogs.silenced, first);
+    assert!(!dialogs.is_silenced());
+    silence_document(&dialogs.document, &dialogs.silenced, dialogs.document.get());
+    assert!(dialogs.is_silenced());
+    // Completing the old page's sheet after the replacement was silenced
+    // must not overwrite that newer suppression with the old generation.
+    silence_document(&dialogs.document, &dialogs.silenced, first);
+    assert!(dialogs.is_silenced());
+  }
 
   #[test]
   fn native_dialog_inputs_are_bounded_before_copying() {

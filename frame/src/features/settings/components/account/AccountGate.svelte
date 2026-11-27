@@ -1,13 +1,6 @@
 <script lang="ts">
-  import { untrack, type Snippet } from "svelte";
-  import {
-    decode,
-    decodedFor,
-    placeSky,
-    scene as skyScene,
-    skyImage,
-    type Scene,
-  } from "$shared/sky";
+  import type { Snippet } from "svelte";
+  import { PICTURE, placeSky, scene as skyScene, seen, SkyPrint, type Scene } from "$shared/sky";
 
   let { children, foot }: { children: Snippet; foot?: Snippet } = $props();
 
@@ -18,46 +11,11 @@
   const scene = $derived(skyScene());
   // The horizon sits low enough that the sheet stands over open sky and the
   // clouds have dissolved into the page by its foot.
-  const sky = $derived(placeSky(width, Math.round(height * 0.72)));
-  const picture = $derived(skyImage(scene, sky.w));
-  const measured = $derived(width > 0);
-
-  // Only a decoded picture is ever drawn: the page starts from one this
-  // session already decoded, and a resize or a new scene keeps the last one
-  // until its replacement has decoded. Nothing is decoded before the page is
-  // measured.
-  const held = (scene: Scene, width: number) => {
-    const ready = decodedFor(scene, width);
-    return ready && { scene, url: ready.url };
-  };
-  let shown = $state<{ scene: Scene; url: string } | null>(
-    held(
-      untrack(() => scene),
-      0,
-    ),
-  );
-  let failed = $state<Scene | null>(null);
-  $effect(() => {
-    if (!measured) return;
-    const wanted = { scene, url: picture };
-    const ready = decodedFor(
-      wanted.scene,
-      untrack(() => sky.w),
-    );
-    if (ready) shown = { scene: wanted.scene, url: ready.url };
-    if (ready?.covers) return;
-    let live = true;
-    void decode(wanted.scene, wanted.url).then(
-      () => {
-        if (live) shown = wanted;
-      },
-      () => {
-        if (live) failed = wanted.scene;
-      },
-    );
-    return () => {
-      live = false;
-    };
+  const horizon = $derived(Math.round(height * 0.72));
+  const sky = $derived(placeSky(width, horizon));
+  let shown = $state<Scene | null>(null);
+  $effect.pre(() => {
+    if (shown === null && seen(scene)) shown = scene;
   });
 </script>
 
@@ -69,18 +27,21 @@
 <div
   class="account-gate"
   data-sky={scene}
-  data-ready={shown?.scene === scene}
-  data-failed={failed === scene}
+  data-ready={shown === scene}
   bind:clientWidth={width}
   bind:clientHeight={height}
 >
-  <div
-    class="sky"
-    aria-hidden="true"
-    style:background-image={shown ? `url("${shown.url}")` : null}
-    style:background-size={`${sky.w}px ${sky.h}px`}
-    style:background-position={`${sky.x}px ${sky.y}px`}
-  ></div>
+  <div class="sky" aria-hidden="true">
+    {#if width > 0 && height > 0}<SkyPrint
+        {scene}
+        {width}
+        {height}
+        {sky}
+        {horizon}
+        pictureHorizon={PICTURE.horizon}
+        onready={(printed) => (shown = printed)}
+      />{/if}
+  </div>
   <div class="stage">
     <img
       class="mark"
@@ -129,7 +90,6 @@
   .sky {
     position: absolute;
     inset: 0;
-    background-repeat: no-repeat;
     opacity: 0;
     transition: opacity 700ms var(--ease-out);
   }
@@ -186,7 +146,7 @@
       translate 700ms var(--ease-emphasized);
   }
 
-  .account-gate:is([data-ready="true"], [data-failed="true"]) .mark {
+  .account-gate:is([data-ready="true"]) .mark {
     opacity: 1;
     translate: 0 0;
   }

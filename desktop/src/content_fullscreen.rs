@@ -35,13 +35,13 @@ pub(crate) fn follow(app: &AppHandle, active: bool) {
             *taken = Some(already);
             #[cfg(target_os = "windows")]
             crate::platform::imp::set_caption_suppressed(&window, true);
-            if !already && window.set_fullscreen(true).is_err() {
+            if !already && crate::platform::set_window_fullscreen(&window, true).is_err() {
                 crate::write_diagnostic(format_args!(
                     "fullscreen: the window could not follow its page"
                 ));
             }
         } else if let Some(already) = taken.take() {
-            if !already && window.set_fullscreen(false).is_err() {
+            if !already && crate::platform::set_window_fullscreen(&window, false).is_err() {
                 crate::write_diagnostic(format_args!(
                     "fullscreen: the window could not leave fullscreen"
                 ));

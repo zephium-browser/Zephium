@@ -1,6 +1,5 @@
-//! Native pointer capture for the Svelte sidebar. An expanded column follows
-//! the pointer and stops at its narrowest; released well past that, it hides.
-//! A column at any other width changes shape, which waits for release.
+//! Native pointer feedback for the Svelte sidebar. Cards and expanded columns
+//! follow the pointer, while a guide shows where a column will land.
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ptr::NonNull;
@@ -22,19 +21,17 @@ use objc2_foundation::{
 };
 use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
-use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+use zephium_core::layout::{HIDDEN_CARD_INSET, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
-/// What a drag asks of the column.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Release {
-    /// The column follows the pointer. Nothing is settled until release.
-    Follow(f64),
-    /// The drag ended on this width, travelling for a change of shape.
+pub(super) enum Resize {
+    CardProgress { width: f64, active: bool },
+    ColumnProgress { width: f64, active: bool },
     Land { width: f64, travel: bool },
-    /// The column hides, and comes back at the width the drag started from.
     Hide { width: f64 },
 }
-type Commit = Rc<dyn Fn(Release, u64)>;
+
+type Commit = Rc<dyn Fn(Resize, u64) -> bool>;
 static REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn publish_revision(revision: u64) -> bool {
     revision >= REVISION.fetch_max(revision, Ordering::AcqRel)
@@ -42,15 +39,14 @@ pub(super) fn publish_revision(revision: u64) -> bool {
 fn revision_current(revision: u64) -> bool {
     REVISION.load(Ordering::Acquire) == revision
 }
+// The hot zone overlaps the sidebar by only 2pt and otherwise covers the empty
+// gap before the content, so the tab list's edge and overlay scrollbar stay
+// reachable underneath it.
+const HOT_WIDTH: f64 = 8.0;
 /// The chrome draws the window's gutter before the column, so the column's
 /// edge is this far in from the chrome's own.
 const GUTTER: f64 = 8.0;
-// The hot zone overlaps the sidebar by only 2pt, so the tab list's edge and
-// overlay scrollbar stay reachable underneath it, fills the gap, and reaches a
-// little over the page's edge, where the pointer tends to land.
 const HOT_INSET: f64 = 2.0;
-const HOT_OUTSET: f64 = 6.0;
-const HOT_WIDTH: f64 = HOT_INSET + GUTTER + HOT_OUTSET;
 /// The guide's width, a split guide's.
 const GUIDE_WIDTH: f64 = 4.0;
 const SNAP: f64 = 140.0;
@@ -62,11 +58,52 @@ struct Capture {
     original: f64,
     pending: f64,
     revision: u64,
-    /// An expanded column resizes as it is dragged. Any other shape waits for
-    /// release, since leaving it is a change of shape.
-    live: bool,
-    /// The width the column was last given during the drag.
-    applied: f64,
+    kind: CaptureKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CaptureKind {
+    Card,
+    Column,
+    Guide,
+}
+
+impl CaptureKind {
+    fn new(width: f64, hidden_card: bool) -> Self {
+        if hidden_card {
+            Self::Card
+        } else if width >= MIN_EXPANDED {
+            Self::Column
+        } else {
+            Self::Guide
+        }
+    }
+
+    fn progress(self, width: f64, active: bool) -> Option<Resize> {
+        match self {
+            Self::Card => Some(Resize::CardProgress { width, active }),
+            Self::Column => Some(Resize::ColumnProgress { width, active }),
+            Self::Guide => None,
+        }
+    }
+}
+
+impl Capture {
+    fn release(self, requested: f64) -> Resize {
+        if self.kind == CaptureKind::Column && requested < SNAP {
+            return Resize::Hide {
+                width: self.original,
+            };
+        }
+        Resize::Land {
+            width: if self.kind == CaptureKind::Card {
+                expanded_width(requested)
+            } else {
+                resolved_width(requested)
+            },
+            travel: self.kind == CaptureKind::Guide,
+        }
+    }
 }
 
 struct Observers {
@@ -120,6 +157,7 @@ pub struct Ivars {
     chrome: Weak<WKWebView>,
     width: Cell<f64>,
     enabled: Cell<bool>,
+    hidden_card: Cell<bool>,
     revision: Cell<u64>,
     generation: Cell<u64>,
     capture: Cell<Option<Capture>>,
@@ -162,7 +200,7 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
         #[unsafe(method(mouseEntered:))]
-        fn entered(&self, _event: &NSEvent) { if self.ivars().enabled.get() { self.feedback(self.ivars().width.get(), false); } }
+        fn entered(&self, _event: &NSEvent) { if self.ivars().enabled.get() && !self.ivars().hidden_card.get() { self.feedback(self.ivars().width.get(), false); } }
         #[unsafe(method(mouseExited:))]
         fn exited(&self, _event: &NSEvent) { if self.ivars().capture.get().is_none() { self.cancel(false); } }
         #[unsafe(method(viewDidMoveToWindow))]
@@ -177,9 +215,17 @@ define_class!(
             if !self.ivars().enabled.get() || !revision_current(self.ivars().revision.get()) { return; }
             let Some(window) = self.window() else { return };
             let original = self.ivars().width.get();
-            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get(), live: original >= MIN_EXPANDED, applied: original }));
+            let kind = CaptureKind::new(original, self.ivars().hidden_card.get());
+            let revision = self.ivars().revision.get();
+            let generation = self.ivars().generation.get();
+            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision, kind }));
             if !self.install_observers(window) { self.cancel(false); return; }
-            self.feedback(original, true);
+            if kind != CaptureKind::Card { self.feedback(original, true); }
+            if self.ivars().generation.get() == generation {
+                if let Some(progress) = kind.progress(original, true) {
+                    (self.ivars().commit)(progress, revision);
+                }
+            }
         }
         #[unsafe(method(mouseDragged:))]
         fn dragged(&self, event: &NSEvent) {
@@ -192,17 +238,15 @@ define_class!(
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-            // A live column stops at its narrowest, while the guide goes on to
-            // preview where release will land, including the hide.
-            let column = resolved_width(capture.pending).max(MIN_EXPANDED);
-            let follows = capture.live && (column - capture.applied).abs() >= 0.5;
-            if follows { capture.applied = column; }
             self.ivars().capture.set(Some(capture));
-            self.feedback(resolved_width(capture.pending), true);
-            if follows {
-                self.ivars().width.set(column);
-                self.place();
-                (self.ivars().commit)(Release::Follow(column), capture.revision);
+            if capture.kind != CaptureKind::Card { self.feedback(resolved_width(capture.pending), true); }
+            let width = expanded_width(capture.pending);
+            if self.ivars().generation.get() == generation && width != self.ivars().width.get() {
+                if let Some(progress) = capture.kind.progress(width, true) {
+                    self.ivars().width.set(width);
+                    self.place();
+                    if self.ivars().generation.get() == generation { (self.ivars().commit)(progress, capture.revision); }
+                }
             }
         }
         #[unsafe(method(mouseUp:))]
@@ -211,13 +255,21 @@ define_class!(
             let Some(capture) = self.ivars().capture.get() else { return };
             if !revision_current(capture.revision) { self.cancel(false); return; }
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
-            let width = resolved_width(if requested.is_finite() { requested } else { capture.pending });
+            let requested = if requested.is_finite() { requested } else { capture.pending };
             let generation = self.ivars().generation.get();
-            self.feedback(width, true);
+            if capture.kind != CaptureKind::Card { self.feedback(resolved_width(requested), true); }
             if self.ivars().generation.get() != generation { return; }
+            self.ivars().capture.set(None);
             self.cancel(true);
             if self.ivars().generation.get() != generation.wrapping_add(1) || !self.ivars().enabled.get() { return; }
-            if revision_current(capture.revision) { (self.ivars().commit)(release_at(width, &capture), capture.revision); }
+            if revision_current(capture.revision) {
+                let release = capture.release(requested);
+                if !(self.ivars().commit)(release, capture.revision) {
+                    self.restore(capture);
+                } else if let Resize::Land { width, travel: false } | Resize::Hide { width } = release {
+                    self.ivars().width.set(width);
+                }
+            }
         }
     }
 );
@@ -245,6 +297,7 @@ impl Control {
             chrome: Weak::from_retained(chrome),
             width: Cell::new(width),
             enabled: Cell::new(true),
+            hidden_card: Cell::new(false),
             revision: Cell::new(revision),
             generation: Cell::new(0),
             capture: Cell::new(None),
@@ -265,17 +318,14 @@ impl Control {
             return;
         };
         let frame = chrome.frame();
-        let width = self.ivars().width.get();
-        // A live drag widens the column before the chrome has grown to it.
-        let growing = self
-            .ivars()
-            .capture
-            .get()
-            .is_some_and(|capture| capture.live);
-        let hidden =
-            !self.ivars().enabled.get() || (!growing && frame.size.width + 0.5 < GUTTER + width);
+        let edge = resize_edge(self.ivars().width.get(), self.ivars().hidden_card.get());
+        let hidden = !self.ivars().enabled.get()
+            || (self.ivars().capture.get().is_none() && frame.size.width + 0.5 < edge);
         let target = NSRect::new(
-            NSPoint::new(frame.origin.x + GUTTER + width - HOT_INSET, frame.origin.y),
+            NSPoint::new(
+                frame.origin.x + hot_start(edge, self.ivars().hidden_card.get()),
+                frame.origin.y,
+            ),
             NSSize::new(HOT_WIDTH, frame.size.height),
         );
         let current = self.frame();
@@ -382,28 +432,6 @@ impl Control {
             view.removeFromSuperview();
         }
     }
-    /// A drag that does not end in a release gives back the width it started
-    /// from.
-    fn restore(&self) {
-        let Some(capture) = self.ivars().capture.get() else {
-            return;
-        };
-        if !capture.live
-            || (capture.applied - capture.original).abs() < 0.5
-            || !revision_current(capture.revision)
-        {
-            return;
-        }
-        self.ivars().width.set(capture.original);
-        self.place();
-        (self.ivars().commit)(
-            Release::Land {
-                width: capture.original,
-                travel: false,
-            },
-            capture.revision,
-        );
-    }
     fn guide_current(&self, view: &NSView, generation: u64) -> bool {
         self.ivars().generation.get() == generation
             && self.ivars().enabled.get()
@@ -413,8 +441,14 @@ impl Control {
                     .is_some_and(|current| std::ptr::eq(current, view))
             })
     }
+    fn restore(&self, capture: Capture) {
+        if let Some(progress) = capture.kind.progress(capture.original, false) {
+            self.ivars().width.set(capture.original);
+            (self.ivars().commit)(progress, capture.revision);
+        }
+    }
     fn cancel(&self, fade: bool) {
-        self.ivars().capture.set(None);
+        let capture = self.ivars().capture.take();
         self.ivars()
             .generation
             .set(self.ivars().generation.get().wrapping_add(1));
@@ -430,6 +464,9 @@ impl Control {
             .try_borrow_mut()
             .ok()
             .and_then(|mut observers| observers.take());
+        if let Some(capture) = capture {
+            self.restore(capture);
+        }
         drop(observers);
         if let Some(guide) = guide {
             if !fade || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
@@ -470,7 +507,6 @@ impl Control {
                 let canceled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(control) = weak.load() {
                         if control.ivars().generation.get() == generation {
-                            control.restore();
                             control.cancel(false);
                             return true;
                         }
@@ -498,7 +534,6 @@ impl Control {
                 };
                 if let Some(control) = weak.get(mtm).load() {
                     if control.ivars().generation.get() == generation {
-                        control.restore();
                         control.cancel(false);
                     }
                 }
@@ -632,25 +667,22 @@ pub(super) fn configure(
         }
         control
     };
-    // A live drag publishes widths as it goes, and the frame echoes each one
-    // back, late; the drag owns the width until release.
-    let dragging = enabled
-        && control
-            .ivars()
-            .capture
-            .get()
-            .is_some_and(|capture| capture.live && capture.revision == revision);
-    if !dragging
-        && (control.ivars().capture.get().is_some()
-            || control.ivars().width.get() != width
-            || !enabled)
+    let hidden_card =
+        super::HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(crate::MAIN_LABEL));
+    let kind = CaptureKind::new(width, hidden_card);
+    let following = control.ivars().capture.get().is_some_and(|capture| {
+        capture.kind != CaptureKind::Guide && capture.kind == kind && capture.revision == revision
+    });
+    if !following
+        && (control.ivars().capture.get().is_some() || control.ivars().width.get() != width)
     {
         control.cancel(false);
     }
     if !configuration_current(epoch, generation, revision) || !registered(&control, generation) {
         return false;
     }
-    if !dragging {
+    control.ivars().hidden_card.set(hidden_card);
+    if control.ivars().capture.get().is_none() {
         control.ivars().width.set(width);
     }
     control.ivars().enabled.set(enabled);
@@ -772,80 +804,120 @@ fn resolved_width(width: f64) -> f64 {
     if !width.is_finite() || width < SNAP {
         MIN_SIDEBAR_WIDTH
     } else {
-        width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
+        expanded_width(width)
     }
 }
-/// What a release on `width`, as `resolved_width` gave it, asks of the column.
-fn release_at(width: f64, capture: &Capture) -> Release {
-    if !capture.live {
-        Release::Land {
-            width,
-            travel: true,
+
+fn resize_edge(width: f64, hidden_card: bool) -> f64 {
+    GUTTER
+        + width
+        + if hidden_card {
+            2.0 * HIDDEN_CARD_INSET
+        } else {
+            0.0
         }
-    } else if width < MIN_EXPANDED {
-        Release::Hide {
-            width: capture.original,
-        }
+}
+
+/// Where the hot zone starts. Beside a column it reaches into the gap before
+/// the page; on a card it covers the card's own padding, so aiming at the
+/// edge never leaves the card and sends it away.
+fn hot_start(edge: f64, hidden_card: bool) -> f64 {
+    if hidden_card {
+        edge - HOT_WIDTH
     } else {
-        Release::Land {
-            width,
-            travel: false,
-        }
+        edge - HOT_INSET
     }
+}
+
+fn expanded_width(width: f64) -> f64 {
+    width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn capture(original: f64) -> Capture {
-        Capture {
+    #[test]
+    fn capture_tracks_the_cards_outer_edge_including_its_padding() {
+        assert_eq!(resize_edge(240.0, false), 248.0);
+        assert_eq!(resize_edge(240.0, true), 264.0);
+    }
+
+    #[test]
+    fn a_cards_hot_zone_stays_inside_the_card() {
+        assert_eq!(hot_start(264.0, true) + HOT_WIDTH, 264.0);
+        assert_eq!(hot_start(248.0, false), 246.0);
+    }
+
+    #[test]
+    fn the_expanded_hit_target_does_not_overlap_the_card_strip() {
+        let width = 240.0;
+        let column_end = hot_start(resize_edge(width, false), false) + HOT_WIDTH;
+        let card_start = hot_start(resize_edge(width, true), true);
+        assert!(column_end <= card_start);
+    }
+
+    #[test]
+    fn hidden_card_clamps_without_snapping() {
+        assert_eq!(expanded_width(56.0), MIN_EXPANDED);
+        assert_eq!(expanded_width(139.0), MIN_EXPANDED);
+        assert_eq!(expanded_width(310.6), 311.0);
+        assert_eq!(expanded_width(900.0), MAX_SIDEBAR_WIDTH);
+        assert_eq!(resolved_width(139.0), MIN_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn an_expanded_column_lands_without_travel_or_hides_at_the_threshold() {
+        let capture = Capture {
             start_x: 0.0,
-            original,
-            pending: original,
+            original: 240.0,
+            pending: 180.0,
             revision: 1,
-            live: original >= MIN_EXPANDED,
-            applied: original,
-        }
-    }
-
-    #[test]
-    fn an_expanded_column_settles_where_it_followed_the_pointer_without_travelling() {
+            kind: CaptureKind::Column,
+        };
         assert_eq!(
-            release_at(resolved_width(312.4), &capture(240.0)),
-            Release::Land {
+            capture.release(312.4),
+            Resize::Land {
                 width: 312.0,
-                travel: false
+                travel: false,
             }
         );
-    }
-
-    #[test]
-    fn a_column_released_short_of_its_narrowest_stops_there() {
         assert_eq!(
-            release_at(resolved_width(SNAP), &capture(240.0)),
-            Release::Land {
+            capture.release(SNAP),
+            Resize::Land {
                 width: MIN_EXPANDED,
-                travel: false
+                travel: false,
             }
         );
+        assert_eq!(capture.release(SNAP - 0.1), Resize::Hide { width: 240.0 });
     }
 
     #[test]
-    fn a_column_released_past_the_snap_hides_and_keeps_its_starting_width() {
+    fn cards_and_guides_keep_their_release_behavior() {
+        let capture = Capture {
+            start_x: 0.0,
+            original: 240.0,
+            pending: 180.0,
+            revision: 1,
+            kind: CaptureKind::Card,
+        };
         assert_eq!(
-            release_at(resolved_width(SNAP - 1.0), &capture(240.0)),
-            Release::Hide { width: 240.0 }
+            capture.release(SNAP - 1.0),
+            Resize::Land {
+                width: MIN_EXPANDED,
+                travel: false,
+            }
         );
-    }
-
-    #[test]
-    fn a_column_at_another_shape_waits_for_release_and_travels() {
+        let rail = Capture {
+            kind: CaptureKind::Guide,
+            original: MIN_SIDEBAR_WIDTH,
+            ..capture
+        };
         assert_eq!(
-            release_at(resolved_width(300.0), &capture(MIN_SIDEBAR_WIDTH)),
-            Release::Land {
+            rail.release(300.0),
+            Resize::Land {
                 width: 300.0,
-                travel: true
+                travel: true,
             }
         );
     }

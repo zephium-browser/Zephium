@@ -13,7 +13,7 @@
   import { glide, measure } from "../lib/glide";
   import { sections } from "../lib/sections";
   import { rowDate, sectionLabel, untilTomorrow } from "../lib/format";
-  import { revealLabel } from "../lib/platform";
+  import { deleteShortcut, shortcutHint, revealLabel } from "../lib/platform";
 
   let {
     session,
@@ -144,7 +144,7 @@
         label: m.note_delete(),
         icon: Delete02Icon,
         danger: true,
-        hint: "⌘⌫",
+        hint: shortcutHint("CmdOrCtrl+Backspace"),
       },
     ];
   }
@@ -200,11 +200,7 @@
     else if (event.key === "Enter" && onedit && current !== -1) {
       event.preventDefault();
       onedit();
-    } else if (
-      (event.key === "Backspace" || event.key === "Delete") &&
-      event.metaKey &&
-      current !== -1
-    ) {
+    } else if (deleteShortcut(event) && current !== -1) {
       event.preventDefault();
       const id = notes[current]!.id;
       if (session.trash) void session.deleteForever(id);

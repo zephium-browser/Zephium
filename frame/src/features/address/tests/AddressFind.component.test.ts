@@ -86,3 +86,40 @@ test("find next with the field closed picks up the last search", async () => {
   emitNativeEvent("find", { query: "wiki", matches: 0, active: null });
   await expect.element(screen.getByText("No results")).toBeVisible();
 });
+
+test.each(["refused", "failed"])("a %s find answers with no results", async (failure) => {
+  if (failure === "refused") native.find.mockResolvedValueOnce(false);
+  else native.find.mockRejectedValueOnce(new Error("unavailable"));
+  const { screen, tab } = await field();
+  find.show(tab.id);
+  await userEvent.type(screen.getByRole("searchbox"), "missing");
+  await expect.element(screen.getByText("No results")).toBeVisible();
+});
+
+test("an older find refusal cannot answer a newer search", async () => {
+  let refuse!: (accepted: boolean) => void;
+  native.find.mockReturnValueOnce(new Promise((resolve) => (refuse = resolve)));
+  const { screen, tab } = await field();
+  find.show(tab.id);
+  find.setText("old");
+  await vi.waitFor(() => expect(native.find).toHaveBeenCalledWith("old", true));
+  find.setText("new");
+  await vi.waitFor(() => expect(native.find).toHaveBeenCalledWith("new", true));
+  emitNativeEvent("find", { query: "new", matches: 2, active: 1 });
+  refuse(false);
+  await expect.element(screen.getByText("1 of 2")).toBeVisible();
+});
+
+test("a refused step keeps the match count and buttons available for retry", async () => {
+  const { screen, tab } = await field();
+  find.show(tab.id);
+  find.setText("needle");
+  await vi.waitFor(() => expect(native.find).toHaveBeenCalledWith("needle", true));
+  emitNativeEvent("find", { query: "needle", matches: 4, active: 2 });
+  native.find.mockResolvedValueOnce(false);
+  await screen.getByRole("button", { name: "Next match" }).click();
+  await expect.element(screen.getByText("2 of 4")).toBeVisible();
+  await expect.element(screen.getByRole("alert")).toHaveTextContent("Step failed");
+  await expect.element(screen.getByRole("button", { name: "Next match" })).toBeEnabled();
+  await expect.element(screen.getByRole("button", { name: "Previous match" })).toBeEnabled();
+});

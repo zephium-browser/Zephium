@@ -64,3 +64,10 @@ test("a page still loading is asked again, not called unavailable", () => {
   expect(view.message).toContain("still loading");
   expect(faultView({ reason: "invalid" }).retry).toBe("no");
 });
+
+test("a model timeout names stalled or overlong progress, not provider failure", () => {
+  const view = faultView({ reason: "timed_out" });
+  expect(view).toMatchObject({ retry: "now", fix: null });
+  expect(view.message).toMatch(/stopped responding|too long/u);
+  expect(view.message).not.toBe(model("provider_down").message);
+});

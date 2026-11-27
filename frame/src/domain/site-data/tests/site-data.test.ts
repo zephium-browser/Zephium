@@ -74,6 +74,13 @@ test("removing one site names only that site, and removing all clears cookies an
   });
 });
 
+test("a removal the engine could only partly do is told apart from one that failed", async () => {
+  native.call.mockResolvedValueOnce({ kind: "partly_cleared" });
+  expect(await forgetSite(profile, "example.com")).toBe("partial");
+  native.call.mockResolvedValueOnce({ kind: "error", error: "failed" });
+  expect(await forgetSite(profile, "example.com")).toBe("failed");
+});
+
 test("a page's site is cleared by its origin, never its address", async () => {
   native.call.mockResolvedValue({ kind: "cleared" });
   expect(await clearDataForPage(profile, "https://news.example.com:8443/a?b=c#d")).toBe("cleared");

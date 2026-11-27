@@ -15,9 +15,11 @@ Protection defaults on for new profiles. META migration 23 enables existing
 profiles once, preserving site pauses and personal hides; subsequent explicit
 opt-outs remain durable. Both enabled and disabled profiles receive a locally prepared,
 explicit empty policy at startup without joining the compiler queue. Enabled
-profiles prepare real protection in the background. Browsing is available as
-soon as the empty native policy is acknowledged; the UI never describes that
-policy as active protection. Updates retain the installed policy throughout.
+profiles prepare real protection in the background. Pages they open at
+startup wait behind the empty policy until real protection is in place, for at
+most one second; past that they load unprotected and are counted. The UI never
+describes the empty policy as active protection. Updates retain the installed
+policy throughout.
 Already issued requests cannot be blocked retroactively.
 
 Procedural cosmetics, resource replacement, response-CSP mutation and
@@ -135,7 +137,7 @@ uBlock filters, whose `filters.txt` copy lacked its includes, have no copy and
 must all download in one refresh; until they do, as when offline, the seed
 stays in use and the refresh backs off from 15 minutes to a day.
 
-The current bundled seed is **202611041052**, 6,211,955 uncompressed bytes.
+The current bundled seed is **202611172316**, 6,236,712 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
 attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,
 `LICENSE-GPL-3.0.txt`), and a deterministic quality report. The seed is dated by
@@ -234,6 +236,15 @@ It is found by the SHA-256 of the presented bytes, computed on the spot. The
 policy keeps its canonical encoding (about 2.9 MB for the shipped lists) only
 until the compiled cache has written it, or, for a policy read from the cache,
 not past loading.
+
+A policy read from the cache is validated in full and its scriptlet program
+built before it is delivered, but its selector matcher and generic index are
+built by the compiler worker just after, so a page restored at startup waits
+for neither. A page that asks first builds them itself. If they cannot be
+built, the policy stays without cosmetics and the worker tries to compile it
+again from source. A compile that succeeds serves the next generation and,
+once written to the cache, the next launch; one that fails leaves the
+delivered policy in place.
 
 A bounded worker handles document lookup, hashing and script serialization.
 Completion returns through the existing main-thread dispatcher before native
@@ -410,6 +421,14 @@ reported upstream when it applies there.
   every kind of reload (2 runs, a mix and a playlist, 16 of 16), and loop and
   shuffle were kept. In a later run, YouTube's mix once went on to a video
   outside its panel with no request from Zephium.
+  On 2026-11-17 the quick fixes replaced the `lactmilli` marker with `oaeb`.
+  Without `oaeb`, every marker Zephium sent was held, and so was the unmarked
+  page, which then waits out YouTube's hold: the first video after a consent
+  answer started 16.5 to 18.3 s late (macOS, 3 of 3 runs). `oaeb` follows
+  `lactmilli` in the rule, so whichever list is in use, its working marker is
+  tried first. With it, 18 of 18 videos played on `oaeb` alone, with no ads
+  and no blocker warning; mean watch start was 2.1 to 3.0 s against 8.1 to
+  13.0 s, and the consent-answered first video was not held at all.
 
 ## Budgets and evidence
 

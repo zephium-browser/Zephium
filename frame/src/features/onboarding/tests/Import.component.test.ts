@@ -89,6 +89,37 @@ const finished = (kinds: ImportJob["kinds"]): ImportJob => ({
   kinds,
 });
 
+test.each([false, true])(
+  "a refused start is reported during onboarding (transport error: %s)",
+  async (transportError) => {
+    const fake = importer();
+    let refuse!: () => void;
+    const reply = new Promise<boolean>((resolve, reject) => {
+      refuse = () => {
+        if (transportError) reject(new Error("transport unavailable"));
+        else resolve(false);
+      };
+    });
+    fake.adapter.start = async () => reply;
+    browserImport.provide(fake.adapter);
+    await browserImport.detect();
+    const screen = await render(Import);
+    await screen.getByRole("radio", { name: "Chrome" }).click();
+    const start = screen.getByRole("button", { name: "Import", exact: true });
+    await start.click();
+    await expect.element(start).toHaveAttribute("aria-busy", "true");
+    refuse();
+
+    await expect
+      .element(screen.getByRole("alert"))
+      .toHaveTextContent("Couldn't start the import from Chrome. Try again.");
+
+    fake.emit({ ...finished([]), finished: false });
+    await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+    await expect.element(screen.getByRole("alert")).toBeVisible();
+  },
+);
+
 test("an import that found nothing says so instead of counting zero items brought over", async () => {
   const fake = importer();
   browserImport.provide(fake.adapter);
@@ -113,6 +144,18 @@ test("an import that found nothing says so instead of counting zero items brough
     ]),
   );
   await expect.element(screen.getByText("12 items brought over")).toBeVisible();
+});
+
+test("an import stopped at a limit explains what was kept", async () => {
+  const fake = importer();
+  browserImport.provide(fake.adapter);
+  await browserImport.detect();
+  const screen = await render(Import);
+  fake.emit(finished([{ kind: "bookmarks", state: "partial", done: 0, total: 0 }]));
+  await expect
+    .element(screen.getByText("Import stopped at a limit. Items already brought over stay."))
+    .toBeVisible();
+  await expect.element(screen.getByText("Nothing to import")).not.toBeInTheDocument();
 });
 
 test("a refusal by macOS says what to turn on and offers the setting", async () => {

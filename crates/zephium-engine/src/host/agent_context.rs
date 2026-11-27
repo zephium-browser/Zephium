@@ -3191,13 +3191,14 @@ impl EngineHost {
         let deadline = now
             .checked_add(Duration::from_secs(5))
             .ok_or(ContextPortFailure::NativeRefused)?;
-        self.ensure_windows_profile_environment_at_path(
-            profile,
-            deadline,
-            expected_user_data_folder.clone(),
-            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
-        )
-        .map_err(map_windows_profile_environment_failure)?;
+        let environment_bootstrap = self
+            .ensure_windows_profile_environment_at_path(
+                profile,
+                deadline,
+                expected_user_data_folder.clone(),
+                request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
+            )
+            .map_err(map_windows_profile_environment_failure)?;
         // Durable environments admit human extensions from startup. Work
         // always uses its existing, separate automation subprofile.
         let selected = false;
@@ -3325,6 +3326,8 @@ impl EngineHost {
             self.quarantine_unverifiable_windows_profile(profile);
             return Err(ContextPortFailure::NativeRefused);
         }
+        // A new browser keeps its bootstrap until this controller is proven.
+        drop(environment_bootstrap);
         let content_policy_registration = match crate::platform::imp::install_content_policy_on_view(
             view.view(),
             &content_policy,

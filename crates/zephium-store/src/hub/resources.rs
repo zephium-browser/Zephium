@@ -410,6 +410,17 @@ pub(super) fn mutate(
     profile: ProfileId,
     command: ResourceCommand,
 ) -> rusqlite::Result<ResourceResponse> {
+    mutate_before_commit(conn, profile, command, || Ok(()))
+}
+
+/// Runs publication only after every admission check and SQL mutation has
+/// succeeded, but before the transaction can durably reference external bytes.
+pub(super) fn mutate_before_commit(
+    conn: &mut Connection,
+    profile: ProfileId,
+    command: ResourceCommand,
+    publish: impl FnOnce() -> rusqlite::Result<()>,
+) -> rusqlite::Result<ResourceResponse> {
     if matches!(
         &command.intent,
         ResourceIntent::CreateTaskList { .. }
@@ -624,6 +635,7 @@ pub(super) fn mutate(
         tx.execute("UPDATE user_resources SET task_list=?2,task_inbox=?3,task_priority=?4,task_steps=?5,task_steps_done=?6,task_completed_at=?7,task_deadline=?8,task_duration=?9 WHERE id=?1", params![id,details.list,details.inbox,priority,details.steps.len(),details.steps.iter().filter(|step| step.completed).count(),details.completed_at,details.deadline,details.duration])?;
     }
     tx.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,?2,?3,?4,?5)",params![command.request_id,digest,id,revision,retained_receipt])?;
+    publish()?;
     tx.commit()?;
     Ok(ResourceResponse::Applied {
         request_id: command.request_id,

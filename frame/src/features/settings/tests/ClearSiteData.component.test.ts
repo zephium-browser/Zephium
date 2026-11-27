@@ -44,6 +44,19 @@ test("the dialog names the site and only clears it once confirmed", async () => 
   expect(notices.notice()?.text).toBe("Cleared the data of www.example.com");
 });
 
+test("a clear the engine could only partly do closes and says some data is left", async () => {
+  native.call.mockResolvedValue({ kind: "partly_cleared" });
+  await render(ClearSiteData);
+  clearRequest.ask("https://example.com/");
+
+  await page.getByRole("button", { name: "Clear data" }).click();
+
+  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  expect(notices.notice()?.text).toBe(
+    "Cleared the data of example.com, but some couldn't be removed",
+  );
+});
+
 test("cancelling clears nothing and closes the dialog", async () => {
   await render(ClearSiteData);
   clearRequest.ask("https://example.com/");

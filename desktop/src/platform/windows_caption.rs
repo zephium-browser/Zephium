@@ -4,11 +4,13 @@
 //! input host.
 #[path = "windows_caption_paint.rs"]
 mod paint;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::WebviewWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::*,
-    Graphics::Gdi::*,
+    Graphics::{Dwm::DwmFlush, Gdi::*},
     UI::{
         Controls::*,
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
@@ -24,13 +26,43 @@ const CLOSE_SETTLED: usize = ID + 3;
 const REVEAL: usize = ID + 4;
 // How far down from the window's top the pointer asks for the caption over a
 // page: the gutter and a little of the page, not a page's own top bar.
-const TOP_REACH: f64 = 20.0;
+const TOP_REACH: f64 = 12.0;
 // How long the pointer must stay there: going for a page's own top bar
 // passes through without the caption coming out over it.
-const TOP_DWELL_MS: u32 = 400;
+const TOP_DWELL_MS: u32 = 500;
 // The pointer must rest on the reveal edge this long before the caption
-// slides in, so passing over it on the way elsewhere reveals nothing.
-const REVEAL_DWELL_MS: u32 = 150;
+// slides in, so passing over it on the way elsewhere reveals nothing. The
+// corner the controls stand in waits as long: a page's own menu there is
+// reached for as often as the controls are.
+const REVEAL_DWELL_MS: u32 = 220;
+// How long the caption takes to come out or go away.
+const FADE_MS: u32 = 220;
+// Without a frame pacer, a step of that motion on every system timer tick.
+// Asking for 15 ms, just under a tick, often waited two.
+const FRAME_MS: u32 = USER_TIMER_MINIMUM;
+// A step of the motion, posted once a frame by its pacer.
+const STEP: u32 = WM_APP + 0x43;
+/// Paces the caption's motion by the compositor: one step for each frame it
+/// presents. A timer's message waits until nothing else is queued, so steps
+/// came late whenever the window had other work; a posted one does not.
+struct Pacer {
+    running: Arc<AtomicBool>,
+}
+impl Pacer {
+    fn post_step(&self, queued: &AtomicBool, post: impl FnOnce() -> bool) -> bool {
+        if !queued.swap(true, Ordering::AcqRel) && !post() {
+            queued.store(false, Ordering::Release);
+            self.running.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+}
+impl Drop for Pacer {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
 /// Why the caption is out of the way. Each holder clears only its own, so a
 /// page leaving fullscreen cannot unhide the caption of a window the person
 /// had made fullscreen.
@@ -42,6 +74,8 @@ pub enum Suppression {
     Window = 2,
 }
 struct State {
+    // The chrome told when the caption comes and goes.
+    window: Option<WebviewWindow>,
     owner: HWND,
     strip: HWND,
     edge: HWND,
@@ -60,6 +94,7 @@ struct State {
     page_left: Option<f64>,
     dark: bool,
     previous_focus: HWND,
+    reactivation_focus: HWND,
     laying_out: bool,
     hot_button: HWND,
     // The last button the pointer was on, which outlives the hover itself.
@@ -77,6 +112,13 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
+    // The pointer was on the input host or a button at the last reading.
+    on_caption: bool,
+    // Whether the chrome was last told the caption is out.
+    announced: bool,
+    pacer: Option<Pacer>,
+    // A step is posted and not yet taken, so a busy window gets one, not a queue.
+    step_queued: Arc<AtomicBool>,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -153,6 +195,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             buttons[index] = button;
         }
         let pointer = Box::into_raw(Box::new(State {
+            window: Some(window.clone()),
             owner,
             strip,
             edge,
@@ -167,6 +210,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             page_left: None,
             dark: true,
             previous_focus: HWND::default(),
+            reactivation_focus: HWND::default(),
             laying_out: false,
             hot_button: HWND::default(),
             last_hot: HWND::default(),
@@ -182,6 +226,10 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
+            on_caption: false,
+            announced: false,
+            pacer: None,
+            step_queued: Arc::new(AtomicBool::new(false)),
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -455,8 +503,9 @@ unsafe fn layout(p: *mut State) {
             let _ = ReleaseCapture();
         }
         cancel_reveal(p);
-        let _ = KillTimer(Some((*p).strip), FADE);
+        stop_motion(p);
         let _ = KillTimer(Some((*p).strip), HIDE);
+        announce(p, false, 0);
     }
     let progress = f64::from((*p).opacity) / 255.0;
     let displacement = (height as f64 * progress).round() as i32;
@@ -486,15 +535,19 @@ unsafe fn layout(p: *mut State) {
         let band = CreateRectRgn(left, 0, rect.right.max(1), displacement);
         let _ = CombineRgn(Some(region), Some(region), Some(band), RGN_OR);
         let _ = DeleteObject(band.into());
-        // Where the controls stand is theirs even while they are away.
-        let spot = CreateRectRgn(
-            (rect.right - controls_width).max(0),
-            0,
-            rect.right.max(1),
-            height,
-        );
-        let _ = CombineRgn(Some(region), Some(region), Some(spot), RGN_OR);
-        let _ = DeleteObject(spot.into());
+        // Where the controls stand is theirs while they are out or on their
+        // way. Away, the corner beneath belongs to the page: its own menu or
+        // New Tab's settings is reached and hovered there, not the caption.
+        if displacement > 0 {
+            let spot = CreateRectRgn(
+                (rect.right - controls_width).max(0),
+                0,
+                rect.right.max(1),
+                height,
+            );
+            let _ = CombineRgn(Some(region), Some(region), Some(spot), RGN_OR);
+            let _ = DeleteObject(spot.into());
+        }
         if SetWindowRgn((*p).edge, Some(region), false) == 0 {
             let _ = DeleteObject(region.into());
         }
@@ -628,33 +681,149 @@ unsafe fn prepare_state_change(p: *mut State) {
     (*p).reveal_block = Some(cursor);
     cancel_reveal(p);
     zephium_engine::set_window_caption_offset((*p).owner.0 as isize, 0.0, false);
-    let _ = KillTimer(Some((*p).strip), FADE);
+    stop_motion(p);
     let _ = KillTimer(Some((*p).strip), HIDE);
+    announce(p, false, 0);
+}
+/// Tells the chrome that the caption starts to come out or to go away, so
+/// what it draws under the band can make way in step.
+unsafe fn announce(p: *mut State, shown: bool, duration: u32) {
+    if (*p).announced == shown {
+        return;
+    }
+    (*p).announced = shown;
+    emit_caption(p, shown, duration);
+}
+/// Replays the current caption to a newly mounted listener on the UI thread.
+pub fn replay(window: &WebviewWindow) {
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || unsafe {
+        if let Some(p) = state_of(&target) {
+            emit_caption(p, (*p).announced, 0);
+        }
+    });
+}
+unsafe fn emit_caption(p: *mut State, shown: bool, duration: u32) {
+    let Some(window) = &(*p).window else {
+        return;
+    };
+    let _ = window.eval(format!(
+        "window.dispatchEvent(new CustomEvent('zephium:caption',{{detail:{{shown:{shown},height:{},duration:{duration}}}}}))",
+        paint::HEIGHT
+    ));
+}
+fn animates() -> bool {
+    let mut enabled = windows::core::BOOL(1);
+    // SAFETY: reads a system parameter into a local.
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut enabled as *mut windows::core::BOOL).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    enabled.as_bool() && !super::menus::high_contrast()
 }
 unsafe fn transition(p: *mut State, expanded: bool) {
+    transition_in(p, expanded, animates());
+}
+unsafe fn transition_in(p: *mut State, expanded: bool, animate: bool) {
+    let target = if expanded { 255 } else { 0 };
     if (*p).expanded == expanded {
+        if !animate && (*p).opacity != target {
+            (*p).opacity = target;
+            stop_motion(p);
+            layout(p);
+        }
         return;
     }
     (*p).expanded = expanded;
     if !expanded {
         (*p).last_hot = HWND::default();
     }
-    let mut enabled = windows::core::BOOL(1);
-    let _ = SystemParametersInfoW(
-        SPI_GETCLIENTAREAANIMATION,
-        0,
-        Some((&mut enabled as *mut windows::core::BOOL).cast()),
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-    );
-    if !enabled.as_bool() || super::menus::high_contrast() {
-        (*p).opacity = if expanded { 255 } else { 0 };
-        let _ = KillTimer(Some((*p).strip), FADE);
-    } else {
+    if animate {
         (*p).fade_from = (*p).opacity;
         (*p).fade_started = std::time::Instant::now();
-        SetTimer(Some((*p).strip), FADE, 15, None);
+        start_motion(p);
+    } else {
+        (*p).opacity = target;
+        stop_motion(p);
     }
+    announce(p, expanded, if animate { FADE_MS } else { 0 });
     layout(p);
+}
+/// Starts the motion's frame pacer, or its timer if no thread can be had.
+unsafe fn start_motion(p: *mut State) {
+    if (*p)
+        .pacer
+        .as_ref()
+        .is_some_and(|pacer| pacer.running.load(Ordering::Acquire))
+    {
+        return;
+    }
+    // Drop the stopped owner before publishing a replacement worker.
+    (*p).pacer = None;
+    let running = Arc::new(AtomicBool::new(true));
+    let queued = (*p).step_queued.clone();
+    let strip = (*p).strip.0 as isize;
+    let pacing = Pacer {
+        running: running.clone(),
+    };
+    let spawned = std::thread::Builder::new()
+        .name("caption-motion".into())
+        .spawn(move || {
+            while pacing.running.load(Ordering::Acquire) {
+                let waited = std::time::Instant::now();
+                // SAFETY: waits for the compositor's next presented frame.
+                let flushed = unsafe { DwmFlush() }.is_ok();
+                // A flush that did not wait, as without composition, would
+                // turn this into a spin.
+                if !flushed || waited.elapsed() < std::time::Duration::from_millis(1) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                if !pacing.running.load(Ordering::Acquire) {
+                    break;
+                }
+                if !pacing.post_step(&queued, || {
+                    // SAFETY: posting to the input host does not dereference
+                    // its state. Failure retires this worker's ownership.
+                    unsafe { PostMessageW(Some(HWND(strip as *mut _)), STEP, WPARAM(0), LPARAM(0)) }
+                        .is_ok()
+                }) {
+                    break;
+                }
+            }
+        });
+    if spawned.is_ok() {
+        (*p).pacer = Some(Pacer { running });
+    } else {
+        SetTimer(Some((*p).strip), FADE, FRAME_MS, None);
+    }
+}
+unsafe fn stop_motion(p: *mut State) {
+    (*p).pacer = None;
+    let _ = KillTimer(Some((*p).strip), FADE);
+}
+/// Moves the caption and the page on to where the motion has got to.
+unsafe fn step_motion(p: *mut State) {
+    // A press owns a stable target even when it begins mid-reveal.
+    if (*p).motion_paused.is_some() {
+        return;
+    }
+    let t = ((*p).fade_started.elapsed().as_secs_f64() * 1000.0 / f64::from(FADE_MS)).min(1.0);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    let target = if (*p).expanded { 255.0 } else { 0.0 };
+    (*p).opacity =
+        (f64::from((*p).fade_from) + (target - f64::from((*p).fade_from)) * eased).round() as u8;
+    layout(p);
+    if t >= 1.0 {
+        stop_motion(p);
+        if !(*p).expanded {
+            let _ = ShowWindow((*p).strip, SW_HIDE);
+            layout(p);
+        }
+    }
 }
 unsafe fn reveal(p: *mut State) {
     if (*p).suppressed || (*p).changing_state || (*p).sizing {
@@ -691,14 +860,15 @@ unsafe fn pointer_moved_on(p: *mut State) -> bool {
     }
     moved
 }
-/// Hovering the reveal edge asks for the caption after a short dwell. With the
-/// caption out, the pointer where the controls stand, or on Maximize (the
-/// shell's Snap flyout opens from it), hovering brings it without waiting.
+/// Hovering the reveal edge asks for the caption after a short dwell, the
+/// corner the controls stand in too. With the caption out or on its way, the
+/// pointer where the controls stand, or on Maximize (the shell's Snap flyout
+/// opens from it), hovering holds it without waiting.
 unsafe fn hover_reveal(p: *mut State, hot: HWND) {
     if (*p).suppressed || (*p).changing_state || (*p).sizing || !pointer_moved_on(p) {
         return;
     }
-    if (*p).expanded || hot == (*p).buttons[1] || at_controls(p) {
+    if (*p).expanded || hot == (*p).buttons[1] || ((*p).opacity > 0 && at_controls(p)) {
         cancel_reveal(p);
         reveal(p);
     } else if !(*p).reveal_armed {
@@ -744,6 +914,7 @@ fn pointer_moved(owner: HWND) {
         };
         let strip = (*p).strip;
         let near = near_top(p);
+        let on_caption = !caption_part_at_cursor(p).0.is_null();
         if near && !(*p).expanded {
             if !(*p).suppressed
                 && !(*p).changing_state
@@ -754,12 +925,47 @@ fn pointer_moved(owner: HWND) {
                 (*p).reveal_armed = true;
                 SetTimer(Some(strip), REVEAL, TOP_DWELL_MS, None);
             }
-        } else if !near && (*p).near_top {
+        } else if !near && !on_caption && ((*p).near_top || (*p).on_caption) {
+            // Leaving the caption for a page makes no leave message here
+            // until the system gets round to it, which can take seconds.
             cancel_reveal(p);
             SetTimer(Some(strip), HIDE, 450, None);
         }
         (*p).near_top = near;
+        (*p).on_caption = on_caption;
     }
+}
+/// The input host or button under the pointer, if it is on one.
+unsafe fn caption_part_at_cursor(p: *mut State) -> HWND {
+    let mut cursor = POINT::default();
+    if GetCursorPos(&mut cursor).is_err() {
+        return HWND::default();
+    }
+    let hovered = WindowFromPoint(cursor);
+    if hovered == (*p).edge || (*p).buttons.contains(&hovered) {
+        hovered
+    } else {
+        HWND::default()
+    }
+}
+/// Asks for a leave message from the part of the caption under the pointer,
+/// for the part of it the pointer is in: tracking the wrong part ends at once.
+unsafe fn track_pointer(p: *mut State) {
+    let hovered = caption_part_at_cursor(p);
+    if hovered.0.is_null() {
+        return;
+    }
+    let mut cursor = POINT::default();
+    let _ = GetCursorPos(&mut cursor);
+    let hit = SendMessageW(
+        hovered,
+        WM_NCHITTEST,
+        None,
+        Some(LPARAM(
+            ((cursor.y as u16 as u32) << 16 | cursor.x as u16 as u32) as isize,
+        )),
+    );
+    track(hovered, hit.0 != HTCLIENT as isize);
 }
 /// Whether the pointer is where the controls stand when they are out.
 unsafe fn at_controls(p: *mut State) -> bool {
@@ -930,13 +1136,13 @@ unsafe fn update_hot(p: *mut State, hot: HWND) {
 unsafe fn pause_motion(p: *mut State) {
     (*p).motion_paused
         .get_or_insert_with(std::time::Instant::now);
-    let _ = KillTimer(Some((*p).strip), FADE);
+    stop_motion(p);
 }
 unsafe fn resume_motion(p: *mut State) {
     if let Some(paused) = (*p).motion_paused.take() {
         (*p).fade_started += paused.elapsed();
         if (*p).opacity != if (*p).expanded { 255 } else { 0 } {
-            SetTimer(Some((*p).strip), FADE, 15, None);
+            start_motion(p);
         }
     }
 }
@@ -1028,11 +1234,16 @@ unsafe fn pointer_input(
             return Some(LRESULT(0));
         }
         WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
-            cancel_reveal(p);
-            // Crossing into the neighbouring button ends this window's hover,
-            // not the pointer's.
+            // Crossing into the neighbouring button, or between the host and
+            // its resize rim, ends this window's hover, not the pointer's:
+            // the part it is on now tracks it from its first move. Tracking
+            // again from here would end at once until that move arrives, and
+            // the leave messages would keep it from arriving.
             update_hot(p, button_at_cursor(p));
-            SetTimer(Some((*p).strip), HIDE, 450, None);
+            if caption_part_at_cursor(p).0.is_null() {
+                cancel_reveal(p);
+                SetTimer(Some((*p).strip), HIDE, 450, None);
+            }
         }
         _ => {}
     }
@@ -1222,11 +1433,9 @@ unsafe extern "system" fn owner_proc(
         && msg == WM_SYSKEYDOWN
         && w.0 == VK_F10.0 as usize
     {
-        reveal(p);
+        let _ = KillTimer(Some((*p).strip), HIDE);
         // Keyboard focus requires a fully visible native target immediately.
-        (*p).opacity = 255;
-        let _ = KillTimer(Some((*p).strip), FADE);
-        layout(p);
+        transition_in(p, true, false);
         let first = enabled_buttons(hwnd).iter().position(|enabled| *enabled);
         let _ = SetFocus(Some((*p).buttons[first.unwrap_or(2)]));
         return LRESULT(0);
@@ -1260,6 +1469,18 @@ unsafe extern "system" fn owner_proc(
             return LRESULT(HTMAXBUTTON as isize);
         }
     }
+    if msg == WM_ACTIVATE && w.0 & 0xffff == WA_INACTIVE as usize {
+        let focus = reactivation_keyboard_focus();
+        (*p).reactivation_focus = if IsChild(hwnd, focus).as_bool() {
+            focus
+        } else {
+            HWND::default()
+        };
+    }
+    // Wry's parent subclass gives activation focus to chrome. Restore the
+    // previous child afterwards, without keeping a pointer to State across it.
+    let restore =
+        (msg == WM_ACTIVATE && activation_restores_focus(w)).then(|| (*p).reactivation_focus);
     let result = DefSubclassProc(hwnd, msg, w, l);
     // Keep the owned caption hidden through all synchronous size/focus messages.
     // WM_SIZE alone is too early: Windows may still be animating the owner.
@@ -1287,7 +1508,48 @@ unsafe extern "system" fn owner_proc(
     if msg == WM_WINDOWPOSCHANGED {
         pointer_moved(hwnd);
     }
+    if let Some(target) = restore {
+        // Focus callbacks can destroy the owner, so do not read State after this.
+        restore_reactivation_focus(hwnd, target);
+    }
     result
+}
+
+unsafe fn reactivation_keyboard_focus() -> HWND {
+    #[cfg(test)]
+    if let Some(focus) = focus_tests::keyboard_focus() {
+        return focus;
+    }
+    GetFocus()
+}
+
+unsafe fn restore_reactivation_focus(owner: HWND, target: HWND) {
+    #[cfg(test)]
+    let foreground = focus_tests::foreground().unwrap_or_else(|| GetForegroundWindow());
+    #[cfg(not(test))]
+    let foreground = GetForegroundWindow();
+    if can_restore_focus(owner, target, foreground) {
+        set_reactivation_focus(target);
+    }
+}
+
+unsafe fn set_reactivation_focus(target: HWND) {
+    #[cfg(test)]
+    if focus_tests::record_focus_target(target) {
+        return;
+    }
+    let _ = SetFocus(Some(target));
+}
+
+fn activation_restores_focus(activation: WPARAM) -> bool {
+    activation.0 & 0xffff != WA_INACTIVE as usize && activation.0 >> 16 == 0
+}
+
+fn can_restore_focus(owner: HWND, target: HWND, foreground: HWND) -> bool {
+    // SAFETY: Win32 validates these borrowed handles; a closed, hidden or
+    // reparented page must not regain keyboard focus.
+    foreground == owner
+        && unsafe { IsChild(owner, target).as_bool() && IsWindowVisible(target).as_bool() }
 }
 unsafe extern "system" fn strip_proc(
     hwnd: HWND,
@@ -1366,23 +1628,13 @@ unsafe extern "system" fn strip_proc(
             return LRESULT(0);
         }
         WM_TIMER if w.0 == FADE => {
-            // A press owns a stable target even when it begins mid-reveal.
-            if (*p).motion_paused.is_some() {
-                return LRESULT(0);
-            }
-            let t = ((*p).fade_started.elapsed().as_secs_f64() / 0.22).min(1.0);
-            let eased = 1.0 - (1.0 - t).powi(3);
-            let target = if (*p).expanded { 255.0 } else { 0.0 };
-            (*p).opacity = (f64::from((*p).fade_from)
-                + (target - f64::from((*p).fade_from)) * eased)
-                .round() as u8;
-            layout(p);
-            if t >= 1.0 {
-                let _ = KillTimer(Some(hwnd), FADE);
-                if !(*p).expanded {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                    layout(p);
-                }
+            step_motion(p);
+            return LRESULT(0);
+        }
+        STEP => {
+            (*p).step_queued.store(false, Ordering::Release);
+            if (*p).pacer.is_some() {
+                step_motion(p);
             }
             return LRESULT(0);
         }
@@ -1428,7 +1680,7 @@ unsafe extern "system" fn strip_proc(
             } else {
                 // The input host stays visible, so a leave event can dismiss
                 // the band without a polling timer during a stationary hover.
-                track(hovered, button_at_cursor(p) == (*p).buttons[1]);
+                track_pointer(p);
             }
         }
         WM_COMMAND if (w.0 >> 16) == BN_CLICKED as usize => {
@@ -1612,8 +1864,113 @@ unsafe extern "system" fn button_proc(
     DefSubclassProc(hwnd, msg, w, l)
 }
 #[cfg(test)]
+#[path = "windows_caption_focus_tests.rs"]
+mod focus_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_step_post_releases_queue_and_pacer_ownership() {
+        let pacer = Pacer {
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let queued = AtomicBool::new(false);
+        assert!(!pacer.post_step(&queued, || false));
+        assert!(!queued.load(Ordering::Acquire));
+        assert!(!pacer.running.load(Ordering::Acquire));
+
+        let replacement = Pacer {
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let mut posted = false;
+        assert!(replacement.post_step(&queued, || {
+            posted = true;
+            true
+        }));
+        assert!(posted);
+        assert!(queued.load(Ordering::Acquire));
+        assert!(replacement.running.load(Ordering::Acquire));
+        assert!(replacement.post_step(&queued, || panic!("only one queued step")));
+    }
+    #[test]
+    fn activation_does_not_restore_a_minimized_or_inactive_window() {
+        assert!(activation_restores_focus(WPARAM(WA_ACTIVE as usize)));
+        assert!(activation_restores_focus(WPARAM(WA_CLICKACTIVE as usize)));
+        assert!(!activation_restores_focus(WPARAM(WA_INACTIVE as usize)));
+        assert!(!activation_restores_focus(WPARAM(
+            (1 << 16) | WA_ACTIVE as usize
+        )));
+    }
+
+    #[test]
+    fn reactivation_accepts_only_a_visible_live_child_of_its_owner() {
+        // SAFETY: these off-screen, non-activating windows belong to the test
+        // thread and are destroyed before it exits; no profile is opened.
+        unsafe {
+            let owner = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                -10000,
+                -10000,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let child = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                50,
+                50,
+                Some(owner),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let other = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                -10000,
+                -10000,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(can_restore_focus(owner, child, owner));
+            assert!(!can_restore_focus(owner, child, other));
+            SetParent(child, Some(other)).unwrap();
+            assert!(!can_restore_focus(owner, child, owner));
+            SetParent(child, Some(owner)).unwrap();
+            assert!(!can_restore_focus(owner, owner, owner));
+            assert!(!can_restore_focus(owner, other, owner));
+            assert!(!can_restore_focus(owner, HWND::default(), owner));
+            let _ = ShowWindow(child, SW_HIDE);
+            assert!(!can_restore_focus(owner, child, owner));
+            let _ = ShowWindow(child, SW_SHOWNA);
+            assert!(can_restore_focus(owner, child, owner));
+            DestroyWindow(child).unwrap();
+            assert!(!can_restore_focus(owner, child, owner));
+            DestroyWindow(other).unwrap();
+            DestroyWindow(owner).unwrap();
+        }
+    }
     #[test]
     fn complete_button_rectangles_hit_at_fractional_dpi_and_negative_monitor_coordinates() {
         for dpi in [96, 120, 144, 192] {

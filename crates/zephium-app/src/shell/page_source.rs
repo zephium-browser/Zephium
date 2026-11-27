@@ -23,6 +23,11 @@ pub(super) struct SourceState {
 }
 
 impl SourceState {
+    pub(super) fn retain(&mut self, tabs: impl Fn(ItemId) -> bool) {
+        self.documents.retain(|(id, _)| tabs(*id));
+        self.awaiting = self.awaiting.filter(|id| tabs(*id));
+    }
+
     fn keep(&mut self, id: ItemId, document: Arc<PageSource>, tabs: impl Fn(ItemId) -> bool) {
         self.documents.retain(|(held, _)| tabs(*held));
         self.documents.push_back((id, document));

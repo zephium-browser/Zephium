@@ -103,11 +103,11 @@ export const commands = {
 	 *  Opens the microphone and starts a take. On first use this waits while
 	 *  the system asks for permission.
 	 */
-	voiceStart: () => __TAURI_INVOKE<VoiceStartV1>("voice_start"),
+	voiceStart: (request: string) => __TAURI_INVOKE<VoiceStartV1>("voice_start", { request }),
 	/**  Stops listening; the words arrive as a `done` change. */
 	voiceStop: (take: number) => __TAURI_INVOKE<boolean>("voice_stop", { take }),
-	/**  Discards the current take, whatever its phase. */
-	voiceCancel: () => __TAURI_INVOKE<boolean>("voice_cancel"),
+	/**  Discards only this start request's take, whatever its phase. */
+	voiceCancel: (request: string, take: number | null) => __TAURI_INVOKE<boolean>("voice_cancel", { request, take }),
 	/**
 	 *  Opens the system's privacy settings for the microphone or speech
 	 *  recognition, after the person declined one.
@@ -316,7 +316,12 @@ export const commands = {
 	chromeMenuPopup: (x: number | null, y: number | null, page: boolean, canSplit: boolean) => __TAURI_INVOKE<boolean>("chrome_menu_popup", { x, y, page, canSplit }),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**  The context menu of an extension's toolbar button, under the button. */
-	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
+	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchor: ExtensionActionMenuAnchor, entries: ExtensionButtonMenuEntry[]) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchor, entries }),
+	/**
+	 *  The menu of an extension's toolbar button, pinned or in the tray, where
+	 *  the engine lists none of the extension's own items (Windows).
+	 */
+	extensionButtonMenuPopup: (installId: string, entries: ExtensionButtonMenuEntry[], x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("extension_button_menu_popup", { installId, entries, x, y }),
 	/**
 	 *  Downloads and verifies the extension on the active store page, and
 	 *  returns what the user is asked to approve.
@@ -458,6 +463,7 @@ export const commands = {
 	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
 	panelReady: () => __TAURI_INVOKE<{
+	switcher: TabSwitcherState | null,
 	window_id: string | null,
 	revision: string,
 	session_id: string,
@@ -471,7 +477,11 @@ export const commands = {
 	seed: string | null,
 	/**  The tab whose address is being edited; it is no destination of its own. */
 	seed_tab: string | null,
+	/**  An address chosen in this presentation opens in a new mini window. */
+	mini: boolean,
 } | null>("panel_ready"),
+	tabSwitcherOpen: () => __TAURI_INVOKE<boolean>("tab_switcher_open"),
+	tabSwitcherAction: (sessionId: string, intent: TabSwitcherAction) => __TAURI_INVOKE<boolean>("tab_switcher_action", { sessionId, intent }),
 	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
 	/**
 	 *  The launcher's content reports what it shows; native sizes the window and
@@ -516,12 +526,14 @@ export const commands = {
 } | null>("launcher_set_double_tap", { mode }),
 	launcherOpenAccessibility: () => __TAURI_INVOKE<void>("launcher_open_accessibility"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
+	searchShortcutDefaults: () => __TAURI_INVOKE<SearchShortcut_Serialize[]>("search_shortcut_defaults"),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	windowsDiagnosticsSettings: () => __TAURI_INVOKE<boolean>("windows_diagnostics_settings"),
 	/**  None identifies a local launch-read fallback to ON, separate from Windows policy. */
 	windowsReputationManaged: () => __TAURI_INVOKE<boolean | null>("windows_reputation_managed"),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
 	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
+	captionReplay: () => __TAURI_INVOKE<void>("caption_replay"),
 	menuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
 	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
 	tabMenuPopup: (id: string, x: number | null, y: number | null, context: TabMenuContext) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, context }),
@@ -591,12 +603,12 @@ export const commands = {
 	 *  its language's own hour cycle.
 	 */
 	systemClock24h: () => __TAURI_INVOKE<boolean | null>("system_clock_24h"),
-	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
+	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
 	/**
 	 *  Checks for a newer release and downloads it. Returns the resulting status;
 	 *  a check already in flight, or an update already waiting, is reported as is.
 	 */
-	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
+	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
 	/**  Closes Zephium as a quit does, then starts it again. */
@@ -697,6 +709,17 @@ export const commands = {
 	width: number | null,
 	height: number | null,
 } | null) => __TAURI_INVOKE<boolean>("swipe_region", { region }),
+	/**
+	 *  The toolbar finished its first render: the window shows, and the shell
+	 *  lays its page out and lets it be verified.
+	 */
+	miniReady: () => __TAURI_INVOKE<boolean>("mini_ready"),
+	miniAction: (action: MiniIntent) => __TAURI_INVOKE<OperationAdmission>("mini_action", { action }),
+	/**
+	 *  Pops the spaces "Open in Zephium" can put the page in, under the
+	 *  toolbar's button at `x`, `y`.
+	 */
+	miniSpaceMenu: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("mini_space_menu", { x, y }),
 };
 
 /** Events */
@@ -713,6 +736,7 @@ export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	mediaPlayerChanged: makeEvent<MediaPlayerChanged>("media-player-changed"),
+	miniChanged: makeEvent<MiniChanged>("mini-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
 	notesChanged: makeEvent<NotesChanged>("notes-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -1264,7 +1288,12 @@ export type BrowsingDataError = "invalid" | "unavailable" | "capacity" |
 /**  How far back a browsing data clear reaches. */
 export type BrowsingDataRange = "hour" | "day" | "week" | "four_weeks" | "everything";
 
-export type BrowsingDataResponse = { kind: "cleared" } | { kind: "sites"; sites: SiteDataView[];
+export type BrowsingDataResponse = { kind: "cleared" } |
+/**
+ *  Removed, but some of the site's data may remain: the engine would not
+ *  delete everything, or could not reach every place it is kept.
+ */
+{ kind: "partly_cleared" } | { kind: "sites"; sites: SiteDataView[];
 /**
  *  The engine can only name sites by some of what it holds: sites
  *  with only storage and no cookies are missing from the list.
@@ -1464,6 +1493,13 @@ export type ExtensionActionFailedView = {
  */
 export type ExtensionActionFailure = "invalid_request" | "runtime_unavailable" | "runtime_superseded" | "tab_unavailable" | "tab_discarded" | "action_unavailable" | "action_disabled" | "capacity_exceeded" | "popup_unavailable" | "popup_capacity_exceeded" | "native_admission_failed" | "shutting_down" | "unsupported_platform";
 
+export type ExtensionActionMenuAnchor = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
 /**
  *  Non-authorizing identity for one live extension runtime. Privileged chrome
  *  may echo this value only as part of an action gesture; the Shell rejoins it
@@ -1527,6 +1563,15 @@ export type ExtensionActionsView = {
 	tab_id: string | null,
 	actions: ExtensionActionView[],
 };
+
+/**  A browser entry on an extension's toolbar button menu. */
+export type ExtensionButtonChoice = "pin" | "unpin" | "options" | "manage" | "remove";
+
+/**
+ *  One row of an extension's toolbar button menu. The frame builds the list,
+ *  the same on every platform; native only draws it and relays the choice.
+ */
+export type ExtensionButtonMenuEntry = { kind: "item"; choice: ExtensionButtonChoice; label: string; enabled: boolean } | { kind: "separator" };
 
 /**
  *  One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
@@ -1705,7 +1750,7 @@ export type ImportSourceView = {
 	needs_permission: boolean,
 };
 
-export type ImportStateView = "queued" | "running" | "done" | "failed" | "skipped";
+export type ImportStateView = "queued" | "running" | "done" | "partial" | "failed" | "skipped";
 
 export type ItemId = string;
 
@@ -1783,7 +1828,7 @@ export type LoginItemStatus = {
 	needs_approval: boolean,
 };
 
-export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica" | "mica_alt";
 
 /**  Outcome of admitting one public image for a subject on the canvas. */
 export type MediaAdmitV1 =
@@ -1876,6 +1921,40 @@ export type MediaPlayerView = {
 	in_pip: boolean,
 	muted: boolean,
 	can_mute: boolean,
+};
+
+export type MiniChanged = MiniView;
+
+/**  What a mini window's toolbar may ask of its page or its window. */
+export type MiniIntent = "back" | "forward" | "reload" | "open_in_main" | "close" |
+/**  Opens the launcher on the page's address. */
+"edit_address" |
+/**  Keeps the window above other windows, or stops. */
+"keep_on_top" |
+/**  Windows only: the toolbar carries the window's own controls. */
+"minimize";
+
+export type MiniSpaceView = {
+	id: string,
+	name: string,
+};
+
+/**
+ *  A mini window's chrome: its window and the one page in it, if any yet.
+ *  The page's URL and title are untrusted and only ever shown as text.
+ */
+export type MiniView = {
+	window: number | null,
+	tab: TabView | null,
+	/**
+	 *  Where "Open in Zephium" can put the page: its profile's spaces, in
+	 *  sidebar order.
+	 */
+	spaces: MiniSpaceView[],
+	/**  The space "Open in Zephium" uses unless the person picks another. */
+	space: string | null,
+	/**  The window stays above other applications' windows. */
+	pinned: boolean,
 };
 
 export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } |
@@ -2028,7 +2107,9 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
+export type OperationReason = "mutation_applied" |
+/**  The address went to a mini window, so the main window stays behind. */
+"opened_in_mini" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
 /**  Work and AI features are switched off. */
 "feature_disabled";
 
@@ -2229,6 +2310,8 @@ export type PageAssistFaultV1 = { reason: "ai_off" } | { reason: "private" } | {
 { reason: "step_failed" } |
 /**  The reply reached its limit of steps or time. */
 { reason: "too_long" } |
+/**  The model stopped making progress or exceeded the call's overall cap. */
+{ reason: "timed_out" } |
 /**
  *  The model call failed. `retry_after_ms` is set for `rate_limited`
  *  (and hosted limits) when the provider or server said when to retry.
@@ -2491,6 +2574,8 @@ export type PageRequestView =
  *  allow that site's pop-ups.
  */
 { kind: "popup"; host: string | null; site: string | null } |
+/**  The native address was unreadable or too long. Dismissal only. */
+{ kind: "navigation_refused"; embedded: boolean } |
 /**
  *  The site, or its proxy, asks to sign in. Never carries the server's
  *  own text.
@@ -2606,6 +2691,7 @@ export type PanelRect = {
 };
 
 export type PanelState = {
+	switcher: TabSwitcherState | null,
 	window_id: string | null,
 	revision: string,
 	session_id: string,
@@ -2619,6 +2705,8 @@ export type PanelState = {
 	seed: string | null,
 	/**  The tab whose address is being edited; it is no destination of its own. */
 	seed_tab: string | null,
+	/**  An address chosen in this presentation opens in a new mini window. */
+	mini: boolean,
 };
 
 export type PersonalHideView = {
@@ -3009,6 +3097,8 @@ export type SearchContext = {
 	space_id: string,
 };
 
+export type SearchEngine = "google" | "duckduckgo" | "bing" | "brave" | "custom";
+
 export type SearchResult = {
 	kind: string,
 	title: string,
@@ -3018,6 +3108,7 @@ export type SearchResult = {
 };
 
 export type SearchResults = {
+	shortcut?: string | null,
 	pending: boolean,
 	context: SearchContext | null,
 	query: string,
@@ -3028,6 +3119,30 @@ export type SearchResults = {
 	 */
 	completion: string | null,
 	results: SearchResult[],
+};
+
+export type SearchShortcut = SearchShortcut_Serialize | SearchShortcut_Deserialize;
+
+export type SearchShortcut_Deserialize = {
+	id: string,
+	name: string,
+	keywords: string[],
+	search_url: string,
+	home_url: string,
+	domain: string,
+	suggestions: SearchEngine | null,
+	enabled: boolean,
+};
+
+export type SearchShortcut_Serialize = {
+	id: string,
+	name: string,
+	keywords: string[],
+	search_url: string,
+	home_url: string,
+	domain: string,
+	suggestions?: SearchEngine | null,
+	enabled: boolean,
 };
 
 export type ShutSiteView = {
@@ -3276,6 +3391,31 @@ export type TabMenuContext = {
 	media_only: boolean,
 };
 
+export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" } |
+/**  Leaves the switcher for a new tab in its window. */
+{ type: "new_tab" } |
+/**  Leaves the switcher for this tab, whatever is selected by then. */
+{ type: "activate"; tab_id: string } |
+/**  Closes this tab, whatever is selected by then, and stays open. */
+{ type: "close_tab"; tab_id: string };
+
+export type TabSwitcherEntry = {
+	tab_id: string,
+	title: string,
+	url_host: string,
+	favicon: IconRef | null,
+	preview_url: string | null,
+	active: boolean,
+};
+
+export type TabSwitcherState = {
+	session_id: string,
+	window_id: string,
+	entries: TabSwitcherEntry[],
+	selected: number,
+	keyboard: boolean,
+};
+
 export type TabView = {
 	id: string,
 	/**
@@ -3459,15 +3599,18 @@ export type UpdateHighlights = {
 	items: string[],
 };
 
+export type UpdateRetryReason = "previousInstallIncomplete" | "workNotSaved" | "activityCheckFailed";
+
 export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
 
-export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
-export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 /**  A take moved on. `text` is set once, when it is done. */
 export type VoiceChanged = {
 	take: number,
+	request: string,
 	phase: VoicePhaseV1,
 	engine: VoiceEngineV1 | null,
 	/**  The words so far, while listening, when the engine streams them. */
@@ -3510,6 +3653,7 @@ export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_micr
  */
 export type VoiceLevels = {
 	take: number,
+	request: string,
 	levels: number[],
 };
 
@@ -4499,6 +4643,13 @@ export type WorkComparisonAlternative = {
 	values: string[],
 };
 
+export type WorkComposerDraft = {
+	profile: ProfileId,
+	space: SpaceId,
+	revision: WorkRevision,
+	text: string,
+};
+
 export type WorkConfidence = "supported" | "inferred" | "unverified" | "contradicted";
 
 /**  What a held step would commit. */
@@ -4978,17 +5129,17 @@ export type WorkElementPlacement_Serialize = {
 
 export type WorkEnvironmentCall = WorkEnvironmentCall_Serialize | WorkEnvironmentCall_Deserialize;
 
-export type WorkEnvironmentCall_Deserialize =
+export type WorkEnvironmentCall_Deserialize = ({ kind: "composer_read"; space: SpaceId }) & { after?: never; command?: never; expected?: never; id?: never; intent?: never; limit?: never; text?: never; view?: never } | ({ kind: "composer_save"; space: SpaceId; expected: WorkRevision; text: string }) & { after?: never; command?: never; id?: never; intent?: never; limit?: never; view?: never } |
 /**  Revision-scoped presentation save; stale identities never execute again. */
-({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Deserialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never } |
+({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Deserialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never; text?: never } |
 /**  Idempotent user selection; updates only the Space's last-opened Work. */
-({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; view?: never };
+({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; text?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; text?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; text?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; text?: never; view?: never };
 
-export type WorkEnvironmentCall_Serialize =
+export type WorkEnvironmentCall_Serialize = ({ kind: "composer_read"; space: SpaceId }) & { after?: never; command?: never; expected?: never; id?: never; intent?: never; limit?: never; text?: never; view?: never } | ({ kind: "composer_save"; space: SpaceId; expected: WorkRevision; text: string }) & { after?: never; command?: never; id?: never; intent?: never; limit?: never; view?: never } |
 /**  Revision-scoped presentation save; stale identities never execute again. */
-({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Serialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never } |
+({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Serialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never; text?: never } |
 /**  Idempotent user selection; updates only the Space's last-opened Work. */
-({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; view?: never };
+({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; text?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; text?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; text?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; text?: never; view?: never };
 
 export type WorkEnvironmentChanged = WorkEnvironmentChangedV1;
 
@@ -5046,9 +5197,9 @@ export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind
 
 export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
 
-export type WorkEnvironmentReply_Deserialize = ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; command?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; replayed?: never; snapshot?: never };
+export type WorkEnvironmentReply_Deserialize = ({ kind: "composer"; draft: WorkComposerDraft }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; snapshot?: never; works?: never } | ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; command?: never; draft?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; draft?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { draft?: never; expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; draft?: never; expected?: never; replayed?: never; snapshot?: never };
 
-export type WorkEnvironmentReply_Serialize = ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; command?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; replayed?: never; snapshot?: never };
+export type WorkEnvironmentReply_Serialize = ({ kind: "composer"; draft: WorkComposerDraft }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; snapshot?: never; works?: never } | ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; command?: never; draft?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; draft?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { draft?: never; expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; draft?: never; expected?: never; replayed?: never; snapshot?: never };
 
 export type WorkEnvironmentSnapshot = WorkEnvironmentSnapshot_Serialize | WorkEnvironmentSnapshot_Deserialize;
 

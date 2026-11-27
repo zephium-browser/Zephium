@@ -58,7 +58,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 ///
 /// Increment this whenever the accepted rule subset, canonicalization, digest
 /// construction, or WebKit serialization changes.
-pub const POLICY_FORMAT_VERSION: u32 = 8;
+pub const POLICY_FORMAT_VERSION: u32 = 9;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
 pub use zephium_core::blocker::WEBKIT_ARTIFACT_FORMAT_VERSION;

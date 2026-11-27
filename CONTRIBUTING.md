@@ -145,8 +145,14 @@ macOS additionally runs:
 ```sh
 cargo clippy --workspace --lib --locked -- -D warnings
 cargo nextest run --workspace --locked --profile ci --retries 2
-git diff --exit-code frame/src/shared/ipc/bindings.ts
+git status --porcelain --untracked-files=all -- \
+  frame/src/shared/ipc/bindings.ts \
+  frame/src/shared/ipc/work-constants.ts \
+  frame/src/shared/ipc/theme-presets.json
 ```
+
+The generated IPC drift check requires empty status output after nextest runs
+the desktop export test.
 
 Its remaining CI steps compile and exercise the bundled seed through native
 WebKit, run `scripts/blocker-scriptlets/run.sh`, and run

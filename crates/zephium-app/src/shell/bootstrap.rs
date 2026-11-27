@@ -22,6 +22,7 @@ impl Shell {
         // The chrome re-invokes bootstrap whenever its webview reloads (dev
         // HMR, crash recovery); state and native surfaces must not be rebuilt.
         if self.windows.focused().is_some() {
+            self.peek_sidebar(false, false);
             let _ = self.relayout();
             self.forget_delivered_icons(zephium_ipc::IconSurface::Chrome);
             self.forget_offered_items();
@@ -270,13 +271,42 @@ impl Shell {
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
-        // Starting with a new tab, or with pages, keeps every restored tab
-        // where it was and loads none of them. A link that launched the browser is its own
-        // new tab, and a blank tab left in front already is one.
+        if let Some(win) = self.windows.get_mut(window) {
+            win.metrics = self.pending_metrics;
+        }
+        // A new tab or startup list leaves restored tabs in place. A link
+        // that launched the browser is its own new tab, and a stand-in left
+        // in front can already serve as the new tab.
         let pages = self.tab_preferences.opens_pages() && self.pending_external.is_empty();
-        let start_fresh = (self.tab_preferences.start_with_new_tab || pages)
+        let mut start_fresh = (self.tab_preferences.start_with_new_tab || pages)
             && self.pending_external.is_empty()
-            && active_item.is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some()));
+            && (self.tab_preferences.new_page.is_some()
+                || active_item
+                    .is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some())));
+        if !self.incognito_profile(profile) {
+            let matching_tab = active_item.and_then(|id| {
+                let item = self.items.get(id)?;
+                if !matches!(
+                    item.placement,
+                    Placement::Space {
+                        section: SpaceSection::Today,
+                        ..
+                    }
+                ) {
+                    return None;
+                }
+                let url = item.tab()?.url.as_ref()?;
+                let destination = self.tab_preferences.new_page.as_ref()?;
+                tabs::restored_tab_is_new_tab_destination(destination, url)
+                    .then(|| (id, url.clone()))
+            });
+            if let Some((id, url)) = matching_tab {
+                self.new_tab_destinations.insert(id, url);
+                if start_fresh && !pages {
+                    start_fresh = false;
+                }
+            }
+        }
         let mut fx = Vec::new();
         if let Some(tree) = splits {
             if !start_fresh {
@@ -297,7 +327,12 @@ impl Shell {
         match restored {
             Some(item) => fx.extend(self.focus_tab(item)),
             None => {
-                if let Some((_, effects)) = self.open_tab_with_id() {
+                let opened = if !pages && self.pending_external.is_empty() {
+                    self.open_new_tab_with_id()
+                } else {
+                    self.open_tab_with_id()
+                };
+                if let Some((_, effects)) = opened {
                     fx.extend(effects);
                 } else if let Some(item) =
                     active_item.or_else(|| self.today_tabs(space).first().copied())

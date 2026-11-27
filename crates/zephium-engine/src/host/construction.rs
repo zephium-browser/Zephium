@@ -40,6 +40,22 @@ use objc2::rc::Retained;
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
+fn admit_native_url_refusal(
+    target: wry::NativeUrlTarget,
+    clocks: &[Cell<Option<std::time::Instant>>; 2],
+    now: std::time::Instant,
+) -> bool {
+    let last = &clocks[usize::from(target == wry::NativeUrlTarget::Subframe)];
+    if last
+        .get()
+        .is_some_and(|at| now.saturating_duration_since(at) < std::time::Duration::from_secs(1))
+    {
+        return false;
+    }
+    last.set(Some(now));
+    true
+}
+
 pub(super) enum NativeViewPurpose {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     NativeTab(wry::NewWindowOpener),
@@ -635,7 +651,7 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         let initial_download_window = popup_opener
             .as_ref()
-            .and_then(|opener| opener.webview.window());
+            .and_then(|opener| crate::platform::imp::home_window(&opener.webview));
         // A download a new tab starts before showing anything is asked about
         // on the tab that opened it.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -987,6 +1003,8 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let mut extension_startup = None;
         #[cfg(target_os = "windows")]
+        let mut environment_bootstrap = None;
+        #[cfg(target_os = "windows")]
         let (builder, expected_user_data_folder) = {
             let profile = partition.profile();
             let root = match partition {
@@ -1005,18 +1023,21 @@ impl EngineHost {
                 }
             };
             if !matches!(partition, Partition::Ephemeral(_)) {
-                if let Err(error) = self.ensure_windows_profile_environment_at_path(
+                match self.ensure_windows_profile_environment_at_path(
                     profile,
                     std::time::Instant::now() + std::time::Duration::from_secs(5),
                     path.clone(),
                     true,
                 ) {
-                    eprintln!("extensions: profile startup refused: {error:?}");
-                    if report_failure {
-                        event_permit
-                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    Ok(bootstrap) => environment_bootstrap = bootstrap,
+                    Err(error) => {
+                        eprintln!("extensions: profile startup refused: {error:?}");
+                        if report_failure {
+                            event_permit
+                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                        }
+                        return None;
                     }
-                    return None;
                 }
                 extension_startup = self.windows_extension_startup(profile, &path).ok();
                 extension_startup.as_ref()?;
@@ -1296,6 +1317,46 @@ impl EngineHost {
                 }
             });
 
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let native_url_refusal_clock = Rc::new([Cell::new(None), Cell::new(None)]);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let refused_permit = event_permit.clone();
+            let refused_id = id.clone();
+            let refused_sink = self.sink.clone();
+            let last_refusal = native_url_refusal_clock.clone();
+            builder = builder.with_native_url_refused_handler(move |target| {
+                if !admit_native_url_refusal(target, &last_refusal, std::time::Instant::now()) {
+                    return;
+                }
+                match target {
+                    wry::NativeUrlTarget::MainFrame => refused_permit.emit(
+                        &refused_sink,
+                        EngineEvent::NativeNavigationRefused {
+                            id: refused_id.get(),
+                            embedded: false,
+                        },
+                    ),
+                    wry::NativeUrlTarget::NewWindow => refused_permit.emit(
+                        &refused_sink,
+                        EngineEvent::PageOpenBlocked {
+                            id: refused_id.get(),
+                            url: None,
+                        },
+                    ),
+                    // A failed child frame must not replace the whole tab's
+                    // failure state or be presented as a blocked popup.
+                    wry::NativeUrlTarget::Subframe => refused_permit.emit(
+                        &refused_sink,
+                        EngineEvent::NativeNavigationRefused {
+                            id: refused_id.get(),
+                            embedded: true,
+                        },
+                    ),
+                }
+            });
+        }
+
         // WebKit consults this in place of the plain handler above and says
         // which frame is loading, so focus shuts only top-level documents.
         #[cfg(target_os = "macos")]
@@ -1525,6 +1586,11 @@ impl EngineHost {
                 // enabled in the WebView2 runtime.
                 .with_additional_browser_args(crate::network::browser_arguments())
                 .with_browser_accelerator_keys(false)
+                // A page's bars are Windows 11's own thin overlay ones, as in
+                // Edge with them on, not the classic gutter and arrows. Every
+                // environment of a profile asks for the same: WebView2 refuses
+                // a second one with other options on that data directory.
+                .with_scroll_bar_style(wry::ScrollBarStyle::FluentOverlay)
                 // Ctrl and the wheel zoom a person's page; the zoom listener
                 // brings what they do into the site's remembered level. Keys
                 // stay Zephium's own: browser accelerators are off above.
@@ -2230,6 +2296,10 @@ impl EngineHost {
             }
             captured_process
         };
+        // A new browser keeps its bootstrap controller until this first real
+        // controller is built and proven; every earlier return drops it.
+        #[cfg(target_os = "windows")]
+        drop(environment_bootstrap);
         #[cfg(target_os = "windows")]
         if let Err(error) = self
             .environments
@@ -2286,10 +2356,33 @@ impl EngineHost {
                 }
                 return None;
             }
+            let extension_frame_permit = event_permit.clone();
+            security_policy.admit_extension_frames(move |uri| {
+                extension_frame_permit.allows_extension_frame(uri)
+            });
             let frame_site_scope = site_scope.clone();
-            if let Err(error) = security_policy.judge_frame_navigations(move |uri| {
-                frame_site_scope.blocks_navigation(uri, true).is_some()
-            }) {
+            let frame_refused_permit = event_permit.clone();
+            let frame_refused_id = id.clone();
+            let frame_refused_sink = self.sink.clone();
+            let frame_refused_clock = native_url_refusal_clock.clone();
+            if let Err(error) = security_policy.judge_frame_navigations(
+                move |uri| frame_site_scope.blocks_navigation(uri, true).is_some(),
+                move || {
+                    if admit_native_url_refusal(
+                        wry::NativeUrlTarget::Subframe,
+                        &frame_refused_clock,
+                        std::time::Instant::now(),
+                    ) {
+                        frame_refused_permit.emit(
+                            &frame_refused_sink,
+                            EngineEvent::NativeNavigationRefused {
+                                id: frame_refused_id.get(),
+                                embedded: true,
+                            },
+                        );
+                    }
+                },
+            ) {
                 eprintln!("content blocker: frame navigation check failed: {error}");
                 if report_failure {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
@@ -2899,18 +2992,22 @@ pub(super) enum WindowsProfileEnvironmentFailure {
 }
 
 /// A page-inert, counted native owner that bridges environment bootstrap
-/// into real Work controller construction. It never loads a site. It ends
-/// with the synchronous constructor unless a Work site page borrows it, while
-/// no tab of the profile is open, as the person's own profile for one bounded
-/// cookie sync; failed close retains the exact native debt.
+/// into the first real controller of a new environment. It never loads a
+/// site. A new browser process left with no controller starts shutting down,
+/// and a controller that attaches meanwhile can find the profile's cookie
+/// store empty, so the caller keeps this until its first controller is built
+/// and cross-checked. A Work site page may also borrow it, while no tab of
+/// the profile is open, as the person's own profile for one bounded cookie
+/// sync. Dropping it closes it; failed close retains the exact native debt.
 #[cfg(target_os = "windows")]
-pub(super) struct WindowsWorkEnvironmentBootstrap {
+#[must_use = "a new browser must keep a controller until its first real one attaches"]
+pub(super) struct WindowsEnvironmentBootstrap {
     view: wry::WebView,
     profile: zephium_core::ids::ProfileId,
     resource: Option<super::resources::NativeResourceLease>,
 }
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
-impl WindowsWorkEnvironmentBootstrap {
+impl WindowsEnvironmentBootstrap {
     /// The person's own profile cookies, through this controller of that
     /// profile in the exact expected environment.
     pub(super) fn profile_cookie_manager(
@@ -2927,7 +3024,7 @@ impl WindowsWorkEnvironmentBootstrap {
     }
 }
 #[cfg(target_os = "windows")]
-impl Drop for WindowsWorkEnvironmentBootstrap {
+impl Drop for WindowsEnvironmentBootstrap {
     fn drop(&mut self) {
         if let Err(debt) = wry::WebViewExtWindows::close(&mut self.view) {
             super::queue_windows_cleanup_debt(
@@ -2942,15 +3039,15 @@ impl Drop for WindowsWorkEnvironmentBootstrap {
 impl EngineHost {
     /// Establishes or rejoins a profile's environment at one exact
     /// already-authorized storage root. Without a live environment, one
-    /// short-lived, page-inert controller is created solely to obtain it and
-    /// is closed before this function returns.
+    /// page-inert controller is created solely to obtain it and handed back:
+    /// the caller drops it once its own first controller is built.
     pub(super) fn ensure_windows_profile_environment_at_path(
         &mut self,
         profile: zephium_core::ids::ProfileId,
         deadline: std::time::Instant,
         path: std::path::PathBuf,
         extensions_enabled: bool,
-    ) -> Result<(), WindowsProfileEnvironmentFailure> {
+    ) -> Result<Option<WindowsEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.ensure_windows_profile_environment_impl(
             profile,
             deadline,
@@ -2958,11 +3055,11 @@ impl EngineHost {
             extensions_enabled,
             false,
         )
-        .map(|_| ())
     }
 
     /// Keep the exact bootstrap generation alive until a Work controller owns
-    /// the same environment. All other callers retain immediate close behavior.
+    /// the same environment, starting a new bootstrap even when the
+    /// environment is already live.
     #[cfg_attr(
         all(target_os = "windows", not(feature = "agentic-browser")),
         allow(dead_code)
@@ -2973,7 +3070,7 @@ impl EngineHost {
         deadline: std::time::Instant,
         path: std::path::PathBuf,
         extensions_enabled: bool,
-    ) -> Result<Option<WindowsWorkEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
+    ) -> Result<Option<WindowsEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.ensure_windows_profile_environment_impl(
             profile,
             deadline,
@@ -2990,7 +3087,7 @@ impl EngineHost {
         path: std::path::PathBuf,
         extensions_enabled: bool,
         retain_bootstrap: bool,
-    ) -> Result<Option<WindowsWorkEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
+    ) -> Result<Option<WindowsEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.collect_pending_windows_cleanup_debts();
         if std::time::Instant::now() >= deadline
             || self.windows_view_admission_blocked(profile)
@@ -3096,6 +3193,8 @@ impl EngineHost {
             let builder = builder
                 .with_additional_browser_args(crate::network::browser_arguments())
                 .with_browser_accelerator_keys(false)
+                // The same as a page's, or this profile's pages are refused.
+                .with_scroll_bar_style(wry::ScrollBarStyle::FluentOverlay)
                 .with_environment_created_handler(move |environment| {
                     let Ok(mut slot) = observed.try_borrow_mut() else {
                         capture_failed.set(true);
@@ -3208,9 +3307,9 @@ impl EngineHost {
                     failure = Some(WindowsProfileEnvironmentFailure::Construction);
                 }
             }
-            if retain_bootstrap && failure.is_none() && std::time::Instant::now() < deadline {
+            if failure.is_none() && std::time::Instant::now() < deadline {
                 let view = built.map_err(|_| WindowsProfileEnvironmentFailure::Construction)?;
-                return Ok(Some(WindowsWorkEnvironmentBootstrap {
+                return Ok(Some(WindowsEnvironmentBootstrap {
                     view,
                     profile,
                     resource: construction_resource.take(),

@@ -48,6 +48,22 @@ test("a page native refuses is named invalid and stays in the field", async () =
   await expect.element(screen.getByRole("textbox")).toHaveValue("two words");
 });
 
+test.each(["Remove https://kept.example/", "Use current tabs"])(
+  "a failed %s does not mark the URL field invalid",
+  async (name) => {
+    state.failed = true;
+    state.open = [{ url: "https://open.example/" }];
+    const screen = await render(StartupPages);
+    await screen.getByRole("button", { name, exact: true }).click();
+    expect(preferences.set).toHaveBeenCalledWith(
+      "tabs.startup-pages",
+      name === "Use current tabs" ? "https://open.example/" : "",
+    );
+    expect(screen.getByRole("textbox").element()).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("Enter a valid website or URL.").query()).toBeNull();
+  },
+);
+
 test("a full list takes no more", async () => {
   state.values["tabs.startup-pages"] = Array.from(
     { length: 10 },
@@ -85,3 +101,27 @@ test("the home page is saved as typed and cleared by saving it empty", async () 
   await screen.getByRole("button", { name: "Save" }).click();
   expect(preferences.set).toHaveBeenCalledWith("tabs.home", "");
 });
+
+test.each([false, true])(
+  "a pending home page save preserves newer edits (failed: %s)",
+  async (failed) => {
+    state.values["tabs.home"] = "https://home.example/";
+    let finish!: () => void;
+    vi.mocked(preferences.set).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const screen = await render(HomePageRow);
+    const field = screen.getByRole("textbox");
+    await field.fill("https://first.example/");
+    await screen.getByRole("button", { name: "Save" }).click();
+    try {
+      await field.fill("https://second.example/");
+      state.failed = failed;
+      if (!failed) state.values["tabs.home"] = "https://first.example/";
+    } finally {
+      finish();
+    }
+    await expect.element(field).toHaveValue("https://second.example/");
+    await expect.element(field).not.toHaveAttribute("aria-invalid", "true");
+  },
+);

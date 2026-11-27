@@ -32,6 +32,7 @@
   let busy = $state(false);
   let failed = $state(false);
   let pendingDeletion = $state<string | undefined>();
+  let opening = 0;
   let opener: HTMLElement | null = null;
   const saved = $derived(profile ? drawn(profile).src : null);
   const valid = $derived(name.trim().length > 0);
@@ -43,6 +44,7 @@
     untrack(() => {
       opener ??= document.activeElement instanceof HTMLElement ? document.activeElement : null;
       step = "edit";
+      busy = false;
       failed = false;
       pendingDeletion = undefined;
       name = profile?.name ?? "";
@@ -55,6 +57,9 @@
           }
         : { style: "initials", color, symbol: 0, photo: null };
     });
+    return () => {
+      opening += 1;
+    };
   });
 
   const draft = (): AvatarDraft => ({
@@ -75,14 +80,21 @@
 
   async function submit() {
     if (busy || !valid) return;
+    const started = opening;
+    const editing = profile;
+    const submittedName = name.trim();
+    // Keep the submitted choices even if another sheet opens during the rename.
+    const avatar = draft();
+    const updateAvatar = avatarChanged();
     busy = true;
     failed = false;
     let ok: boolean;
-    if (!profile) ok = await profiles.create(name.trim(), draft(), andSwitch);
+    if (!editing) ok = await profiles.create(submittedName, avatar, andSwitch);
     else {
-      ok = name.trim() === profile.name || (await profiles.rename(profile.id, name.trim()));
-      if (ok && avatarChanged()) ok = await profiles.setAvatar(profile.id, draft());
+      ok = submittedName === editing.name || (await profiles.rename(editing.id, submittedName));
+      if (ok && updateAvatar) ok = await profiles.setAvatar(editing.id, avatar);
     }
+    if (!open || started !== opening) return;
     busy = false;
     if (ok) open = false;
     else failed = true;
@@ -90,9 +102,11 @@
 
   async function remove() {
     if (!profile || busy) return;
+    const started = opening;
     busy = true;
     failed = false;
     const result = await profiles.remove(profile.id, pendingDeletion);
+    if (!open || started !== opening) return;
     busy = false;
     if (result.state === "completed") open = false;
     else if (result.state === "pending") pendingDeletion = result.operation_id;

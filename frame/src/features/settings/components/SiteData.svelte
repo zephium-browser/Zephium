@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Dialog } from "bits-ui";
   import { Globe02Icon } from "@hugeicons/core-free-icons";
   import type { SiteDataView } from "$shared/ipc/bindings";
@@ -20,14 +21,16 @@
     | { state: "ready"; sites: SiteDataView[]; partial: boolean };
 
   let open = $state(false);
+  let profile = $state<string | undefined>();
   let view = $state.raw<View>({ state: "loading" });
   let query = $state("");
   let removing = $state<string | null>(null);
-  let failure = $state<{ site: string | null } | null>(null);
+  let failure = $state<{ site: string | null; partial?: boolean } | null>(null);
   let confirmingAll = $state(false);
   let clearingAll = $state(false);
   let opener: HTMLElement | null = null;
   let attempt = 0;
+  let mutation: ReturnType<typeof forgetSite> | null = null;
 
   let shown = $derived(
     view.state === "ready"
@@ -35,12 +38,23 @@
       : [],
   );
 
+  const current = (read: number) => open && read === attempt && profile === tabs.profile()?.id;
+
+  $effect(() => {
+    if (open && profile !== tabs.profile()?.id) open = false;
+  });
+  onDestroy(() => {
+    attempt += 1;
+  });
+
   async function load() {
-    const profile = tabs.profile()?.id;
-    const current = ++attempt;
+    const read = ++attempt;
     view = { state: "loading" };
+    // A reopened dialog needs the list after the previous deletion settles.
+    if (mutation) await mutation;
+    if (!current(read)) return;
     const list = profile ? await listSites(profile) : null;
-    if (current !== attempt) return;
+    if (!current(read)) return;
     view = list ? { state: "ready", ...list } : { state: "failed" };
   }
 
@@ -49,19 +63,24 @@
     query = "";
     failure = null;
     confirmingAll = false;
+    profile = tabs.profile()?.id;
     open = true;
     void load();
   }
 
   async function remove(site: string) {
-    const profile = tabs.profile()?.id;
-    if (!profile || removing || clearingAll) return;
+    const read = attempt;
+    if (!profile || !current(read) || mutation) return;
     removing = site;
     failure = null;
-    const outcome = await forgetSite(profile, site);
+    mutation = forgetSite(profile, site);
+    const outcome = await mutation;
+    mutation = null;
     removing = null;
+    if (!current(read)) return;
+    // Partly removed, the site still holds data: its row stays.
     if (outcome !== "cleared") {
-      failure = { site };
+      failure = { site, partial: outcome === "partial" };
       return;
     }
     if (view.state === "ready")
@@ -69,12 +88,15 @@
   }
 
   async function removeAll() {
-    const profile = tabs.profile()?.id;
-    if (!profile || clearingAll || removing) return;
+    const read = attempt;
+    if (!profile || !current(read) || mutation) return;
     clearingAll = true;
     failure = null;
-    const outcome = await forgetAllSites(profile);
+    mutation = forgetAllSites(profile);
+    const outcome = await mutation;
+    mutation = null;
     clearingAll = false;
+    if (!current(read)) return;
     confirmingAll = false;
     if (outcome === "cleared") await load();
     else failure = { site: null };
@@ -150,7 +172,9 @@
         {#if failure}<p class="error" role="alert">
             {failure.site === null
               ? m.privacy_clear_failed()
-              : m.privacy_sites_remove_failed({ site: failure.site })}
+              : failure.partial
+                ? m.privacy_sites_remove_partial({ site: failure.site })
+                : m.privacy_sites_remove_failed({ site: failure.site })}
           </p>{/if}
         {#if confirmingAll}<p class="status">{m.privacy_sites_remove_all_confirm()}</p>{/if}
       </div>

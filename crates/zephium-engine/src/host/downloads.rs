@@ -87,7 +87,7 @@ enum DecisionPhase {
 #[derive(Clone, Copy)]
 struct DecisionDeadline {
     phase: DecisionPhase,
-    expires: Instant,
+    expires: Option<Instant>,
 }
 impl DecisionDeadline {
     fn new(phase: DecisionPhase, now: Instant) -> Self {
@@ -101,17 +101,32 @@ impl DecisionDeadline {
                 Duration::from_secs(30)
             }
             DecisionPhase::ResumableInterruption => Duration::from_secs(5 * 60),
-            DecisionPhase::UserPaused => Duration::from_secs(30 * 60),
+            DecisionPhase::UserPaused => {
+                return Self {
+                    phase,
+                    expires: None,
+                };
+            }
             DecisionPhase::KeepDecision => Duration::from_secs(60 * 60),
             DecisionPhase::SitePermission => zephium_core::permissions::DOWNLOAD_PERMISSION_TIMEOUT,
         };
         Self {
             phase,
-            expires: now + duration,
+            expires: Some(now + duration),
+        }
+    }
+    fn waiting_for_picker(self, now: Instant) -> Self {
+        if self.phase == DecisionPhase::NativePicker {
+            self
+        } else {
+            Self::new(DecisionPhase::NativePicker, now)
         }
     }
     fn expired(self, now: Instant) -> bool {
-        now > self.expires
+        self.expires.is_some_and(|expires| now > expires)
+    }
+    fn pause_expired(self, now: Instant, source_available: bool) -> bool {
+        self.expired(now) || !source_available
     }
     fn prepared(
         self,
@@ -154,6 +169,7 @@ struct Transfer {
     destination: Option<Destination>,
     panel: Option<SavePanel>,
     panel_lease: Option<DialogLease>,
+    picker_preferences: Option<DownloadPreferences>,
     on_started: Option<Box<dyn FnOnce()>>,
     authorized: bool,
     cancelling: bool,
@@ -253,6 +269,14 @@ pub(crate) struct Downloads {
 }
 
 impl Downloads {
+    pub(crate) fn in_progress(&self) -> bool {
+        self.active.try_borrow().map_or(true, |active| {
+            active
+                .values()
+                .any(|transfer| !transfer.record.state.terminal())
+        })
+    }
+
     /// A transfer or destination decision still owns this profile. Retaining
     /// its view costs less than risking a stalled or revoked native operation.
     #[cfg(target_os = "windows")]
@@ -361,6 +385,37 @@ impl Downloads {
             self.work.set(self.work.get() - 1);
             self.cancel(id, Some(DownloadError::Unavailable));
         }
+    }
+
+    fn defer_destination(&self, id: DownloadId, preferences: DownloadPreferences) {
+        let mut active = self.active.borrow_mut();
+        let Some(transfer) = active.get_mut(&id) else {
+            return;
+        };
+        transfer.picker_preferences = Some(preferences);
+        transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
+    }
+
+    /// Foreground/capacity refusal remains visible without holding a native
+    /// transfer or admitting filesystem work. The existing recent ring bounds
+    /// page-triggered refusal records and both Updates/List project that ring.
+    fn refused(
+        &self,
+        partition: Partition,
+        navigation: &NavigationEpochTracker,
+        error: DownloadError,
+    ) {
+        let Some((_, url)) = navigation.resident_document_snapshot() else {
+            return;
+        };
+        let Some(record) = refused_download_record(self.session, &url, error) else {
+            return;
+        };
+        let mut recent = self.recent.borrow_mut();
+        recent.push_front((partition, record));
+        recent.truncate(RECENT_LIMIT);
+        drop(recent);
+        self.changed(partition.profile());
     }
 
     fn persist(&self, id: DownloadId) {
@@ -661,7 +716,8 @@ impl Downloads {
         let now = Instant::now();
         active
             .values()
-            .map(|transfer| transfer.deadline.expires.saturating_duration_since(now))
+            .filter_map(|transfer| transfer.deadline.expires)
+            .map(|expires| expires.saturating_duration_since(now))
             .min()
             .map_or(WAITING_TICK, |until| until.max(WAITING_TICK))
     }
@@ -714,14 +770,45 @@ impl Downloads {
                         && !transfer.source.as_ref().is_some_and(Source::live)))
             {
                 cancel.push((*id, DownloadError::Unavailable));
-            } else if transfer.record.state == DownloadState::Paused
-                && transfer.deadline.expired(Instant::now())
-            {
-                cancel.push((*id, transfer.record.error.unwrap_or(DownloadError::Timeout)));
+            } else if transfer.record.state == DownloadState::Paused {
+                #[cfg(target_os = "macos")]
+                let source_available = unsafe { transfer.native.webView() }.is_some();
+                #[cfg(target_os = "windows")]
+                let source_available = true;
+                if transfer
+                    .deadline
+                    .pause_expired(Instant::now(), source_available)
+                {
+                    let error = if source_available {
+                        transfer.record.error.unwrap_or(DownloadError::Timeout)
+                    } else {
+                        DownloadError::Unavailable
+                    };
+                    cancel.push((*id, error));
+                }
             }
         }
         for (id, error) in cancel {
             self.cancel(id, Some(error));
+        }
+        // Retry queued pickers on the existing pending-transfer timer. Taking
+        // the request before entering native UI prevents reentrant presentation.
+        let pickers: Vec<_> = self
+            .active
+            .borrow_mut()
+            .iter_mut()
+            .filter(|(_, transfer)| {
+                transfer.record.state == DownloadState::Pending && !transfer.cancelling
+            })
+            .filter_map(|(id, transfer)| {
+                transfer
+                    .picker_preferences
+                    .take()
+                    .map(|preferences| (*id, preferences))
+            })
+            .collect();
+        for (id, preferences) in pickers {
+            self.choose_destination(id, preferences);
         }
         // A file nobody confirmed is deleted rather than kept for ever.
         let unconfirmed: Vec<_> = self
@@ -981,6 +1068,36 @@ impl Downloads {
     }
 }
 
+fn refused_download_record(
+    session: DownloadId,
+    context: &str,
+    error: DownloadError,
+) -> Option<DownloadRecord> {
+    let origin = PageOrigin::from_url(&url::Url::parse(context).ok()?).ok()?;
+    Some(DownloadRecord {
+        id: DownloadId::generate(),
+        session,
+        revision: 1,
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_secs() as i64),
+        filename: "download".into(),
+        source: origin.as_str().into(),
+        source_is_context: true,
+        state: DownloadState::Failed,
+        received: 0,
+        total: None,
+        error: Some(error),
+        destination: None,
+        staging: None,
+        staging_identity: None,
+        identity: None,
+        writer: None,
+        writer_released: true,
+        insecure: false,
+    })
+}
+
 /// A finished download waits to be confirmed unless the person already kept
 /// it: a type that can run, or a file that came over plain http.
 fn needs_confirmation(kept: bool, filename: &str, insecure: bool) -> bool {
@@ -1053,6 +1170,34 @@ fn native_terminal_transition(
 mod state_tests {
     use super::*;
     #[test]
+    fn refused_background_and_capacity_downloads_project_a_failed_row_without_paths_or_url_secrets()
+    {
+        for reason in [DownloadError::Unavailable, DownloadError::Capacity] {
+            let record = refused_download_record(
+                DownloadId::generate(),
+                "https://example.test/export?private=token#secret",
+                reason,
+            )
+            .unwrap();
+            assert!(record.validate());
+            let view = record.view();
+            assert_eq!(view.state, DownloadState::Failed);
+            assert_eq!(view.error, Some(reason));
+            assert_eq!(view.source, "https://example.test");
+            assert!(view.source_is_context);
+            assert!(
+                record.writer.is_none() && record.destination.is_none() && record.staging.is_none()
+            );
+        }
+        assert!(refused_download_record(
+            DownloadId::generate(),
+            "about:blank",
+            DownloadError::Unavailable
+        )
+        .is_none());
+    }
+
+    #[test]
     fn cancellation_wins_before_publication_and_late_native_events_cannot_rewrite_finalization() {
         assert_eq!(
             native_terminal_transition(DownloadState::Receiving, true, true),
@@ -1080,6 +1225,32 @@ mod state_tests {
             }
         }
     }
+    #[test]
+    fn background_picker_waits_past_admission_without_renewing_its_deadline() {
+        let started = Instant::now();
+        let admission = DecisionDeadline::new(DecisionPhase::Admission, started);
+        let waiting = admission.waiting_for_picker(started);
+        let refocused = started + Duration::from_secs(45);
+        assert!(admission.expired(refocused));
+        assert!(!waiting.expired(refocused));
+        assert_eq!(waiting.phase, DecisionPhase::NativePicker);
+        let retried = waiting.waiting_for_picker(refocused);
+        assert_eq!(waiting.expires, retried.expires);
+        assert!(retried.expired(started + Duration::from_secs(24 * 60 * 60 + 1)));
+
+        // Waiting retains the native destination callback; revocation still
+        // answers it exactly once, without a destination.
+        let replies = Rc::new(Cell::new(0));
+        let received = replies.clone();
+        let reply = DestinationReply::new(move |path| {
+            assert!(path.is_none());
+            received.set(received.get() + 1);
+        });
+        assert_eq!(replies.get(), 0);
+        drop(reply);
+        assert_eq!(replies.get(), 1);
+    }
+
     #[test]
     fn abandoned_destination_decisions_cancel_once() {
         let replies = Rc::new(Cell::new(0));
@@ -1265,14 +1436,15 @@ mod state_tests {
     }
 
     #[test]
-    fn held_and_user_paused_transfers_have_their_own_bounds() {
+    fn held_transfers_expire_but_user_pauses_do_not() {
         let now = Instant::now();
         let held = DecisionDeadline::new(DecisionPhase::KeepDecision, now);
         assert!(!held.expired(now + Duration::from_secs(59 * 60)));
         assert!(held.expired(now + Duration::from_secs(61 * 60)));
         let paused = DecisionDeadline::new(DecisionPhase::UserPaused, now);
         assert!(!paused.expired(now + Duration::from_secs(29 * 60)));
-        assert!(paused.expired(now + Duration::from_secs(31 * 60)));
+        assert!(!paused.expired(now + Duration::from_secs(31 * 60)));
+        assert!(!paused.expired(now + Duration::from_secs(365 * 24 * 60 * 60)));
     }
 
     #[test]
@@ -1281,6 +1453,21 @@ mod state_tests {
         let deadline = DecisionDeadline::new(DecisionPhase::ResumableInterruption, now);
         assert!(!deadline.expired(now + Duration::from_secs(299)));
         assert!(deadline.expired(now + Duration::from_secs(301)));
+    }
+
+    #[test]
+    fn a_pause_ends_when_its_source_is_gone_but_a_live_user_pause_has_no_deadline() {
+        let now = Instant::now();
+        for phase in [
+            DecisionPhase::UserPaused,
+            DecisionPhase::ResumableInterruption,
+        ] {
+            let deadline = DecisionDeadline::new(phase, now);
+            assert!(!deadline.pause_expired(now, true));
+            assert!(deadline.pause_expired(now, false));
+        }
+        let deadline = DecisionDeadline::new(DecisionPhase::UserPaused, now);
+        assert!(!deadline.pause_expired(now + Duration::from_secs(365 * 24 * 60 * 60), true));
     }
 
     #[test]

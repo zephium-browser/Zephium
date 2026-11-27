@@ -434,6 +434,20 @@ impl EngineHost {
             Err(PageReadFailure::PageChanged) => return done(Err(PageActFailure::PageChanged)),
             Err(_) => return done(Err(PageActFailure::Refused)),
         };
+        // The action may mutate before its result can be verified, including
+        // on a timeout/refusal after beforeinput. Keep that document resident.
+        if matches!(
+            proposal.intent().kind(),
+            zephium_agentic::SemanticActionKind::Fill
+                | zephium_agentic::SemanticActionKind::Select
+                | zephium_agentic::SemanticActionKind::Press
+        ) && !self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.navigation.protect_assistant_edit(epoch))
+        {
+            return done(Err(PageActFailure::PageChanged));
+        }
         let mut done = Some(done);
         let found = self.with_reader(id, |reader| {
             if let Some(done) = done.take() {

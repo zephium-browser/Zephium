@@ -648,7 +648,7 @@ fn native_windows_runtime_recovery() {
     host(move |h| {
         h.hidden.insert(web);
         h.views[&web].set_visible(false).unwrap();
-        h.set_dormant(vec![web]);
+        h.set_dormant(vec![web], 1);
     });
     until(|| host(move |h| h.dormant.contains(&web)), 10);
     host(move |h| {
@@ -661,7 +661,7 @@ fn native_windows_runtime_recovery() {
             .unwrap(),
         );
         assert!(h.styles_missed.contains(&web));
-        h.set_dormant(vec![]);
+        h.set_dormant(vec![], 2);
     });
     until(
         || {
@@ -711,6 +711,7 @@ fn native_windows_runtime_recovery() {
                     view,
                     alive,
                     crash_observer: Some(observer),
+                    navigation_policy: None,
                     resource: h
                         .native_resources
                         .try_acquire(NativeResourceClass::Extension)

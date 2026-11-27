@@ -19,6 +19,7 @@ const {
   COMPACT_WIDTH,
   MAX_EXPANDED_WIDTH,
   MIN_EXPANDED_WIDTH,
+  PANEL_GAP,
   SNAP_THRESHOLD,
   applyDragWidth,
   adoptResizeWidth,
@@ -27,13 +28,60 @@ const {
   cancelSidebarResize,
   previewDragWidth,
   expanded,
+  effectiveWidth,
+  expandBriefly,
+  fullColumnShown,
+  isHidden,
   resolveDragWidth,
   adoptMode,
   holdShown,
   setPanelExtent,
+  setMode,
   sidebarMode,
   toggleMode,
 } = await import("../sidebar-mode.svelte");
+
+describe("temporary full browser column", () => {
+  it("holds hidden and tool layouts until every owner releases, without changing the chosen mode", () => {
+    setMode("hidden");
+    setPanelExtent(336);
+    const first = expandBriefly({ fullColumn: true });
+    const second = expandBriefly({ fullColumn: true });
+    try {
+      expect(fullColumnShown()).toBe(true);
+      expect(sidebarMode()).toBe("hidden");
+      expect(isHidden()).toBe(false);
+      expect(effectiveWidth()).toBe(expanded());
+      first();
+      first();
+      expect(fullColumnShown()).toBe(true);
+      expect(effectiveWidth()).toBe(expanded());
+      second();
+      expect(fullColumnShown()).toBe(false);
+      expect(isHidden()).toBe(true);
+      expect(effectiveWidth()).toBe(COMPACT_WIDTH + PANEL_GAP + 336);
+    } finally {
+      first();
+      second();
+      setPanelExtent(0);
+      setMode("default");
+    }
+  });
+
+  it("keeps a mode deliberately chosen while the column was held", () => {
+    setMode("hidden");
+    const release = expandBriefly({ fullColumn: true });
+    try {
+      setMode("default");
+      release();
+      expect(sidebarMode()).toBe("default");
+      expect(isHidden()).toBe(false);
+    } finally {
+      release();
+      setMode("default");
+    }
+  });
+});
 
 describe("resolveDragWidth", () => {
   it("puts the column away below the threshold", () => {
@@ -91,7 +139,9 @@ describe("which width changes the page travels with", () => {
     expect(last()).toEqual([310, true]);
     expect(hidden()).toBe(true);
     applyDragWidth(SNAP_THRESHOLD + 40);
-    expect(last()[1]).toBe(true);
+    expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
+    expect(hidden()).toBe(true);
+    toggleMode();
     expect(hidden()).toBe(false);
   });
 
@@ -135,7 +185,7 @@ describe("which width changes the page travels with", () => {
   });
 
   it("a column follows the drag without travel and settles without travel", () => {
-    beginSidebarResize();
+    beginSidebarResize(true);
     previewDragWidth(330);
     expect(expanded()).toBe(330);
     expect(last()).toEqual([330, false]);
@@ -149,12 +199,14 @@ describe("which width changes the page travels with", () => {
     expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
   });
 
-  it("cancelling a drag the column followed gives back its starting width", () => {
+  it.each(["cancel", "invalid release"])("a %s gives back the starting width", (reason) => {
     const originalWidth = expanded();
-    beginSidebarResize();
+    beginSidebarResize(true);
     previewDragWidth(originalWidth + 40);
-    cancelSidebarResize();
+    if (reason === "cancel") cancelSidebarResize();
+    else finishSidebarResize(Number.NaN);
     expect(expanded()).toBe(originalWidth);
+    expect(sidebarMode()).toBe("default");
     expect(last()).toEqual([originalWidth, false]);
   });
 

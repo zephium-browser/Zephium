@@ -142,7 +142,7 @@ impl Hub {
             (BookmarkReply::Entries(entries), None) if creates => {
                 entries.first().cloned().map(BookmarkChange::Created)
             }
-            (BookmarkReply::Imported(added), _) if imported && *added > 0 => {
+            (BookmarkReply::Imported { added, .. }, _) if imported && *added > 0 => {
                 Some(BookmarkChange::Imported)
             }
             (BookmarkReply::Done | BookmarkReply::Entries(_), Some(before)) => {
@@ -184,7 +184,9 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
             }
             let mut rows = conn.prepare_cached(&format!(
                 "SELECT {NODE_COLUMNS} FROM bookmarks b WHERE b.parent_id IS ?1
-                 ORDER BY b.position, b.id LIMIT ?2"
+                 ORDER BY b.url IS NOT NULL, b.position, b.id
+                 LIMIT max(?2, (SELECT count(*) FROM bookmarks
+                                WHERE parent_id IS ?1 AND url IS NULL))"
             ))?;
             let nodes = rows
                 .query_map(params![parent, MAX_LISTING], node)?
@@ -316,7 +318,7 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
         }
         BookmarkRequest::Move { id, parent, index } => {
             let tx = conn.transaction()?;
-            let moved = relocate(&tx, id, parent, index)?;
+            let moved = relocate(&tx, id, parent, index, true)?;
             if moved.is_ok() {
                 tx.commit()?;
             }
@@ -334,23 +336,38 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
                 tx: &tx,
                 budget: u32::try_from(i64::from(MAX_BOOKMARKS) - count).unwrap_or(0),
                 added: 0,
+                partial: false,
                 now: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_secs() as i64),
             };
             let Some(root) = import.folder(None, &title)? else {
-                return Ok(Err(Refused(BookmarkFailure::Full)));
+                let mut remaining: Vec<&ImportNode> = nodes.iter().collect();
+                let mut partial = false;
+                while let Some(node) = remaining.pop() {
+                    match node {
+                        ImportNode::Link { url, .. } => {
+                            if navigation::is_allowed_str(url) {
+                                partial = true;
+                                break;
+                            }
+                        }
+                        ImportNode::Folder { children, .. } => remaining.extend(children),
+                    }
+                }
+                return Ok(Ok(BookmarkReply::Imported { added: 0, partial }));
             };
             import.merge(root, 1, &nodes)?;
             let added = import.added;
+            let partial = import.partial;
             if added == 0 {
                 // Nothing came over, so nothing is kept: not the import's
                 // folder, not an empty one inside it. Dropping the
                 // transaction undoes them.
-                return Ok(Ok(BookmarkReply::Imported(0)));
+                return Ok(Ok(BookmarkReply::Imported { added: 0, partial }));
             }
             tx.commit()?;
-            Ok(Ok(BookmarkReply::Imported(added)))
+            Ok(Ok(BookmarkReply::Imported { added, partial }))
         }
         BookmarkRequest::Remove { id } => {
             // Folder contents go with it through ON DELETE CASCADE.
@@ -510,7 +527,7 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
                 Err(refused) => return Ok(Err(refused)),
             };
             if let Some(index) = index {
-                if let Err(refused) = relocate(&tx, id, parent, index)? {
+                if let Err(refused) = relocate(&tx, id, parent, index, false)? {
                     return Ok(Err(refused));
                 }
             }
@@ -556,7 +573,7 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
                 None => u32::MAX,
             };
             let tx = conn.transaction()?;
-            if let Err(refused) = relocate(&tx, id, parent, index)? {
+            if let Err(refused) = relocate(&tx, id, parent, index, false)? {
                 return Ok(Err(refused));
             }
             let moved = entry(&tx, id)?;
@@ -600,6 +617,7 @@ struct Import<'a> {
     tx: &'a rusqlite::Transaction<'a>,
     budget: u32,
     added: u32,
+    partial: bool,
     now: i64,
 }
 
@@ -628,6 +646,7 @@ impl Import<'_> {
         url: Option<&str>,
     ) -> rusqlite::Result<Option<i64>> {
         if self.budget == 0 {
+            self.partial = true;
             return Ok(None);
         }
         self.tx
@@ -652,6 +671,7 @@ impl Import<'_> {
             .collect::<rusqlite::Result<_>>()?;
         for node in nodes {
             if self.budget == 0 {
+                self.partial = true;
                 break;
             }
             match node {
@@ -770,13 +790,18 @@ fn relocate(
     id: i64,
     parent: Option<i64>,
     index: u32,
+    folders_first: bool,
 ) -> Outcome<()> {
-    let exists = tx
-        .query_row("SELECT 1 FROM bookmarks WHERE id = ?1", [id], |_| Ok(()))
+    let is_folder = tx
+        .query_row(
+            "SELECT url IS NULL FROM bookmarks WHERE id = ?1",
+            [id],
+            |row| row.get::<_, bool>(0),
+        )
         .optional()?;
-    if exists.is_none() {
+    let Some(is_folder) = is_folder else {
         return Ok(Err(Refused(BookmarkFailure::Missing)));
-    }
+    };
     if let Some(parent) = parent {
         if let Err(refused) = folder(tx, parent)? {
             return Ok(Err(refused));
@@ -802,13 +827,34 @@ fn relocate(
             return Ok(Err(Refused(BookmarkFailure::Full)));
         }
     }
-    let mut siblings: Vec<i64> = tx
+    let siblings: Vec<(i64, bool)> = tx
         .prepare_cached(
-            "SELECT id FROM bookmarks WHERE parent_id IS ?1 AND id != ?2 ORDER BY position, id",
+            "SELECT id, url IS NULL FROM bookmarks WHERE parent_id IS ?1 AND id != ?2
+             ORDER BY position, id",
         )?
-        .query_map(params![parent, id], |row| row.get(0))?
+        .query_map(params![parent, id], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let at = usize::try_from(index).map_or(siblings.len(), |index| index.min(siblings.len()));
+    let at = if folders_first {
+        let folders = siblings.iter().filter(|(_, folder)| *folder).count();
+        let index = if is_folder {
+            index
+        } else {
+            index.saturating_sub(folders as u32)
+        };
+        let peers: Vec<usize> = siblings
+            .iter()
+            .enumerate()
+            .filter_map(|(at, (_, folder))| (*folder == is_folder).then_some(at))
+            .collect();
+        peers
+            .get(index as usize)
+            .copied()
+            .or_else(|| peers.last().map(|at| at + 1))
+            .unwrap_or(siblings.len())
+    } else {
+        usize::try_from(index).map_or(siblings.len(), |index| index.min(siblings.len()))
+    };
+    let mut siblings: Vec<i64> = siblings.into_iter().map(|(id, _)| id).collect();
     siblings.insert(at, id);
     tx.execute(
         "UPDATE bookmarks SET parent_id = ?2 WHERE id = ?1",
@@ -902,6 +948,63 @@ mod tests {
             index,
             title: title.into(),
             url: url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn folder_listings_keep_all_subfolders_past_the_link_and_folder_caps() {
+        for nested in [false, true] {
+            let (mut hub, profile) = hub();
+            let parent = nested.then(|| {
+                added(hub.bookmarks(
+                    profile,
+                    BookmarkRequest::AddFolder {
+                        parent: None,
+                        title: "Parent".into(),
+                    },
+                ))
+            });
+            let conn = hub.profile_conn(profile).unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
+                 INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 SELECT ?1, x, 'Link ' || x, 'https://example.com/' || x, 0 FROM n",
+                params![parent, MAX_LISTING + 1],
+            )
+            .unwrap();
+            let folder = added(hub.bookmarks(
+                profile,
+                BookmarkRequest::AddFolder {
+                    parent,
+                    title: "Last folder".into(),
+                },
+            ));
+            let BookmarkReply::Nodes(nodes) =
+                hub.bookmarks(profile, BookmarkRequest::Children { parent })
+            else {
+                panic!("expected a listing");
+            };
+            assert_eq!(nodes.len(), MAX_LISTING as usize);
+            assert!(nodes.iter().any(|node| node.id == folder));
+            assert!(nodes[0].is_folder());
+            assert!(nodes.iter().any(|node| !node.is_folder()));
+
+            let conn = hub.profile_conn(profile).unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
+                 INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 SELECT ?1, ?2 + x, 'Folder ' || x, NULL, 0 FROM n",
+                params![parent, MAX_LISTING],
+            )
+            .unwrap();
+            let BookmarkReply::Nodes(nodes) =
+                hub.bookmarks(profile, BookmarkRequest::Children { parent })
+            else {
+                panic!("expected a listing");
+            };
+            assert!(nodes.len() > MAX_LISTING as usize);
+            assert!(nodes.iter().all(BookmarkNode::is_folder));
+            assert_eq!(nodes.last().unwrap().title, format!("Folder {MAX_LISTING}"));
         }
     }
 
@@ -1340,8 +1443,20 @@ mod tests {
                 },
             )
         };
-        assert_eq!(import(&mut hub, false), BookmarkReply::Imported(2));
-        assert_eq!(import(&mut hub, true), BookmarkReply::Imported(1));
+        assert_eq!(
+            import(&mut hub, false),
+            BookmarkReply::Imported {
+                added: 2,
+                partial: false
+            }
+        );
+        assert_eq!(
+            import(&mut hub, true),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false
+            }
+        );
         let BookmarkReply::Nodes(top) =
             hub.bookmarks(profile, BookmarkRequest::Children { parent: None })
         else {
@@ -1356,7 +1471,7 @@ mod tests {
                     parent: Some(top[0].id)
                 }
             )),
-            vec!["https://news.example/", "Docs"]
+            vec!["Docs", "https://news.example/"]
         );
         assert_eq!(
             titles(hub.bookmarks(
@@ -1389,7 +1504,13 @@ mod tests {
                 },
             )
         };
-        assert_eq!(import(&mut hub, vec![]), BookmarkReply::Imported(0));
+        assert_eq!(
+            import(&mut hub, vec![]),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
+        );
         // Links the profile cannot hold leave no folder either, nor an empty
         // one inside it.
         assert_eq!(
@@ -1409,7 +1530,10 @@ mod tests {
                     },
                 ]
             ),
-            BookmarkReply::Imported(0)
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
         );
         assert!(top(&mut hub).is_empty());
 
@@ -1419,12 +1543,159 @@ mod tests {
             title: "Яндекс".into(),
             url: "https://ya.ru/".into(),
         }];
-        assert_eq!(import(&mut hub, kept.clone()), BookmarkReply::Imported(1));
-        assert_eq!(import(&mut hub, kept), BookmarkReply::Imported(0));
-        assert_eq!(import(&mut hub, vec![]), BookmarkReply::Imported(0));
+        assert_eq!(
+            import(&mut hub, kept.clone()),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false
+            }
+        );
+        assert_eq!(
+            import(&mut hub, kept),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
+        );
+        assert_eq!(
+            import(&mut hub, vec![]),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
+        );
         let folders = top(&mut hub);
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].children, 1);
+    }
+
+    #[test]
+    fn capacity_limited_import_reports_partial_including_zero_added() {
+        let (mut hub, profile) = hub();
+        hub.profile_conn(profile)
+            .unwrap()
+            .execute(
+                "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?1)
+             INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+             SELECT NULL, n, 'Kept', 'https://kept.example/' || n, 0 FROM rows",
+                [MAX_BOOKMARKS - 2],
+            )
+            .unwrap();
+        let request = || BookmarkRequest::Import {
+            folder: "Imported".into(),
+            nodes: vec![
+                ImportNode::Link {
+                    title: "One".into(),
+                    url: "https://one.example/".into(),
+                },
+                ImportNode::Link {
+                    title: "Two".into(),
+                    url: "https://two.example/".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            hub.bookmarks(profile, request()),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: true
+            }
+        );
+        assert_eq!(
+            hub.bookmarks(profile, request()),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_full_profile_does_not_report_skipped_links_as_a_partial_import() {
+        let (mut hub, profile) = hub();
+        hub.profile_conn(profile)
+            .unwrap()
+            .execute(
+                "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?1)
+             INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+             SELECT NULL, n, 'Kept', 'https://kept.example/' || n, 0 FROM rows",
+                [MAX_BOOKMARKS],
+            )
+            .unwrap();
+        for url in ["javascript:alert(1)", "https://valid.example/"] {
+            assert_eq!(
+                hub.bookmarks(
+                    profile,
+                    BookmarkRequest::Import {
+                        folder: "Absent".into(),
+                        nodes: vec![ImportNode::Folder {
+                            title: "Nested".into(),
+                            children: vec![ImportNode::Link {
+                                title: "Link".into(),
+                                url: url.into()
+                            }]
+                        }]
+                    }
+                ),
+                BookmarkReply::Imported {
+                    added: 0,
+                    partial: url.starts_with("https:")
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn panel_moves_follow_folder_first_order_without_changing_extension_indexes() {
+        for panel in [true, false] {
+            let (mut hub, profile) = hub();
+            added(hub.bookmarks(profile, link(None, "Link", "https://link.example/")));
+            let a = added(hub.bookmarks(
+                profile,
+                BookmarkRequest::AddFolder {
+                    parent: None,
+                    title: "A".into(),
+                },
+            ));
+            added(hub.bookmarks(
+                profile,
+                BookmarkRequest::AddFolder {
+                    parent: None,
+                    title: "B".into(),
+                },
+            ));
+            let request = if panel {
+                BookmarkRequest::Move {
+                    id: a,
+                    parent: None,
+                    index: 1,
+                }
+            } else {
+                BookmarkRequest::Relocate {
+                    id: a,
+                    parent: None,
+                    index: Some(3),
+                }
+            };
+            hub.bookmarks(profile, request);
+            assert_eq!(
+                titles(hub.bookmarks(profile, BookmarkRequest::Children { parent: None })),
+                ["B", "A", "Link"],
+                "panel={panel}"
+            );
+            let BookmarkReply::Entries(entries) =
+                hub.bookmarks(profile, BookmarkRequest::ChildEntries { parent: None })
+            else {
+                panic!("entries")
+            };
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry.title.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Link", "B", "A"]
+            );
+        }
     }
 
     #[test]
@@ -1448,7 +1719,10 @@ mod tests {
                     nodes: vec![node],
                 },
             ),
-            BookmarkReply::Imported(1)
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false
+            }
         );
         let BookmarkReply::Nodes(found) = hub.bookmarks(
             profile,
@@ -1491,7 +1765,7 @@ mod tests {
         );
         assert_eq!(
             titles(hub.bookmarks(profile, BookmarkRequest::Children { parent: None })),
-            vec!["B", "Folder", "A"]
+            vec!["Folder", "B", "A"]
         );
         hub.bookmarks(
             profile,

@@ -122,6 +122,12 @@ fn compile(worker: &WorkerBlocker, profile: u128) -> Arc<ContentRules> {
     };
     assert!(rules.enabled());
     assert!(rules.coverage().has_blocking_entries());
+    // Loading cached text runs valid_cached_webkit_rule over every rule,
+    // including on macOS where the native consumer normally defers this load.
+    if let zephium_core::blocker::ContentRulesPayload::Declarative { encoded, .. } = rules.payload()
+    {
+        assert!(encoded.load().is_some(), "cached WebKit text must validate");
+    }
     rules
 }
 
@@ -211,6 +217,91 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
         style
     );
     assert_eq!(loads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        warm.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        BlockerShutdownOutcome::Clean
+    );
+}
+
+#[cfg(all(feature = "webkit", not(target_os = "windows")))]
+#[test]
+fn duplicate_source_domains_survive_cache_restart_without_source_loading() {
+    use zephium_core::blocker::ContentRulesPayload;
+
+    const SOURCE: &str = concat!(
+        "||ads.invalid^$script,domain=first.invalid|second.invalid|first.invalid\n",
+        "||excluded.invalid^$script,domain=~first.invalid|~second.invalid|~first.invalid\n",
+        "@@||allowed.invalid^$script,domain=first.invalid|second.invalid|first.invalid\n",
+    );
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let identity = Sha256::digest(SOURCE.as_bytes());
+    let catalog = PolicyCatalog::deferred_reloadable(identity, || {
+        Ok(StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("duplicate-domains").unwrap(),
+            SourceFormat::Standard,
+            SOURCE.into(),
+        )])
+        .unwrap())
+    });
+    let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+    let cold = WorkerBlocker::start_with_policy_catalog(catalog, config.clone()).unwrap();
+    let first = compile(&cold, 1);
+    let ContentRulesPayload::Declarative { encoded, .. } = first.payload() else {
+        panic!("WebKit artifact expected");
+    };
+    let expected = encoded.load().unwrap();
+    let rules: serde_json::Value = serde_json::from_str(&expected).unwrap();
+    for (host, field) in [
+        ("ads\\.invalid", "if-domain"),
+        ("excluded\\.invalid", "unless-domain"),
+        ("allowed\\.invalid", "if-domain"),
+    ] {
+        let mut observed = std::collections::BTreeSet::new();
+        for rule in rules.as_array().unwrap().iter().filter(|rule| {
+            rule["trigger"]["url-filter"]
+                .as_str()
+                .unwrap()
+                .contains(host)
+        }) {
+            let domains = rule["trigger"][field].as_array().unwrap();
+            let unique: std::collections::BTreeSet<_> = domains
+                .iter()
+                .map(|domain| domain.as_str().unwrap())
+                .collect();
+            assert_eq!(unique.len(), domains.len(), "duplicate {field} for {host}");
+            observed.extend(unique);
+        }
+        assert_eq!(
+            observed,
+            std::collections::BTreeSet::from(["*first.invalid", "*second.invalid"]),
+            "lost or broadened {field} coverage for {host}"
+        );
+    }
+    drop(first);
+    assert_eq!(
+        cold.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        BlockerShutdownOutcome::Clean
+    );
+    drop(cold);
+
+    let loads = Arc::new(AtomicUsize::new(0));
+    let observed = loads.clone();
+    let catalog = PolicyCatalog::deferred_reloadable(identity, move || {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Err(BlockerCompileFailure::SourceUnavailable)
+    });
+    let warm = WorkerBlocker::start_with_policy_catalog(catalog, config).unwrap();
+    let recovered = compile(&warm, 2);
+    let ContentRulesPayload::Declarative { encoded, .. } = recovered.payload() else {
+        panic!("WebKit artifact expected");
+    };
+    assert_eq!(encoded.load().unwrap(), expected);
+    assert_eq!(loads.load(Ordering::SeqCst), 0);
     assert_eq!(
         warm.shutdown_until(Instant::now() + Duration::from_secs(5)),
         BlockerShutdownOutcome::Clean

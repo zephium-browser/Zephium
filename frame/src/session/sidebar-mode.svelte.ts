@@ -15,9 +15,9 @@ export const MIN_EXPANDED_WIDTH = 180;
 export const MAX_EXPANDED_WIDTH = 460;
 
 /**
- * A column released below this is put away, and one following the pointer
- * stops at the minimum expanded width on the way. Nothing settles in the gap,
- * so the sidebar is always in one of its designed shapes.
+ * Dragging the handle below this snaps to the rail, and dragging back out of
+ * the rail snaps to the minimum expanded width. Nothing settles in the gap,
+ * so the sidebar is always in one of its two designed shapes.
  */
 export const SNAP_THRESHOLD = 140;
 
@@ -27,13 +27,7 @@ const WIDTH_SETTING = "sidebar.width";
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
 let expandedWidth = $state.raw(240);
-let drag: {
-  mode: SidebarMode;
-  desired: SidebarMode;
-  expanded: number;
-  pending: number;
-  followed: boolean;
-} | null = null;
+let drag = $state.raw<{ expanded: number; live: boolean } | null>(null);
 let resizeSettlement = $state(0);
 // One ordering counter, seeded above every earlier owner: an earlier
 // document, and an earlier copy of this module in the same document, which a
@@ -48,7 +42,10 @@ export const sidebarResizeSettlement = () => resizeSettlement;
 
 export const sidebarMode = () => mode;
 export const isCompact = () => mode === "compact";
-export const isHidden = () => mode === "hidden" && !held;
+export const isHidden = () => mode === "hidden" && !held && !fullColumnShown();
+
+let fullColumnHolds = $state(0);
+export const fullColumnShown = () => fullColumnHolds > 0;
 
 /** A destination that wants the column in view, the rail of Work or a tool,
  *  holds a hidden sidebar out for as long as it is shown. */
@@ -59,21 +56,24 @@ export function holdShown(value: boolean) {
   if (mode === "hidden") publish(true);
 }
 export const expanded = () => expandedWidth;
-/** The chrome gap between the rail and an open utility panel. */
+/** The gap between the rail and a tool's panel beside it. */
 export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
 export const effectiveWidth = () =>
-  panelExtent > 0
-    ? COMPACT_WIDTH + PANEL_GAP + panelExtent
-    : mode === "compact"
-      ? COMPACT_WIDTH
-      : // Hidden keeps its width: it comes back over the page at that width.
-        expandedWidth;
+  fullColumnShown()
+    ? expandedWidth
+    : panelExtent > 0
+      ? COMPACT_WIDTH + PANEL_GAP + panelExtent
+      : mode === "compact"
+        ? COMPACT_WIDTH
+        : // Hidden keeps its width: it comes back over the page at that width.
+          expandedWidth;
 
 export const hasPanel = () => panelExtent > 0;
 
-/** A utility panel borrows width beside the rail without changing the persisted mode. */
+/** A tool's panel stands beside the rail, without changing the persisted width
+ *  or mode. */
 export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
   if (next === panelExtent) return;
@@ -136,10 +136,16 @@ function publish(travel = false) {
 }
 
 export function applyDragWidth(value: number) {
-  if (drag) {
-    drag.pending = value;
+  if (!Number.isFinite(value)) return;
+  if (isHidden()) {
+    const width = clampExpanded(value);
+    if (drag && width === expandedWidth) return;
+    if (drag) expandedWidth = width;
+    else rememberWidth(width);
+    void commands.sidebarSetWidth(width, false, resizeRevision);
     return;
   }
+  if (drag) return;
   const next = resolveDragWidth(value);
   if (next.mode === mode && next.expanded === expandedWidth) {
     if (next.mode === "default") rememberWidth(next.expanded);
@@ -153,66 +159,62 @@ export function applyDragWidth(value: number) {
   if (modeChanged) save(mode);
 }
 
-/** The non-native capture fallback; `previewDragWidth` moves the column. */
-export function beginSidebarResize() {
+export function beginSidebarResize(followColumn = false) {
   if (drag) return;
-  drag = {
-    mode,
-    desired: desiredMode,
-    expanded: expandedWidth,
-    pending: effectiveWidth(),
-    followed: false,
-  };
+  drag = { expanded: expandedWidth, live: isHidden() || followColumn };
 }
 
-export function finishSidebarResize(value: number) {
-  if (!drag) return;
-  const { followed } = drag;
-  drag = null;
-  adoptResizeWidth(value);
-  // The page travels to the new edge, unless it has followed there already.
-  void commands.sidebarSetWidth(effectiveWidth(), !followed, resizeRevision);
-}
-
-/** An expanded column follows the drag. Only release saves the width. */
 export function previewDragWidth(value: number) {
-  if (!drag || mode !== "default" || !Number.isFinite(value)) return;
-  drag.followed = true;
+  if (!drag?.live || isHidden() || !Number.isFinite(value)) return;
   const next = clampExpanded(value);
   if (next === expandedWidth) return;
   expandedWidth = next;
   void commands.sidebarSetWidth(next, false, resizeRevision);
 }
 
-export function cancelSidebarResize() {
-  const started = drag;
+export function finishSidebarResize(value: number) {
+  if (!drag) return;
+  if (!Number.isFinite(value)) {
+    cancelSidebarResize();
+    return;
+  }
+  const { live, expanded } = drag;
   drag = null;
-  // A drag the column followed gives back the width it started from.
-  if (started?.followed && expandedWidth !== started.expanded) {
-    expandedWidth = started.expanded;
-    void commands.sidebarSetWidth(effectiveWidth(), false, resizeRevision);
+  if (live && !isHidden() && resolveDragWidth(value).mode === "hidden") {
+    hideFromDrag(expanded);
+    return;
+  }
+  adoptResizeWidth(value);
+  void commands.sidebarSetWidth(effectiveWidth(), !live && !isHidden(), resizeRevision);
+}
+
+export function cancelSidebarResize() {
+  const original = drag;
+  drag = null;
+  if (original?.live && expandedWidth !== original.expanded) {
+    expandedWidth = original.expanded;
+    void commands.sidebarSetWidth(expandedWidth, false, resizeRevision);
   }
 }
 
-/** Native moved the column with the pointer; release settles and saves it. */
-export function followResizeWidth(value: number, revision = resizeRevision) {
-  if (revision !== resizeRevision || !Number.isFinite(value) || mode !== "default") return;
-  expandedWidth = clampExpanded(value);
-}
-
-/** Native saw a drag released past the narrowest. The column hides, and comes
- *  back at `width`, where the drag started. */
-export function hideFromDrag(width: number, revision = resizeRevision) {
-  if (revision !== resizeRevision || !Number.isFinite(width)) return;
+function hideFromDrag(width: number) {
+  drag = null;
   expandedWidth = clampExpanded(width);
   resizeSettlement++;
-  setMode("hidden");
+  if (mode === "hidden") publish();
+  else setMode("hidden");
 }
 
 /** Native has admitted one final width; adopt its display shape without another layout command. */
 export function adoptResizeWidth(value: number, revision = resizeRevision) {
   if (revision !== resizeRevision) return;
   if (!Number.isFinite(value)) return;
+  drag = null;
+  if (isHidden()) {
+    rememberWidth(clampExpanded(value));
+    resizeSettlement++;
+    return;
+  }
   // A fast drag overshoots the bounds; it lands on the nearest one.
   const next = resolveDragWidth(Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
   if (next.mode === "hidden") {
@@ -233,22 +235,32 @@ let resizeListenerInstalled = false;
 function installResizeListener() {
   if (resizeListenerInstalled) return;
   resizeListenerInstalled = true;
-  window.addEventListener("zephium:sidebar-width-selected", (event) => {
-    if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
-      return;
-    const { width, revision } = event.detail;
-    if (typeof width === "number" && typeof revision === "number")
-      adoptResizeWidth(width, revision);
-  });
-  const listen = (name: string, handle: (width: number, revision: number) => void) =>
+  const listen = (name: string, handle: (width: number, active: unknown) => void) =>
     window.addEventListener(name, (event) => {
       if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
         return;
-      const { width, revision } = event.detail;
-      if (typeof width === "number" && typeof revision === "number") handle(width, revision);
+      const { width, revision, active } = event.detail;
+      if (revision === resizeRevision && typeof width === "number" && Number.isFinite(width))
+        handle(width, active);
     });
-  listen("zephium:sidebar-width-following", followResizeWidth);
-  listen("zephium:sidebar-hide-selected", hideFromDrag);
+  listen("zephium:sidebar-resize-progress", (width, active) => {
+    if (!isHidden()) return;
+    if (active === true) {
+      beginSidebarResize();
+      expandedWidth = clampExpanded(width);
+    } else if (active === false) cancelSidebarResize();
+  });
+  listen("zephium:sidebar-width-following", (width, active) => {
+    if (isHidden() || hasPanel() || isCompact()) return;
+    if (active === true) beginSidebarResize(true);
+    else if (active === false && drag?.live) drag = null;
+    else return;
+    expandedWidth = clampExpanded(width);
+  });
+  listen("zephium:sidebar-width-selected", (width) => adoptResizeWidth(width));
+  listen("zephium:sidebar-hide-selected", (width) => {
+    if (!isHidden() && !hasPanel() && !isCompact()) hideFromDrag(width);
+  });
 }
 
 // The shape this column last saved, until the store reports it back. Values
@@ -296,8 +308,18 @@ export function setMode(next: SidebarMode) {
  * Shows the full column for a moment without touching the preference. The
  * returned function puts the rail back, unless a shape was chosen meanwhile.
  */
-export function expandBriefly(): () => void {
+export function expandBriefly({ fullColumn = false }: { fullColumn?: boolean } = {}): () => void {
   cancelSidebarResize();
+  // A chooser needs the browser list even beside a mounted tool panel.
+  if (fullColumn) {
+    if (++fullColumnHolds === 1) publish(true);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (--fullColumnHolds === 0) publish(true);
+    };
+  }
   const away = mode;
   if (away === "default") return () => {};
   mode = "default";

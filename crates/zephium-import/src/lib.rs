@@ -316,12 +316,12 @@ fn profile_dir(
     }
 }
 
-/// Bookmarks of one profile, in that browser's own order.
+/// Bookmarks of one profile, in that browser's own order, and whether the node budget stopped reading.
 pub fn bookmarks(
     locations: &Locations,
     browser: Browser,
     profile: &str,
-) -> Result<Vec<ImportNode>, ImportError> {
+) -> Result<(Vec<ImportNode>, bool), ImportError> {
     let mut budget = MAX_NODES;
     let nodes = match browser {
         Browser::Safari => safari::bookmarks(locations)?,
@@ -340,7 +340,9 @@ pub fn bookmarks(
         }
         browser => chromium::bookmarks(&profile_dir(locations, browser, profile)?)?,
     };
-    Ok(bound(nodes, 0, &mut budget))
+    let mut partial = false;
+    let nodes = bound(nodes, 0, &mut budget, &mut partial);
+    Ok((nodes, partial))
 }
 
 /// Visits of one profile from the last `HISTORY_DAYS`, newest first.
@@ -396,21 +398,29 @@ pub fn essentials(
 /// Caps a tree's size and depth: folders past the depth limit are opened
 /// into their parent, and reading stops at the node budget. Only links
 /// Zephium would open are kept, so what is counted is what can be added.
-fn bound(nodes: Vec<ImportNode>, depth: usize, budget: &mut usize) -> Vec<ImportNode> {
+fn bound(
+    nodes: Vec<ImportNode>,
+    depth: usize,
+    budget: &mut usize,
+    partial: &mut bool,
+) -> Vec<ImportNode> {
     let mut kept = Vec::new();
     for node in nodes {
         if *budget == 0 {
+            *partial = true;
             break;
         }
         match node {
             ImportNode::Folder { title, children } if depth < MAX_TREE_DEPTH => {
                 *budget -= 1;
-                let children = bound(children, depth + 1, budget);
+                let children = bound(children, depth + 1, budget, partial);
                 if !children.is_empty() {
                     kept.push(ImportNode::Folder { title, children });
                 }
             }
-            ImportNode::Folder { children, .. } => kept.extend(bound(children, depth, budget)),
+            ImportNode::Folder { children, .. } => {
+                kept.extend(bound(children, depth, budget, partial))
+            }
             ImportNode::Link { ref url, .. } if !zephium_core::navigation::is_allowed_str(url) => {}
             link => {
                 *budget -= 1;
@@ -506,7 +516,7 @@ mod tests {
             children: vec![],
         };
         let mut budget = MAX_NODES;
-        let bounded = bound(vec![deep, empty], 0, &mut budget);
+        let bounded = bound(vec![deep, empty], 0, &mut budget, &mut false);
         assert_eq!(bounded.len(), 1);
         let mut depth = 0;
         let mut node = &bounded[0];
@@ -539,6 +549,7 @@ mod tests {
             ],
             0,
             &mut budget,
+            &mut false,
         );
         assert_eq!(
             bounded,
@@ -554,6 +565,7 @@ mod tests {
 
     #[test]
     fn bounding_stops_at_the_node_budget() {
+        let mut partial = false;
         let mut budget = 3;
         let bounded = bound(
             (0..10)
@@ -561,8 +573,13 @@ mod tests {
                 .collect(),
             0,
             &mut budget,
+            &mut partial,
         );
         assert_eq!(bounded.len(), 3);
+        assert!(partial);
+        let mut partial = false;
+        bound(vec![link("https://ok.example/")], 0, &mut 1, &mut partial);
+        assert!(!partial);
     }
 
     #[test]

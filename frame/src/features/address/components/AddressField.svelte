@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutPrefix, emptyShortcutBackspace } from "$shared/lib/search-shortcuts";
   import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import {
@@ -32,9 +33,11 @@
 
   let {
     compact = false,
+    sidebarVisible = true,
     trailing,
   }: {
     compact?: boolean;
+    sidebarVisible?: boolean;
     /** Controls that act on the page, at the far end of the field. Told which
      *  page it is, or null where there is no site to describe. */
     trailing?: Snippet<[SitePage | null]>;
@@ -68,6 +71,9 @@
   let fieldWidth = $state(0);
   let composing = false;
   let draft = $state("");
+  let activeShortcut = $derived(
+    editing ? (shortcutPrefix(draft, preferences.searchShortcuts())?.shortcut ?? null) : null,
+  );
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
   // A failure that fills the pane (a refused or unopened page) names its own
   // address; the page behind it, if any, is not what the person sees. The
@@ -158,12 +164,44 @@
     return true;
   }
 
+  function focusAddress() {
+    input.focus();
+    input.select();
+  }
+
+  let pendingFocus = $state.raw<{ tab: string | null; cancel: () => void } | null>(null);
   $effect(() => {
     const command = ui.uiCommand();
     if (command.seq === 0 || command.id !== "url.focus" || input === undefined) return;
     if (untrack(editInLauncher)) return;
-    input.focus();
-    input.select();
+    if (untrack(() => compact)) {
+      void commands.runCommand("launcher.toggle");
+      return;
+    }
+    if (untrack(() => sidebarVisible)) {
+      focusAddress();
+      return;
+    }
+    const release = attention.hold();
+    const cancel = () => {
+      clearTimeout(timeout);
+      window.removeEventListener("blur", cancel);
+      pendingFocus = null;
+      release();
+    };
+    const timeout = setTimeout(cancel, 1500);
+    window.addEventListener("blur", cancel);
+    pendingFocus = { tab: untrack(tabs.activeId), cancel };
+    return cancel;
+  });
+  $effect(() => {
+    const request = pendingFocus;
+    if (!request) return;
+    if (request.tab !== tabs.activeId()) request.cancel();
+    else if (sidebarVisible) {
+      focusAddress();
+      request.cancel();
+    }
   });
 
   async function submit(event: SubmitEvent) {
@@ -300,6 +338,7 @@
     appearing under the address bar would push the whole chrome down.
   -->
   <div
+    data-shortcut={activeShortcut?.id}
     class:sr-only={compact}
     class:flex={!compact}
     bind:clientWidth={fieldWidth}
@@ -337,7 +376,9 @@
         aria-hidden={finding || undefined}
         data-zephium-address
         type="text"
-        aria-label={m.ui_address_and_search()}
+        aria-label={activeShortcut
+          ? m.search_shortcut_label({ name: activeShortcut.name })
+          : m.ui_address_and_search()}
         autocomplete="off"
         autocapitalize="off"
         enterkeyhint="go"
@@ -348,6 +389,16 @@
         oncompositionstart={() => (composing = true)}
         oncompositionend={() => (composing = false)}
         onkeydown={(event) => {
+          if (
+            event.key === "Backspace" &&
+            !composing &&
+            !event.isComposing &&
+            event.keyCode !== 229 &&
+            emptyShortcutBackspace(draft, preferences.searchShortcuts()) !== null
+          ) {
+            event.preventDefault();
+            draft = "";
+          }
           if (event.key === "Escape" && !event.isComposing) {
             event.preventDefault();
             failed = false;
@@ -392,6 +443,9 @@
 
     {#if finding}
       <span class="find-count" role="status" aria-live="polite">{findCount}</span>
+      {#if find.failed()}
+        <span class="find-count" role="alert">{m.find_step_failed()}</span>
+      {/if}
       <IconButton
         icon={ArrowUp01Icon}
         label={m.find_previous()}

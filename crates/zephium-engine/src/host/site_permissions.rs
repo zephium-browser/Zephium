@@ -114,43 +114,113 @@ fn listed(
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn permission_read_limit(count: u32, complete: bool) -> Option<u32> {
+    let max = zephium_core::permissions::MAX_SITE_PERMISSIONS as u32;
+    if complete && count > max {
+        None
+    } else {
+        Some(count.min(max + 1))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn snapshot_entry<T>(complete: bool, known: bool, entry: Option<T>) -> Option<Option<T>> {
+    if complete && known && entry.is_none() {
+        None
+    } else {
+        Some(entry)
+    }
+}
+
 impl EngineHost {
+    /// The WebView2 profile holding `profile`'s saved decisions, admitted as
+    /// a data call is, and whether a hidden page was opened to reach it.
     #[cfg(target_os = "windows")]
     fn human_profile(
-        &self,
+        &mut self,
         profile: ProfileId,
-    ) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4> {
+        snapshot: bool,
+    ) -> Option<(
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4,
+        Option<super::lifecycle::TemporaryPage>,
+    )> {
         use windows::core::Interface;
         use wry::WebViewExtWindows;
-        use zephium_core::ports::engine::Partition;
-        let human = |partition: &Partition| {
-            !matches!(partition, Partition::Ephemeral(_)) && partition.profile() == profile
-        };
-        let view = self
-            .views
-            .iter()
-            .find(|(item, _)| self.partitions.get(item).is_some_and(human))
-            .map(|(_, view)| &view.view)
-            .or_else(|| {
-                self.spare
-                    .as_ref()
-                    .filter(|spare| human(&spare.partition))
-                    .map(|spare| &spare.view.view)
+        if snapshot
+            && self.profile_persistence_classes.get(&profile)
+                == Some(&super::profiles::ProfilePersistenceClass::Ephemeral)
+        {
+            if self.erasure_tombstones.contains(&profile) {
+                return None;
+            }
+            let view = self.views.iter().find_map(|(id, view)| {
+                (self.partitions.get(id)
+                    == Some(&zephium_core::ports::engine::Partition::Ephemeral(profile)))
+                .then_some(view)
             })?;
-        crate::platform::imp::extensions::profile(&view.webview())
-            .ok()?
-            .cast()
-            .ok()
+            let native = crate::platform::imp::extensions::profile(&view.webview())
+                .ok()?
+                .cast()
+                .ok()?;
+            return Some((native, None));
+        }
+        let partition = zephium_core::ports::engine::Partition::Persistent(profile);
+        super::browsing_data::admitted_profile(
+            partition,
+            &mut self.profile_persistence_classes,
+            &self.erasure_tombstones,
+        )
+        .ok()?;
+        self.reach_durable_profile(partition, |view| {
+            crate::platform::imp::extensions::profile(&view.webview())
+                .ok()?
+                .cast()
+                .ok()
+        })
     }
 
-    pub(crate) fn site_permissions(&self, profile: ProfileId, done: SitePermissionsDone) {
+    /// Closes a page opened only for one call once that call has answered.
+    #[cfg(target_os = "windows")]
+    fn after_answer<T: 'static>(
+        page: Option<super::lifecycle::TemporaryPage>,
+        done: Box<dyn FnOnce(T) + Send>,
+    ) -> Box<dyn FnOnce(T) + Send> {
+        let Some(page) = page else {
+            return done;
+        };
+        Box::new(move |answer| {
+            done(answer);
+            drop(page);
+        })
+    }
+
+    pub(crate) fn site_permissions(&mut self, profile: ProfileId, done: SitePermissionsDone) {
+        self.read_site_permissions(profile, false, done);
+    }
+
+    pub(crate) fn site_permission_snapshot(
+        &mut self,
+        profile: ProfileId,
+        done: SitePermissionsDone,
+    ) {
+        self.read_site_permissions(profile, true, done);
+    }
+
+    fn read_site_permissions(
+        &mut self,
+        profile: ProfileId,
+        complete: bool,
+        done: SitePermissionsDone,
+    ) {
         #[cfg(target_os = "windows")]
         {
             use std::cell::Cell;
             use std::rc::Rc;
-            let Some(native) = self.human_profile(profile) else {
+            let Some((native, page)) = self.human_profile(profile, complete) else {
                 return done(None);
             };
+            let done = Self::after_answer(page, done);
             let slot = Rc::new(Cell::new(Some(done)));
             let callback = slot.clone();
             let handler = webview2_com::GetNonDefaultPermissionSettingsCompletedHandler::create(
@@ -160,7 +230,14 @@ impl EngineHost {
                     };
                     let read = || -> windows::core::Result<Vec<SitePermission>> {
                         status?;
-                        let Some(settings) = settings else {
+                        let invalid = || {
+                            windows::core::Error::from_hresult(
+                                windows::Win32::Foundation::E_INVALIDARG,
+                            )
+                        };
+                        let Some(settings) =
+                            snapshot_entry(complete, true, settings).ok_or_else(invalid)?
+                        else {
                             return Ok(Vec::new());
                         };
                         let mut count = 0;
@@ -168,8 +245,7 @@ impl EngineHost {
                         unsafe { settings.Count(&mut count)? };
                         let mut entries = Vec::new();
                         // One past the cap, so the listing knows it is cut short.
-                        let limit =
-                            count.min(zephium_core::permissions::MAX_SITE_PERMISSIONS as u32 + 1);
+                        let limit = permission_read_limit(count, complete).ok_or_else(invalid)?;
                         for index in 0..limit {
                             // SAFETY: index is below the collection's Count.
                             let setting = unsafe { settings.GetValueAtIndex(index)? };
@@ -177,14 +253,25 @@ impl EngineHost {
                             let mut state = COREWEBVIEW2_PERMISSION_STATE::default();
                             let mut origin = windows::core::PWSTR::null();
                             // SAFETY: outputs are initialized and the string
-                            // is freed by take_pwstr.
+                            // is freed by take_pwstr_bounded.
                             unsafe {
                                 setting.PermissionKind(&mut kind)?;
                                 setting.PermissionState(&mut state)?;
-                                setting.PermissionOrigin(&mut origin)?;
                             }
-                            let origin = webview2_com::take_pwstr(origin);
-                            entries.extend(listed(&origin, kind, state));
+                            // SAFETY: native getter initializes its owned output;
+                            // copy/free it even when the getter reports failure.
+                            let received = unsafe { setting.PermissionOrigin(&mut origin) };
+                            let bound = zephium_core::permissions::MAX_PAGE_ORIGIN_BYTES + 1;
+                            let origin =
+                                crate::platform::imp::take_pwstr_bounded(origin, bound, bound);
+                            received?;
+                            let entry = origin
+                                .as_deref()
+                                .and_then(|origin| listed(origin, kind, state));
+                            entries.extend(
+                                snapshot_entry(complete, site_kind(kind).is_some(), entry)
+                                    .ok_or_else(invalid)?,
+                            );
                         }
                         Ok(entries)
                     };
@@ -201,13 +288,13 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = profile;
+            let _ = (profile, complete);
             done(None);
         }
     }
 
     pub(crate) fn set_site_permission(
-        &self,
+        &mut self,
         profile: ProfileId,
         origin: PageOrigin,
         kind: SitePermissionKind,
@@ -218,10 +305,13 @@ impl EngineHost {
         {
             use std::cell::Cell;
             use std::rc::Rc;
-            let (Some(native), Some(kind)) = (self.human_profile(profile), native_kind(kind))
-            else {
+            let Some(kind) = native_kind(kind) else {
                 return done(false);
             };
+            let Some((native, page)) = self.human_profile(profile, false) else {
+                return done(false);
+            };
+            let done = Self::after_answer(page, done);
             let slot = Rc::new(Cell::new(Some(done)));
             let callback = slot.clone();
             let handler =
@@ -302,5 +392,35 @@ mod tests {
             COREWEBVIEW2_PERMISSION_STATE_DENY
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn filtering_or_truncation_cannot_establish_a_complete_negative_snapshot() {
+        let over = zephium_core::permissions::MAX_SITE_PERMISSIONS as u32 + 1;
+        assert!(
+            permission_read_limit(over, true).is_none(),
+            "native Count is checked before unsupported rows are filtered"
+        );
+        assert_eq!(
+            permission_read_limit(over, false),
+            Some(over),
+            "UI may still list a partial page"
+        );
+        let missing_collection: Option<Vec<()>> = None;
+        assert!(
+            snapshot_entry(true, true, missing_collection).is_none(),
+            "a successful callback without a collection is unavailable"
+        );
+        assert!(
+            snapshot_entry::<()>(true, true, None).is_none(),
+            "missing native collection or malformed known row cannot imply complete negative proof"
+        );
+        assert_eq!(snapshot_entry::<()>(false, true, None), Some(None));
+        assert_eq!(snapshot_entry::<()>(true, false, None), Some(None));
+        assert_eq!(snapshot_entry(true, true, Some(7)), Some(Some(7)));
     }
 }

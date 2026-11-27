@@ -37,7 +37,8 @@ static CHROME_GENERATION: AtomicU64 = AtomicU64::new(0);
 static NEXT_CHROME_GENERATION: AtomicU64 = AtomicU64::new(1);
 static NEXT_PRIVILEGED_DELEGATE_GENERATION: AtomicU64 = AtomicU64::new(1);
 static CHROME_ORIGIN: Mutex<ChromeOrigin> = Mutex::new(ChromeOrigin::empty());
-const MAX_PRIVILEGED_UI_DELEGATES: usize = 2;
+/// Main chrome, the launcher, and one toolbar per mini window.
+const MAX_PRIVILEGED_UI_DELEGATES: usize = 2 + zephium_app::MAX_MINI_WINDOWS;
 
 struct ChromeViewState {
     generation: u64,
@@ -366,6 +367,52 @@ pub fn restart_content_process(window: &WebviewWindow) {
     });
 }
 
+/// Pins a mini window's toolbar WebView to the top `height` points of its
+/// window, so it never overlaps the page stage below it (the cursor-fight
+/// rule). AppKit keeps it there as the window resizes.
+pub fn fit_toolbar(window: &WebviewWindow, height: f64) -> bool {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let scheduled = window.with_webview(move |webview| {
+        use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        // SAFETY: Tauri supplies a live WKWebView pointer for the duration
+        // of this main-thread callback.
+        let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+        let Some(superview) = (unsafe { webkit.superview() }) else {
+            let _ = send.send(false);
+            return;
+        };
+        let bounds = superview.bounds();
+        let frame = NSRect::new(
+            NSPoint::new(0.0, (bounds.size.height - height).max(0.0)),
+            NSSize::new(bounds.size.width, height.min(bounds.size.height)),
+        );
+        webkit.setTranslatesAutoresizingMaskIntoConstraints(true);
+        webkit.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewMinYMargin);
+        webkit.setFrame(frame);
+        let _ = send.send(true);
+    });
+    scheduled.is_ok() && receive.try_recv().unwrap_or(false)
+}
+
+/// The size of any window's content area in points, read from AppKit rather
+/// than from a WebView that may have been resized inside it.
+pub fn window_content_size(window: &WebviewWindow) -> Option<zephium_core::geometry::Size> {
+    MainThreadMarker::new()?;
+    let pointer = window.ns_window().ok()?;
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: Tauri returns the live NSWindow it owns; this runs on the main
+    // thread and only reads its content view's bounds.
+    let ns_window: &objc2_app_kit::NSWindow = unsafe { &*pointer.cast() };
+    let bounds = ns_window.contentView()?.bounds();
+    Some(zephium_core::geometry::Size::new(
+        bounds.size.width,
+        bounds.size.height,
+    ))
+}
+
 pub fn harden_privileged(window: &WebviewWindow) -> bool {
     let installed = Arc::new(AtomicU64::new(0));
     let completed = installed.clone();
@@ -536,6 +583,15 @@ impl PresentationChrome for ChromeAdapter {
     ) -> ChromePresentationDispatch {
         crate::apply_chrome_presentation(&self.window, presentation, done)
     }
+
+    fn apply_mini_presentation(
+        &self,
+        window: u64,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::mini::apply_presentation(self.window.app_handle(), window, presentation, done)
+    }
 }
 
 fn dispatch_chrome_layout(
@@ -687,7 +743,11 @@ pub fn sidebar_card_lights(window: &WebviewWindow, shown: bool) {
 
 /// Native has a new column width; a guide left at another edge goes off.
 pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
-    let _ = window.run_on_main_thread(move || sidebar_resize::column_width(width));
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        sidebar_resize::column_width(width);
+        sidebar_edge::column_width(&owner, width);
+    });
 }
 
 pub async fn configure_sidebar_resize(
@@ -713,40 +773,41 @@ pub async fn configure_sidebar_resize(
             else {
                 return false;
             };
-            let commit = std::rc::Rc::new(move |release, revision| {
+            let commit = std::rc::Rc::new(move |resize, revision| {
                 if CHROME_GENERATION.load(Ordering::Acquire) != generation
                     || !sidebar_resize::publish_revision(revision)
                 {
-                    return;
+                    return false;
                 }
-                // A change of shape travels, which also covers the chrome's
-                // repaint; a column following the pointer moves with it.
-                let (width, travel, event) = match release {
-                    sidebar_resize::Release::Follow(width) => {
-                        (width, false, "zephium:sidebar-width-following")
+                let (width, travel, event, active) = match resize {
+                    sidebar_resize::Resize::CardProgress { width, active } => {
+                        (width, false, "zephium:sidebar-resize-progress", Some(active))
                     }
-                    sidebar_resize::Release::Land { width, travel } => {
-                        (width, travel, "zephium:sidebar-width-selected")
+                    sidebar_resize::Resize::ColumnProgress { width, active } => {
+                        (width, false, "zephium:sidebar-width-following", Some(active))
                     }
-                    // Hiding is the frame's to own: it saves the choice and
-                    // publishes the width and the hidden layout together.
-                    sidebar_resize::Release::Hide { width } => {
-                        crate::emit_to_privileged(
+                    sidebar_resize::Resize::Land { width, travel } => {
+                        (width, travel, "zephium:sidebar-width-selected", None)
+                    }
+                    sidebar_resize::Resize::Hide { width } => {
+                        return crate::try_emit_to_privileged(
                             sender.app_handle(),
                             crate::MAIN_LABEL,
                             "zephium:sidebar-hide-selected",
                             &serde_json::json!({"width": width, "revision": revision}),
                         );
-                        return;
                     }
                 };
-                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, travel)) {
-                    crate::emit_to_privileged(
+                let admitted = shell.dispatch(zephium_app::Command::SetSidebarWidth(width, travel));
+                if admitted || active == Some(false) {
+                    crate::try_emit_to_privileged(
                         sender.app_handle(),
                         crate::MAIN_LABEL,
                         event,
-                        &serde_json::json!({"width": width, "revision": revision}),
-                    );
+                        &serde_json::json!({"width": width, "revision": revision, "active": active}),
+                    )
+                } else {
+                    false
                 }
             });
             sidebar_resize::configure(&view, generation, width, enabled, revision, commit)

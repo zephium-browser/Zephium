@@ -1,3 +1,5 @@
+import { preferences } from "$domain/preferences";
+import { tick } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -24,12 +26,26 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    searchShortcutDefaults: async () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled: true,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+    settingGet: async () => null,
     launcherSearch: native.search,
     launcherRun: native.run,
     panelLayout: native.layout,
   });
 });
 afterEach(() => {
+  preferences.dispose();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
   delete document.documentElement.dataset.material;
@@ -56,6 +72,7 @@ function glass(layout: PanelLayout) {
 }
 
 const context: PanelState = {
+  switcher: null,
   ...native.context,
   revision: "0000000000000001",
   visible: true,
@@ -64,6 +81,7 @@ const context: PanelState = {
   corner_radius: 20,
   seed: null,
   seed_tab: null,
+  mini: false,
 };
 const destinations = [
   { kind: "tasks" as const, label: "Tasks", icon: CheckListIcon },
@@ -136,6 +154,30 @@ test("ArrowUp from the typed action selects and runs the last suggestion", async
   await vi.waitFor(() =>
     expect(native.run).toHaveBeenCalledExactlyOnceWith(bookmark.action, owner, false),
   );
+});
+
+test("opened for a mini window, the field says where the address goes", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await expect
+    .element(screen.getByRole("combobox", { name: "Open in a mini window" }))
+    .toBeVisible();
+});
+
+test("opened for a mini window, it offers sites and no app actions", async () => {
+  const screen = await render(LauncherPanel, {
+    props: {
+      context: { ...context, mini: true },
+      destinations,
+      onCapture: async (text: string) => text,
+    },
+  });
+  await expect.element(screen.getByRole("button", { name: "Tasks" })).not.toBeInTheDocument();
+  await screen.getByRole("combobox").fill("tasks");
+  await reply("tasks", [search("tasks")]);
+  await expect.element(screen.getByRole("option", { name: /tasks/iu }).first()).toBeVisible();
+  await expect.poll(() => screen.getByRole("option").elements().length).toBe(1);
 });
 
 test("an obsolete answer cannot put its rows back on screen", async () => {
@@ -384,6 +426,39 @@ test("The primary modifier plus Enter opens behind the current tab and keeps the
   expect(onDismiss).not.toHaveBeenCalled();
 });
 
+test("in a mini window's launcher the primary modifier plus Enter still opens in front", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await screen.getByRole("combobox").fill("rust");
+  const owner = await reply("rust", [visit("Rust Book", "https://doc.rust-lang.org/book/")]);
+  await userEvent.keyboard(`{${primary}>}{Enter}{/${primary}}`);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(
+      { type: "OpenUrl", url: "https://doc.rust-lang.org/book/" },
+      owner,
+      false,
+    ),
+  );
+  await expect.element(screen.getByText("Opened in a background tab")).not.toBeInTheDocument();
+});
+
+test("in a mini window's launcher the primary modifier plus Enter before results waits for them", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await screen.getByRole("combobox").fill("rust");
+  await userEvent.keyboard(`{${primary}>}{Enter}{/${primary}}`);
+  const owner = await reply("rust", [visit("Rust Book", "https://doc.rust-lang.org/book/")]);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(
+      { type: "OpenUrl", url: "https://doc.rust-lang.org/book/" },
+      owner,
+      false,
+    ),
+  );
+});
+
 test("The primary modifier plus K lists what can be done to the selected row", async () => {
   const screen = await render(LauncherPanel, { props: { context, destinations } });
   await screen.getByRole("combobox").fill("rust");
@@ -468,6 +543,11 @@ test("editing an address asks for that address and never for an empty field firs
   await new Promise((done) => setTimeout(done, 100));
   expect(native.search.mock.calls.map(([query]) => query)).toEqual(["https://example.com/"]);
   await expect.element(screen.getByRole("combobox")).toHaveValue("https://example.com/");
+  const input = screen.getByRole("combobox").element() as HTMLInputElement;
+  expect(document.activeElement).toBe(input);
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+  await userEvent.keyboard("https://github.com/");
+  await expect.element(screen.getByRole("combobox")).toHaveValue("https://github.com/");
 });
 
 test("sleeping past the resume deadline clears a query even when its timer never fired", async () => {
@@ -486,6 +566,128 @@ test("sleeping past the resume deadline clears a query even when its timer never
   } finally {
     now.mockRestore();
   }
+});
+
+test("dismissing an unedited address does not carry it into the next launcher session", async () => {
+  const screen = await render(LauncherPanel, {
+    props: {
+      context: {
+        ...context,
+        seed: "https://example.com/",
+        seed_tab: "tab-1",
+      },
+      destinations,
+    },
+  });
+  await reply("https://example.com/", [visit("Example", "https://example.com/")]);
+  await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  const calls = native.search.mock.calls.length;
+  await screen.rerender({
+    context: {
+      ...context,
+      revision: "0000000000000003",
+      session_id: "0000000000000003",
+      seed: null,
+      seed_tab: null,
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(calls));
+  expect(native.search.mock.calls.at(-1)?.[0]).toBe("");
+});
+
+test("switching profiles clears any resumed query and home list from the previous profile", async () => {
+  const tab: SearchResult = {
+    kind: "tab",
+    title: "Private Tab",
+    detail: "private.example",
+    icon: null,
+    action: { type: "ActivateTab", id: "tab-1" },
+  };
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await reply("", [tab]);
+  await expect.element(screen.getByRole("option", { name: /Private Tab/u })).toBeVisible();
+  await screen.getByRole("combobox").fill("private query");
+  await reply("private query", [search("private query")]);
+  await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: null,
+      profile_name: null,
+      revision: "0000000000000003",
+      session_id: "0000000000000003",
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+
+  await screen.getByRole("combobox").fill("unowned query");
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: null,
+      profile_name: null,
+      revision: "0000000000000004",
+      visible: false,
+    },
+  });
+  const calls = native.search.mock.calls.length;
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: "work",
+      profile_name: "Work",
+      revision: "0000000000000005",
+      session_id: "0000000000000005",
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(calls));
+  expect(native.search.mock.calls.at(-1)?.[0]).toBe("");
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+});
+
+test("switching profiles drops a pending capture and search reply from the old presentation", async () => {
+  let finishCapture!: (title: string) => void;
+  const capture = new Promise<string>((resolve) => {
+    finishCapture = resolve;
+  });
+  const onCapture = vi.fn((_text: string) => capture);
+  const screen = await render(LauncherPanel, { props: { context, destinations, onCapture } });
+  const input = screen.getByRole("combobox");
+  await input.fill("private query");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe("private query"));
+  const oldRequest = native.search.mock.calls.at(-1)![1];
+  await userEvent.keyboard("{Alt>}{Enter}{/Alt}");
+  expect(onCapture).toHaveBeenCalledExactlyOnceWith("private query");
+  await expect.element(screen.getByText("Opening…")).toBeVisible();
+
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: "work",
+      profile_name: "Work",
+      revision: "0000000000000002",
+      session_id: "0000000000000002",
+    },
+  });
+  await expect.element(input).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe(""));
+  await expect.element(screen.getByText("Opening…")).not.toBeInTheDocument();
+
+  finishCapture("Private task");
+  emitNativeEvent("searchChanged", {
+    context: { ...native.context, request_id: oldRequest },
+    query: "private query",
+    results: [visit("Private result", "https://private.example/")],
+    completion: null,
+    pending: false,
+  });
+  await capture;
+  await tick();
+  await expect.element(screen.getByText("Added “Private task” to Tasks")).not.toBeInTheDocument();
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
 });
 
 test("anything typed can be kept as a task, by its row or by Option+Enter", async () => {
@@ -683,4 +885,16 @@ test("the sheet stops where a short display lets the window stop", async () => {
   } finally {
     available.mockRestore();
   }
+});
+
+test("launcher exposes the prefix shortcut and clears it with empty Backspace", async () => {
+  await preferences.init();
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "yt ");
+  await expect.element(screen.getByRole("combobox", { name: "Search YouTube" })).toBeVisible();
+  expect(screen.container.querySelector("[data-shortcut='youtube']")).not.toBeNull();
+  await userEvent.keyboard("{Backspace}");
+  await expect.element(field).toHaveValue("");
+  expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
 });

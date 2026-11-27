@@ -48,3 +48,33 @@ fn shutdown_installs_completion_before_canceling_native_policy_work() {
         "a synchronous native cancellation callback must observe the retained completion"
     );
 }
+
+#[test]
+fn only_a_durable_page_of_the_same_profile_reaches_its_store() {
+    use zephium_core::ports::engine::Partition;
+    let profile = ProfileId::generate();
+    let other = ProfileId::generate();
+    assert!(durable_partition_of(Partition::Default(profile), profile));
+    assert!(durable_partition_of(
+        Partition::Persistent(profile),
+        profile
+    ));
+    assert!(!durable_partition_of(
+        Partition::Ephemeral(profile),
+        profile
+    ));
+    assert!(!durable_partition_of(Partition::Persistent(other), profile));
+}
+
+#[test]
+fn a_temporary_page_in_use_is_kept_from_idle_and_pressure_release() {
+    let profile = ProfileId::generate();
+    let other = ProfileId::generate();
+    assert!(temporary_page_held(Some((profile, 2)), Some(profile)));
+    assert!(temporary_page_held(Some((profile, 1)), Some(profile)));
+    // Its last use dropped, or another profile's spare, or none at all.
+    assert!(!temporary_page_held(Some((profile, 0)), Some(profile)));
+    assert!(!temporary_page_held(Some((profile, 1)), Some(other)));
+    assert!(!temporary_page_held(Some((profile, 1)), None));
+    assert!(!temporary_page_held(None, Some(profile)));
+}
