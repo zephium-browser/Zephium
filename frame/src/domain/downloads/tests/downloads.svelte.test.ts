@@ -114,7 +114,7 @@ test("loading an older page cannot exceed the history limit", async () => {
   const { DownloadSession } = await import("../downloads.svelte");
   const session = new DownloadSession(profile);
   const item = (id: number) => ({ ...entry, id: String(id).padStart(26, "0") });
-  session.entries = Array.from({ length: 1999 }, (_, at) => item(2002 - at));
+  session.entries = [...Array.from({ length: 1998 }, (_, at) => item(2001 - at)), item(1)];
   session.next = item(4).id;
   host.call.mockResolvedValueOnce({
     kind: "page",
@@ -126,9 +126,51 @@ test("loading an older page cannot exceed the history limit", async () => {
 
   await session.reload(true);
   expect(session.entries).toHaveLength(2000);
-  expect(session.entries.at(-1)?.id).toBe(item(3).id);
+  expect(session.entries.at(-1)?.id).toBe(item(2).id);
+  expect(session.entries.some(({ id }) => id === item(1).id)).toBe(false);
   await session.reload(true);
   expect(host.call).toHaveBeenCalledOnce();
+});
+
+test("pagination resumes after the oldest retained download when a page was trimmed", async () => {
+  const { DownloadSession } = await import("../downloads.svelte");
+  const session = new DownloadSession(profile);
+  const item = (id: number) => ({ ...entry, id: String(id).padStart(26, "0") });
+  session.entries = Array.from({ length: 1999 }, (_, at) => item(2002 - at));
+  session.next = item(4).id;
+  const cleanup = { running: false, error: null };
+  host.call.mockResolvedValueOnce({
+    kind: "page",
+    entries: [item(3), item(2)],
+    next: null,
+    supported: true,
+    cleanup,
+  });
+  await session.reload(true);
+
+  host.call.mockResolvedValueOnce({
+    kind: "updates",
+    entries: [],
+    removed: [item(2002).id],
+    cleanup,
+  });
+  await session.refresh();
+  host.call.mockResolvedValueOnce({
+    kind: "page",
+    entries: [item(2)],
+    next: null,
+    supported: true,
+    cleanup,
+  });
+  await session.reload(true);
+
+  expect(host.call).toHaveBeenLastCalledWith(profile, {
+    kind: "list",
+    before: item(3).id,
+    limit: 50,
+  });
+  expect(session.entries.at(-1)?.id).toBe(item(2).id);
+  expect(session.next).toBeNull();
 });
 
 test("the status indicator reads a bounded snapshot on subscribe and ignores another profile", async () => {

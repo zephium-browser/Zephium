@@ -176,9 +176,15 @@ export class DownloadSession {
                   !this.removedDuringLoad.has(entry.id) &&
                   !entries.some((old) => old.id === entry.id),
               ),
-            ].sort((a, b) => b.id.localeCompare(a.id));
+            ];
+        merged.sort((a, b) => b.id.localeCompare(a.id));
         this.entries = merged.slice(0, MAX_HISTORY_ENTRIES);
         this.next = response.next;
+        if (merged.length > MAX_HISTORY_ENTRIES) {
+          const oldestRetained = merged[MAX_HISTORY_ENTRIES - 1].id;
+          // The native cursor is exclusive. Resume before the retained boundary if the page was trimmed.
+          if (!this.next || oldestRetained.localeCompare(this.next) > 0) this.next = oldestRetained;
+        }
         this.error = null;
       } else if (response.kind === "error") {
         this.error = response.error;
