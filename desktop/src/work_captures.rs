@@ -9,8 +9,7 @@ static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 static RECENT_VIEWS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 pub(crate) fn install(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    let Ok(directory) = app.path().app_data_dir() else {
+    let Ok(directory) = super::data_root::root(app) else {
         return;
     };
     if DIRECTORY.set(directory.join("captures")).is_ok() {

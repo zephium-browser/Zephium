@@ -121,6 +121,7 @@ reqwest = { version = "=0.13.4", default-features = false, features = ["rustls",
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico", "bmp"] }
 tokio = { workspace = true, features = ["time", "fs", "io-util"] }
 getrandom = "=0.4.3"
+dirs = "=6.0.0"
 tauri.workspace = true
 zephium-core.workspace = true
 zephium-ipc.workspace = true
@@ -133,6 +134,7 @@ zephium-agent-runtime = { workspace = true, optional = true }
 zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-store.workspace = true
+zephium-private-fs.workspace = true
 zephium-notes.workspace = true
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }
@@ -140,6 +142,7 @@ tauri-plugin-single-instance.workspace = true
 window-vibrancy = "=0.8.1"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "=0.10.9"
 specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
@@ -171,6 +174,9 @@ raw-window-handle.workspace = true
 webview2-com = "0.38"
 windows-version = "=0.1.7"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_System_LibraryLoader", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_Globalization", "Data_Xml_Dom", "UI_Notifications"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zephium-blocker = { workspace = true, features = ["webkit"] }

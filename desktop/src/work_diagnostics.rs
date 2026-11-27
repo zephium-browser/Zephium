@@ -8,8 +8,7 @@ const MAX_RECORD_BYTES: usize = 4096;
 static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
 pub(crate) fn install(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    let Ok(directory) = app.path().app_log_dir() else {
+    let Ok(directory) = super::data_root::logs(app) else {
         return;
     };
     if std::fs::create_dir_all(&directory).is_err() {

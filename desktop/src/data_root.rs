@@ -1,0 +1,1008 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Manager};
+
+static DATA_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static CUSTOM_ROOT: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static CUSTOM_INSTANCE_LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArgumentError {
+    MissingPath,
+    Duplicate,
+    EmptyPath,
+}
+
+impl std::fmt::Display for ArgumentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPath => f.write_str("--user-data-dir requires a path"),
+            Self::Duplicate => f.write_str("--user-data-dir may be supplied only once"),
+            Self::EmptyPath => f.write_str("--user-data-dir path must not be empty"),
+        }
+    }
+}
+
+pub(crate) fn parse_argument<I, S>(arguments: I) -> Result<Option<PathBuf>, ArgumentError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args = arguments.into_iter();
+    let mut found = None;
+    while let Some(argument) = args.next() {
+        if argument.as_ref() != "--user-data-dir" {
+            continue;
+        }
+        if found.is_some() {
+            return Err(ArgumentError::Duplicate);
+        }
+        let Some(path) = args.next() else {
+            return Err(ArgumentError::MissingPath);
+        };
+        if path.as_ref().to_string_lossy().starts_with("--") {
+            return Err(ArgumentError::MissingPath);
+        }
+        let path = PathBuf::from(path.as_ref());
+        if path.as_os_str().is_empty() {
+            return Err(ArgumentError::EmptyPath);
+        }
+        found = Some(path);
+    }
+    Ok(found)
+}
+
+pub(crate) fn external_arguments<I, S>(arguments: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args = arguments.into_iter();
+    let mut external = Vec::new();
+    while let Some(argument) = args.next() {
+        if argument.as_ref() == "--user-data-dir" {
+            let _ = args.next();
+        } else {
+            external.push(argument.as_ref().to_string_lossy().into_owned());
+        }
+    }
+    external
+}
+
+pub(crate) fn instance_identifier(identifier: &str, root: Option<&Path>) -> String {
+    instance_identifier_for_data_dir(identifier, root, dirs::data_dir())
+}
+
+fn instance_identifier_for_data_dir(
+    identifier: &str,
+    root: Option<&Path>,
+    data_dir: Option<PathBuf>,
+) -> String {
+    let Some(root) = root else {
+        return identifier.to_owned();
+    };
+    if is_default_data_root(identifier, root, data_dir) {
+        return identifier.to_owned();
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(root.as_os_str().as_encoded_bytes());
+    format!("{identifier}.userdata.{digest:x}")
+}
+
+fn is_default_data_root(identifier: &str, root: &Path, data_dir: Option<PathBuf>) -> bool {
+    data_dir
+        .map(|path| path.join(identifier))
+        .and_then(|path| path.canonicalize().ok())
+        .and_then(|path| zephium_core::webview2::resolve_data_root(&path).ok())
+        .as_deref()
+        == Some(root)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn work_storage_root(identifier: &str, root: &Path) -> Option<PathBuf> {
+    if !CUSTOM_ROOT.load(Ordering::Acquire) {
+        return None;
+    }
+    work_storage_root_for_data_dir(identifier, root, dirs::data_dir())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn work_storage_root_for_data_dir(
+    identifier: &str,
+    root: &Path,
+    data_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    (!is_default_data_root(identifier, root, data_dir)).then(|| root.to_owned())
+}
+
+#[cfg(test)]
+pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    resolve_for_application(path, None)
+}
+
+fn resolve_for_application(
+    path: &Path,
+    _application_identifier: Option<&str>,
+) -> std::io::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let path = normalize_absolute_path(&path)?;
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(identifier) = _application_identifier {
+            if is_default_root_request(&path, identifier, dirs::data_dir())? {
+                std::fs::create_dir_all(&path)?;
+                let canonical = path.canonicalize()?;
+                return zephium_core::webview2::resolve_data_root(&canonical);
+            }
+        }
+        let path =
+            zephium_private_fs::prepare_user_data_root(&path).map_err(std::io::Error::other)?;
+        zephium_core::webview2::resolve_data_root(&path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(unix)]
+        let canonical = prepare_unix_root(&path)?;
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&path)?;
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "user data directory must be a real directory",
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        let canonical = path.canonicalize()?;
+        zephium_core::webview2::resolve_data_root(&canonical)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_default_root_request(
+    path: &Path,
+    identifier: &str,
+    data_dir: Option<PathBuf>,
+) -> std::io::Result<bool> {
+    let Some(data_dir) = data_dir else {
+        return Ok(false);
+    };
+    Ok(normalize_absolute_path(&data_dir.join(identifier))? == path)
+}
+
+fn normalize_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    let components = path.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                match std::fs::metadata(&normalized) {
+                    Ok(metadata) if !metadata.is_dir() => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "path component before .. is not a directory",
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                    _ => {}
+                }
+                normalized.pop();
+            }
+            component => {
+                normalized.push(component.as_os_str());
+                if index + 1 == components.len()
+                    && std::fs::symlink_metadata(&normalized)
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    continue;
+                }
+                match normalized.canonicalize() {
+                    Ok(canonical) => normalized = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+#[cfg(unix)]
+fn prepare_unix_root(path: &Path) -> std::io::Result<PathBuf> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "user data directory must be a real directory",
+        ));
+    }
+    let canonical = canonicalize_with_missing_suffix(path)?;
+    let mut directory = std::fs::File::from(
+        rustix::fs::open(
+            "/",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let components = canonical
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, name) in components.iter().enumerate() {
+        #[cfg(target_os = "macos")]
+        if !zephium_private_fs::macos_directory_acl_is_restrictive(&directory) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "user data directory path has an ACL that grants or may grant access",
+            ));
+        }
+        let child = match rustix::fs::openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(child) => std::fs::File::from(child),
+            Err(error) if error == rustix::io::Errno::NOENT => {
+                let created =
+                    match rustix::fs::mkdirat(&directory, name, Mode::from_raw_mode(0o700)) {
+                        Ok(()) => true,
+                        Err(rustix::io::Errno::EXIST) => false,
+                        Err(error) => return Err(std::io::Error::from(error)),
+                    };
+                let child = rustix::fs::openat(
+                    &directory,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?;
+                let child = std::fs::File::from(child);
+                if created {
+                    rustix::fs::fchmod(&child, Mode::from_raw_mode(0o700))
+                        .map_err(std::io::Error::from)?;
+                }
+                child
+            }
+            Err(error) => return Err(std::io::Error::from(error)),
+        };
+        let metadata = child.metadata()?;
+        #[cfg(target_os = "macos")]
+        if !zephium_private_fs::macos_directory_acl_is_restrictive(&child) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "user data directory path has an ACL that grants or may grant access",
+            ));
+        }
+        if index + 1 == components.len() {
+            validate_unix_root(&metadata)?;
+        } else {
+            validate_unix_directory_ancestor(&metadata)?;
+        }
+        directory = child;
+    }
+    let metadata = directory.metadata()?;
+    if metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o700 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "existing user data directory must be owned by this user and private",
+        ));
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn canonicalize_with_missing_suffix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(mut canonical) => {
+                for component in suffix.into_iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let missing_component = || {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "user data directory has no existing ancestor",
+                    )
+                };
+                let name = existing.file_name().ok_or_else(missing_component)?;
+                suffix.push(name.to_owned());
+                existing = existing.parent().ok_or_else(missing_component)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn validate_unix_root(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "user data directory must be a real directory",
+        ));
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o700 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "existing user data directory must be owned by this user and private",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unix_directory_ancestor(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = rustix::process::geteuid().as_raw();
+    let uid = metadata.uid();
+    if metadata.file_type().is_symlink() {
+        if uid == euid || uid == 0 {
+            return Ok(());
+        }
+    } else if metadata.is_dir()
+        && (uid == euid || uid == 0)
+        && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0)
+    {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "user data directory has an unsafe ancestor",
+    ))
+}
+
+pub(crate) fn install(path: PathBuf) -> std::io::Result<()> {
+    install_into(&DATA_ROOT, path)
+}
+
+fn install_into(root: &std::sync::OnceLock<PathBuf>, path: PathBuf) -> std::io::Result<()> {
+    root.set(path).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "data root already resolved",
+        )
+    })
+}
+
+pub(crate) fn initialize_override(
+    path: &Path,
+    application_identifier: &str,
+) -> std::io::Result<PathBuf> {
+    let path = resolve_for_application(path, Some(application_identifier))?;
+    install(path.clone())?;
+    CUSTOM_ROOT.store(true, Ordering::Release);
+    Ok(path)
+}
+
+pub(crate) fn is_installed() -> bool {
+    DATA_ROOT.get().is_some()
+}
+
+#[cfg(unix)]
+pub(crate) fn claim_custom_instance() -> std::io::Result<bool> {
+    if !CUSTOM_ROOT.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    let root = DATA_ROOT
+        .get()
+        .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))?;
+    let file = open_instance_lock(root)?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            CUSTOM_INSTANCE_LOCK
+                .set(file)
+                .map_err(|_| std::io::Error::other("custom instance lock already claimed"))?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn open_instance_lock(root: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(flags.bits() as i32)
+        .open(root.join(".instance.lock"))
+}
+
+pub(crate) fn root(app: &AppHandle) -> std::io::Result<PathBuf> {
+    selected_root(DATA_ROOT.get(), || {
+        app.path().app_data_dir().map_err(std::io::Error::other)
+    })
+}
+
+pub(crate) fn cache(app: &AppHandle) -> std::io::Result<PathBuf> {
+    selected_subdirectory(
+        CUSTOM_ROOT.load(Ordering::Acquire),
+        DATA_ROOT.get(),
+        "cache",
+        || app.path().app_cache_dir().map_err(std::io::Error::other),
+    )
+}
+
+pub(crate) fn logs(app: &AppHandle) -> std::io::Result<PathBuf> {
+    selected_subdirectory(
+        CUSTOM_ROOT.load(Ordering::Acquire),
+        DATA_ROOT.get(),
+        "logs",
+        || app.path().app_log_dir().map_err(std::io::Error::other),
+    )
+}
+
+fn selected_root<F>(custom_root: Option<&PathBuf>, default_root: F) -> std::io::Result<PathBuf>
+where
+    F: FnOnce() -> std::io::Result<PathBuf>,
+{
+    match custom_root {
+        Some(root) => Ok(root.clone()),
+        None => default_root(),
+    }
+}
+
+fn selected_subdirectory<F>(
+    use_custom_root: bool,
+    custom_root: Option<&PathBuf>,
+    child: &str,
+    default_path: F,
+) -> std::io::Result<PathBuf>
+where
+    F: FnOnce() -> std::io::Result<PathBuf>,
+{
+    if !use_custom_root {
+        return default_path();
+    }
+    custom_root
+        .map(|root| root.join(child))
+        .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn prepare_logs(root: &Path) -> std::io::Result<PathBuf> {
+    let logs = root.join("logs");
+    match std::fs::symlink_metadata(&logs) {
+        Ok(metadata) if redirected_metadata(&metadata) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "logs path must be a plain directory inside the data root",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::create_dir_all(&logs)?;
+    let metadata = std::fs::symlink_metadata(&logs)?;
+    if !plain_directory_metadata(&metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "logs path must be a plain directory inside the data root",
+        ));
+    }
+    Ok(logs)
+}
+
+pub(crate) fn plain_directory_metadata(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir() && !redirected_metadata(metadata)
+}
+
+fn redirected_metadata(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn startup_log_directory(
+    custom_root: Option<&Path>,
+    identifier: &str,
+    default_root: std::io::Result<PathBuf>,
+) -> std::io::Result<PathBuf> {
+    if let Some(root) = custom_root {
+        return prepare_logs(root);
+    }
+    let directory = default_root
+        .map_err(std::io::Error::other)?
+        .join(identifier);
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_optional_directory_and_rejects_malformed_arguments() {
+        assert_eq!(parse_argument(["--other", "x"]).unwrap(), None);
+        assert_eq!(
+            parse_argument(["--user-data-dir", "state"]).unwrap(),
+            Some("state".into())
+        );
+        assert_eq!(
+            parse_argument(["--user-data-dir"]).unwrap_err(),
+            ArgumentError::MissingPath
+        );
+        assert_eq!(
+            parse_argument(["--user-data-dir", "--other"]).unwrap_err(),
+            ArgumentError::MissingPath
+        );
+        assert_eq!(
+            parse_argument(["--user-data-dir", ""]).unwrap_err(),
+            ArgumentError::EmptyPath
+        );
+        assert_eq!(
+            parse_argument(["--user-data-dir", "a", "--user-data-dir", "b"]).unwrap_err(),
+            ArgumentError::Duplicate
+        );
+        assert_eq!(
+            external_arguments([
+                "https://example.com",
+                "--user-data-dir",
+                "https://other.test"
+            ]),
+            vec!["https://example.com".to_owned()]
+        );
+        assert_eq!(instance_identifier("app.zephium", None), "app.zephium");
+        let first = instance_identifier("app.zephium", Some(Path::new("/tmp/one")));
+        assert_eq!(
+            first,
+            instance_identifier("app.zephium", Some(Path::new("/tmp/one")))
+        );
+        assert_ne!(
+            first,
+            instance_identifier("app.zephium", Some(Path::new("/tmp/two")))
+        );
+    }
+
+    #[test]
+    fn explicit_default_root_matches_the_application_data_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("Roaming");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let requested = normalize_absolute_path(&data_dir.join("app.zephium")).unwrap();
+        assert!(
+            is_default_root_request(&requested, "app.zephium", Some(data_dir.clone())).unwrap()
+        );
+        assert!(
+            !is_default_root_request(&data_dir.join("other"), "app.zephium", Some(data_dir))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn explicit_default_data_root_keeps_the_default_instance_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app.zephium");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = zephium_core::webview2::resolve_data_root(&root).unwrap();
+        assert!(is_default_data_root(
+            "app.zephium",
+            &root,
+            Some(temp.path().to_owned())
+        ));
+        assert_eq!(
+            work_storage_root_for_data_dir("app.zephium", &root, Some(temp.path().to_owned())),
+            None
+        );
+        assert_eq!(
+            instance_identifier_for_data_dir(
+                "app.zephium",
+                Some(&root),
+                Some(temp.path().to_owned())
+            ),
+            "app.zephium"
+        );
+    }
+
+    #[test]
+    fn custom_work_storage_uses_the_selected_data_root() {
+        let custom = PathBuf::from("/tmp/zephium-custom-root");
+        assert_eq!(
+            work_storage_root_for_data_dir("app.zephium", &custom, Some(PathBuf::from("/tmp"))),
+            Some(custom)
+        );
+    }
+
+    #[test]
+    fn log_directory_creation_failure_is_returned() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        std::fs::write(&logs, b"file where logs directory belongs").unwrap();
+
+        assert_eq!(
+            prepare_logs(temp.path()).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_logs_reject_a_redirected_logs_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let target = temp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("logs")).unwrap();
+
+        assert_eq!(
+            prepare_logs(&root).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn startup_log_directory_uses_custom_root_and_propagates_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom");
+        let logs = startup_log_directory(Some(&custom), "zephium", Ok(PathBuf::new())).unwrap();
+        assert_eq!(logs, custom.join("logs"));
+        assert!(logs.is_dir());
+
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        assert!(startup_log_directory(Some(&blocked), "zephium", Ok(PathBuf::new())).is_err());
+
+        let fallback = temp.path().join("default");
+        let default_logs =
+            startup_log_directory(None, "app.zephium", Ok(fallback.clone())).unwrap();
+        assert_eq!(default_logs, fallback.join("app.zephium"));
+        assert!(default_logs.is_dir());
+        assert!(startup_log_directory(
+            None,
+            "app.zephium",
+            Err(std::io::Error::other("roaming unavailable"))
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_instance_lock_admits_one_process_and_releases_with_its_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".instance.lock");
+        let first = open_instance_lock(temp.path()).unwrap();
+        rustix::fs::flock(&first, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        let second = open_instance_lock(temp.path()).unwrap();
+        assert_eq!(
+            rustix::fs::flock(
+                &second,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(first);
+        rustix::fs::flock(
+            &second,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .unwrap();
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn data_paths_use_the_selected_root_and_keep_default_locations() {
+        let custom = PathBuf::from("/tmp/zephium-data");
+        let default_root = PathBuf::from("/tmp/default-data");
+        let default_cache = PathBuf::from("/tmp/default-cache");
+        let default_logs = PathBuf::from("/tmp/default-logs");
+
+        assert_eq!(
+            selected_root(Some(&custom), || Ok(default_root.clone())).unwrap(),
+            custom
+        );
+        assert_eq!(
+            selected_root(Some(&custom), || Err(std::io::Error::other("unused"))).unwrap(),
+            custom
+        );
+        assert_eq!(
+            selected_root(None, || Ok(default_root.clone())).unwrap(),
+            default_root
+        );
+        assert_eq!(
+            selected_subdirectory(true, Some(&custom), "cache", || Ok(default_cache.clone()))
+                .unwrap(),
+            custom.join("cache")
+        );
+        assert_eq!(
+            selected_subdirectory(true, Some(&custom), "cache", || {
+                Err(std::io::Error::other("unused"))
+            })
+            .unwrap(),
+            custom.join("cache")
+        );
+        assert_eq!(
+            selected_subdirectory(true, Some(&custom), "logs", || Ok(default_logs.clone()))
+                .unwrap(),
+            custom.join("logs")
+        );
+        assert_eq!(
+            selected_subdirectory(false, None, "cache", || Ok(default_cache.clone())).unwrap(),
+            default_cache
+        );
+        assert_eq!(
+            selected_subdirectory(false, None, "logs", || Ok(default_logs.clone())).unwrap(),
+            default_logs
+        );
+        assert!(selected_subdirectory(true, None, "cache", || Ok(default_cache)).is_err());
+    }
+
+    #[test]
+    fn data_root_install_rejects_a_second_selection() {
+        let root = std::sync::OnceLock::new();
+        install_into(&root, PathBuf::from("/tmp/first")).unwrap();
+        assert_eq!(root.get().unwrap(), Path::new("/tmp/first"));
+        assert_eq!(
+            install_into(&root, PathBuf::from("/tmp/second"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(root.get().unwrap(), Path::new("/tmp/first"));
+    }
+
+    #[test]
+    fn invalid_override_fails_before_installing_a_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(initialize_override(&file, "app.zephium").is_err());
+        assert!(!is_installed());
+    }
+
+    #[test]
+    fn custom_roots_persist_and_are_isolated() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = resolve(&temp.path().join("one")).unwrap();
+        let second = resolve(&temp.path().join("two")).unwrap();
+        std::fs::write(first.join("settings.json"), b"one").unwrap();
+        assert_eq!(std::fs::read(first.join("settings.json")).unwrap(), b"one");
+        assert!(!second.join("settings.json").exists());
+    }
+
+    #[test]
+    fn parent_relative_components_resolve_inside_the_selected_directory() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let relative = PathBuf::from(".")
+            .join(temp.path().file_name().unwrap())
+            .join("unused")
+            .join("..")
+            .join("browser-state");
+
+        let resolved = resolve(&relative).unwrap();
+        assert_eq!(
+            resolved,
+            temp.path().join("browser-state").canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_symlink_prefix_before_parent_components() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target_parent = temp.path().join("actual");
+        let target = target_parent.join("nested");
+        std::fs::create_dir_all(&target).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&target, &alias).unwrap();
+
+        let resolved = resolve(&alias.join("..").join("browser-state")).unwrap();
+
+        assert_eq!(
+            resolved,
+            target_parent.join("browser-state").canonicalize().unwrap()
+        );
+        assert!(!temp.path().join("browser-state").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_new_root_and_missing_parents_with_private_permissions() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = resolve(&temp.path().join("nested/parent/private-root")).unwrap();
+        for path in [
+            root.as_path(),
+            root.parent().unwrap(),
+            root.parent().unwrap().parent().unwrap(),
+        ] {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+            assert_eq!(metadata.mode() & 0o777, 0o700);
+        }
+    }
+
+    #[test]
+    fn rejects_a_file_as_custom_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(resolve(&file).is_err());
+    }
+
+    #[test]
+    fn rejects_a_file_component_before_parent_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        assert!(resolve(&file.join("..").join("browser-state")).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"not a directory");
+        assert!(!temp.path().join("browser-state").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlink_as_custom_root() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("private-root");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&target, &alias).unwrap();
+
+        assert_eq!(
+            resolve(&alias).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejects_inheritable_acl_before_creating_custom_root() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("acl-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let status = Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "everyone allow read,search,file_inherit,directory_inherit",
+            ])
+            .arg(&parent)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let root = parent.join("browser-state");
+        assert_eq!(
+            prepare_unix_root(&root).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_group_writable_non_sticky_ancestor_without_changing_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path();
+        let original = std::fs::metadata(ancestor).unwrap().mode() & 0o7777;
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let result = resolve(&ancestor.join("custom-root"));
+        let after = std::fs::symlink_metadata(ancestor).unwrap();
+        assert_eq!(after.mode() & 0o7777, 0o770);
+        assert_eq!(after.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(original)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_sticky_shared_ancestor_without_changing_its_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path();
+        let original = std::fs::metadata(ancestor).unwrap().mode() & 0o7777;
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let result = resolve(&ancestor.join("custom-root"));
+        let after = std::fs::symlink_metadata(ancestor).unwrap();
+        assert_eq!(after.mode() & 0o7777, 0o1777);
+        assert_eq!(after.uid(), rustix::process::geteuid().as_raw());
+        assert!(result.is_ok(), "{result:?}");
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(original)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_ancestor_into_shared_writable_directory_before_creating_root() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&shared, &alias).unwrap();
+        let requested = alias.join("new-root");
+
+        assert_eq!(
+            resolve(&requested).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!shared.join("new-root").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_shared_existing_root_without_changing_its_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::symlink_metadata(&root).unwrap().mode() & 0o7777;
+        assert!(resolve(&root).is_err());
+        let after = std::fs::symlink_metadata(root).unwrap().mode() & 0o7777;
+        assert_eq!(before, 0o755);
+        assert_eq!(after, before);
+        assert_eq!(
+            rustix::process::geteuid().as_raw(),
+            temp.path().metadata().unwrap().uid()
+        );
+    }
+}

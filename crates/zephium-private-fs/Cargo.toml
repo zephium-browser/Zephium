@@ -21,6 +21,7 @@ tempfile.workspace = true
 rustix = { version = "=1.1.6", features = ["fs", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+calcifer-macos-acl = "=0.1.0"
 libc = "=0.2.191"
 
 [target.'cfg(target_os = "windows")'.dependencies]

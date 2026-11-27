@@ -83,7 +83,10 @@ pub fn finalize_privileged_environment_observers(
 /// Starts the log before anything can fail, in the folder Tauri will resolve
 /// as the app data directory: a launch that stops before setup (a refused
 /// runtime, a failed build) would otherwise leave nothing to read.
-pub fn open_startup_log(identifier: &str) {
+pub fn open_startup_log(
+    identifier: &str,
+    custom_data_dir: Option<&std::path::Path>,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
@@ -92,20 +95,17 @@ pub fn open_startup_log(identifier: &str) {
 
     // SAFETY: the returned string is CoTaskMem-owned, read before it is freed.
     let roaming = unsafe {
-        let Ok(folder) = SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None)
-        else {
-            return;
-        };
-        let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(folder.as_wide()));
-        CoTaskMemFree(Some(folder.0.cast()));
-        path
+        SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None).map(|folder| {
+            let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(folder.as_wide()));
+            CoTaskMemFree(Some(folder.0.cast()));
+            path
+        })
     };
-    let directory = roaming.join(identifier);
-    if std::fs::create_dir_all(&directory).is_err() {
-        return;
-    }
+    let roaming = roaming.map_err(|error| std::io::Error::other(error.to_string()));
+    let directory = crate::data_root::startup_log_directory(custom_data_dir, identifier, roaming)?;
     redirect_stderr(&directory);
     crate::diagnostics::install(directory);
+    Ok(())
 }
 
 /// Query the runtime selected by WebView2 before Tauri creates any controller.

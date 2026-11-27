@@ -27,6 +27,16 @@ fn application_selection_is_closed_and_sessions_do_not_alias_product() {
 }
 
 #[test]
+fn custom_data_root_selection_is_lazy_and_keeps_the_base_application() {
+    let root = std::path::PathBuf::from("C:\\ZephiumData\\profile-a");
+    let selector =
+        WindowsWorkStorage::for_application_in_data_root("app.zephium", None, root.clone())
+            .unwrap();
+    assert_eq!(selector.data_root.as_deref(), Some(root.as_path()));
+    assert_eq!(selector.application, NativeApplication::Product);
+}
+
+#[test]
 fn installation_is_lazy_and_legacy_purge_has_no_protected_side_effect() {
     let ordinary = tempfile::tempdir().unwrap();
     let selector = WindowsWorkStorage::for_application("app.zephium", None).unwrap();

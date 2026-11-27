@@ -16,6 +16,31 @@ fn namespace_activation_matches_the_explicit_validation_gate() {
     ));
 }
 
+#[test]
+fn custom_data_root_rejects_invalid_windows_paths_and_file_ancestors() {
+    for path in [
+        std::path::Path::new(""),
+        std::path::Path::new("relative\\state"),
+        std::path::Path::new("\\rooted-without-drive\\state"),
+        std::path::Path::new("C:\\"),
+        std::path::Path::new("C:\\..\\outside"),
+        std::path::Path::new("\\\\server\\share\\state"),
+    ] {
+        assert!(
+            matches!(prepare_user_data_root(path), Err(PrivateFsError::Unsafe)),
+            "accepted {path:?}"
+        );
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    assert!(matches!(
+        prepare_user_data_root(&file.join("child")),
+        Err(PrivateFsError::Unsafe)
+    ));
+}
+
 #[cfg(feature = "windows-namespace-validation")]
 mod validation {
     use super::*;
@@ -254,6 +279,16 @@ mod validation {
         drop(sealed);
         remove_directory(&directory, &root, "child").unwrap();
         sync_directory(&directory).unwrap();
+    }
+
+    #[test]
+    fn unsealed_regular_file_can_be_removed_with_its_mutation_handle() {
+        let (_temp, directory, root) = fixture();
+        let (file, _) = create_new_regular(&directory, &root, "payload").unwrap();
+        drop(file);
+
+        remove_regular(&directory, &root, "payload").unwrap();
+        assert!(!root.join("payload").exists());
     }
 
     #[test]
@@ -679,5 +714,17 @@ mod validation {
         std::fs::remove_dir(&leaf).unwrap();
         std::fs::remove_dir(&alias).unwrap();
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside unchanged");
+    }
+
+    #[test]
+    fn custom_data_root_creation_is_private_and_existing_root_is_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("outer").join("inner");
+        let resolved = prepare_user_data_root(&root).unwrap();
+        assert_eq!(resolved, root.canonicalize().unwrap());
+        let (directory, _) = open_directory(&resolved).unwrap();
+        let before = security::snapshot(&directory).unwrap();
+        assert_eq!(prepare_user_data_root(&resolved).unwrap(), resolved);
+        assert_eq!(security::snapshot(&directory).unwrap(), before);
     }
 }

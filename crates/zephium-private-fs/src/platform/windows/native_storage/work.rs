@@ -3,6 +3,7 @@ use super::{
     known_profile, NativeApplication, NativeSession, NativeStorageAnchor, NativeStorageFile,
 };
 use crate::{PrivateEntryName, PrivateFsError};
+use std::path::Path;
 use std::path::PathBuf;
 
 const DATABASE: &str = "work.sqlite";
@@ -31,6 +32,19 @@ impl NativeWorkStorageAnchor {
         let profile = known_profile()?;
         Ok(Self {
             inner: NativeStorageAnchor::prepare_under_impl(&profile, application, session)?,
+        })
+    }
+
+    #[allow(missing_docs)]
+    pub fn prepare_in_data_root(
+        data_root: &Path,
+        application: NativeApplication,
+        session: Option<&NativeSession>,
+    ) -> Result<Self, PrivateFsError> {
+        validate_routing(application, session)?;
+        let data_root = super::super::prepare_user_data_root(data_root)?;
+        Ok(Self {
+            inner: NativeStorageAnchor::prepare_under_impl(&data_root, application, session)?,
         })
     }
 

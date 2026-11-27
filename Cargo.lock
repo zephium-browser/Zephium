@@ -564,6 +564,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "calcifer-macos-acl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d623f1bbaccbe0d1c6a9e4d2366feef6e179ac4e235aa86342601caf29358df4"
+
+[[package]]
 name = "camino"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7742,6 +7748,7 @@ dependencies = [
  "async-io",
  "base64 0.22.1",
  "block2",
+ "dirs 6.0.0",
  "dispatch2",
  "futures-lite",
  "getrandom 0.4.3",
@@ -7760,8 +7767,10 @@ dependencies = [
  "raw-window-handle",
  "reqwest",
  "rfd 0.18.0",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "specta",
  "specta-typescript",
  "tao",
@@ -7798,6 +7807,7 @@ dependencies = [
  "zephium-import",
  "zephium-ipc",
  "zephium-notes",
+ "zephium-private-fs",
  "zephium-store",
  "zephium-voice",
  "zephium-webext",
@@ -7941,6 +7951,7 @@ dependencies = [
 name = "zephium-private-fs"
 version = "0.1.0"
 dependencies = [
+ "calcifer-macos-acl",
  "libc",
  "rustix",
  "tempfile",

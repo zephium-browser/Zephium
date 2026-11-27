@@ -55,6 +55,16 @@ pub(crate) fn uptime() -> Option<Duration> {
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("crash report has no parent directory"))?;
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if !crate::data_root::plain_directory_metadata(&parent_metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "crash report directory is not a plain directory",
+        ));
+    }
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);
     #[cfg(unix)]
@@ -62,7 +72,30 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc_nofollow());
     }
-    options.open(path)?.write_all(bytes)
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "crash report is a reparse point",
+            ));
+        }
+        let current_parent = std::fs::symlink_metadata(parent)?;
+        if !crate::data_root::plain_directory_metadata(&current_parent) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "crash report directory is not a plain directory",
+            ));
+        }
+    }
+    file.write_all(bytes)
 }
 
 #[cfg(unix)]

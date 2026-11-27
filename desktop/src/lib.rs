@@ -74,6 +74,7 @@ mod browser_credentials;
 mod browser_import;
 mod content_fullscreen;
 mod data_export;
+mod data_root;
 mod default_browser;
 mod diagnostic_report;
 mod diagnostics;
@@ -8540,11 +8541,40 @@ pub fn run() {
         );
         std::process::exit(1);
     }
+    let user_data_dir = match data_root::parse_argument(std::env::args_os().skip(1)) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Zephium: {error}");
+            std::process::exit(2);
+        }
+    };
+    let mut context = tauri::generate_context!();
+    let application_identifier = context.config().identifier.clone();
+    let user_data_dir = match user_data_dir.as_deref() {
+        Some(path) => match data_root::initialize_override(path, &application_identifier) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                eprintln!("Zephium: invalid user data directory: {error}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    #[cfg(unix)]
+    match data_root::claim_custom_instance() {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            eprintln!("Zephium: could not claim the custom data directory: {error}");
+            std::process::exit(1);
+        }
+    }
     #[cfg(feature = "adblock-qa")]
     blocker_bench::refuse_bad_arguments();
     install_async_runtime();
     APP_STARTED.get_or_init(std::time::Instant::now);
-    let context = tauri::generate_context!();
+    context.config_mut().identifier =
+        data_root::instance_identifier(&application_identifier, user_data_dir.as_deref());
     focus_alerts::claim_identity(&context.config().identifier);
     #[cfg(target_os = "windows")]
     default_browser::windows::claim(
@@ -8556,7 +8586,15 @@ pub fn run() {
     );
     // A launch that stops before setup has nowhere else to say why.
     #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
-    platform::imp::open_startup_log(&context.config().identifier);
+    if let Err(error) =
+        platform::imp::open_startup_log(&context.config().identifier, user_data_dir.as_deref())
+    {
+        startup_alert::show_blocking(
+            startup_alert::StartupProblem::DataFolderUnavailable,
+            &format!("could not prepare the startup log directory: {error}"),
+        );
+        std::process::exit(1);
+    }
     #[cfg(target_os = "windows")]
     if zephium_credentials::set_windows_identity(&context.config().identifier).is_err() {
         diagnostic!("security: could not initialize the Windows credential namespace");
@@ -8619,7 +8657,11 @@ pub fn run() {
         // focuses the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
+            external_links::hand_off(
+                app,
+                data_root::external_arguments(argv.into_iter().skip(1)),
+                true,
+            );
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
@@ -8717,7 +8759,10 @@ pub fn run() {
                     },
                 );
                 specta.mount_events(app);
-                let data_dir = app.path().app_data_dir()?;
+                let data_dir = match user_data_dir.as_deref() {
+                    Some(path) => path.to_owned(),
+                    None => app.path().app_data_dir()?,
+                };
                 // A profile behind a junction (#447): build everything on the
                 // directory it really is, so nothing below it may redirect.
                 #[cfg(target_os = "windows")]
@@ -8736,6 +8781,9 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                if !data_root::is_installed() {
+                    data_root::install(data_dir.clone())?;
+                }
                 #[cfg(target_os = "windows")]
                 updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
@@ -8744,8 +8792,13 @@ pub fn run() {
                 zephium_app::work_files::trash::install_root(data_dir.clone());
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
+                    if user_data_dir.is_none() {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(
+                            &data_dir,
+                            std::fs::Permissions::from_mode(0o700),
+                        )?;
+                    }
                 }
                 #[cfg(all(feature = "macos-work-profile-enrollment", target_os = "macos"))]
                 navigation_probe::mark_profile_enrollment(&data_dir)?;
@@ -8755,15 +8808,24 @@ pub fn run() {
                     // private diagnostic sink before storage admission so a
                     // schema/corruption failure is still actionable without
                     // constructing WebView2 state merely to initialize logs.
-                    platform::imp::redirect_stderr(&data_dir);
-                    diagnostics::install(data_dir.clone());
+                    let logs = if user_data_dir.is_some() {
+                        data_root::prepare_logs(&data_dir)?
+                    } else {
+                        data_dir.clone()
+                    };
+                    if user_data_dir.is_none() {
+                        std::fs::create_dir_all(&logs)?;
+                    }
+                    platform::imp::redirect_stderr(&logs);
+                    diagnostics::install(logs);
                     diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
                 }
                 #[cfg(target_os = "macos")]
                 {
                     // Finder-launched apps write stderr nowhere; keep it in
                     // a private, bounded log the person can choose to share.
-                    let logs = app.path().app_log_dir()?;
+                    let logs = data_root::logs(app.handle())?;
+                    std::fs::create_dir_all(&logs)?;
                     platform::imp::redirect_stderr(&logs);
                     diagnostics::install(logs);
                     diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
@@ -8779,10 +8841,20 @@ pub fn run() {
                     let session = qa_session.as_deref();
                     #[cfg(not(feature = "webext-qa"))]
                     let session = None;
-                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
-                        &app.config().identifier,
-                        session,
-                    )?;
+                    let work_storage =
+                        match data_root::work_storage_root(&application_identifier, &data_dir) {
+                            Some(root) => {
+                                zephium_store::WindowsWorkStorage::for_application_in_data_root(
+                                    &application_identifier,
+                                    session,
+                                    root,
+                                )?
+                            }
+                            None => zephium_store::WindowsWorkStorage::for_application(
+                                &application_identifier,
+                                session,
+                            )?,
+                        };
                     Arc::new(SqliteStore::open_with_windows_work_storage(
                         &data_dir,
                         work_storage,

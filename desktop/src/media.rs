@@ -458,7 +458,7 @@ pub(crate) fn retire_profile_thumbnails(
 }
 
 mod thumb {
-    use super::{AppHandle, Manager};
+    use super::AppHandle;
     use std::path::PathBuf;
 
     static LIFECYCLE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -467,10 +467,7 @@ mod thumb {
     pub(super) fn retire(app: &AppHandle, profile: &str) -> std::io::Result<()> {
         let mut retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
         retired.insert(profile.into());
-        let dir = app
-            .path()
-            .app_cache_dir()
-            .map_err(std::io::Error::other)?
+        let dir = super::super::data_root::cache(app)?
             .join("media-thumbs")
             .join(profile);
         let root = dir
@@ -509,12 +506,26 @@ mod thumb {
     }
 
     fn path(app: &AppHandle, profile: &str, digest: &str, width: u32) -> Option<PathBuf> {
+        let cache = super::super::data_root::cache(app).ok()?;
+        cache_path(&cache, profile, digest, width)
+    }
+
+    fn cache_path(
+        cache: &std::path::Path,
+        profile: &str,
+        digest: &str,
+        width: u32,
+    ) -> Option<PathBuf> {
         let plain = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
         if !plain {
             return None;
         }
-        let dir = app.path().app_cache_dir().ok()?.join("media-thumbs");
-        Some(dir.join(profile).join(format!("{digest}-{width}")))
+        Some(
+            cache
+                .join("media-thumbs")
+                .join(profile)
+                .join(format!("{digest}-{width}")),
+        )
     }
 
     pub(super) fn cached(
@@ -669,6 +680,20 @@ mod thumb {
             assert_eq!(width(Some("w=2561")), None);
             assert_eq!(width(Some("w=abc")), None);
             assert_eq!(width(None), None);
+        }
+
+        #[test]
+        fn thumbnails_follow_the_selected_cache_root() {
+            let cache = std::path::Path::new("/tmp/zephium-data/cache");
+            let digest = "a".repeat(64);
+            assert_eq!(
+                cache_path(cache, "profile-1", &digest, 360).unwrap(),
+                cache
+                    .join("media-thumbs")
+                    .join("profile-1")
+                    .join(format!("{digest}-360"))
+            );
+            assert!(cache_path(cache, "profile-1", "invalid", 360).is_none());
         }
 
         #[cfg(feature = "work-product")]

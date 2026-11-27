@@ -7,6 +7,35 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[test]
+fn work_storage_uses_the_selected_data_root_without_namespace_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("zephium-data");
+    crate::platform::windows::prepare_user_data_root(&root).unwrap();
+    let anchor =
+        NativeWorkStorageAnchor::prepare_in_data_root(&root, NativeApplication::Product, None)
+            .unwrap();
+    assert!(anchor
+        .database_path()
+        .starts_with(root.canonicalize().unwrap()));
+}
+
+#[test]
+fn same_root_admission_succeeds_while_work_storage_holds_the_no_delete_pin() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("zephium-data");
+    crate::platform::windows::prepare_user_data_root(&root).unwrap();
+    let anchor =
+        NativeWorkStorageAnchor::prepare_in_data_root(&root, NativeApplication::Product, None)
+            .unwrap();
+
+    let admitted = crate::platform::windows::prepare_user_data_root(&root).unwrap();
+    assert_eq!(admitted, root.canonicalize().unwrap());
+    let renamed = temp.path().join("renamed-data");
+    assert!(std::fs::rename(&root, renamed).is_err());
+    anchor.verify().unwrap();
+}
+
 // All live tests own a random session below the fixed QA application. Neither
 // Product nor an existing user's QA session is opened or removed.
 pub(super) struct OwnedSession {
