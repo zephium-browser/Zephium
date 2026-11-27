@@ -945,7 +945,7 @@ impl EngineHost {
             let profile = partition.profile();
             let expected_directory = match partition {
                 Partition::Ephemeral(_) => None,
-                Partition::Default(_) | Partition::Persistent(_) => {
+                Partition::Default(_) | Partition::Persistent(_) | Partition::Container(_, _) => {
                     match crate::erasure::prepare_profile_directory(&self.profiles_root, profile) {
                         Ok(path) => Some(path),
                         Err(error) => {
@@ -970,7 +970,9 @@ impl EngineHost {
             let builder = if context_is_new {
                 let context = match match partition {
                     Partition::Ephemeral(_) => wry::WebContext::new_ephemeral(),
-                    Partition::Default(_) | Partition::Persistent(_) => {
+                    Partition::Default(_)
+                    | Partition::Persistent(_)
+                    | Partition::Container(_, _) => {
                         wry::WebContext::try_new(expected_directory.clone())
                     }
                 } {
@@ -1147,9 +1149,15 @@ impl EngineHost {
                         Some(store),
                     )
                 }
-                Partition::Default(profile) | Partition::Persistent(profile) => {
+                Partition::Default(profile)
+                | Partition::Persistent(profile)
+                | Partition::Container(profile, _) => {
                     use wry::WebViewBuilderExtMacos;
-                    let configuration = self.webext.configuration(profile, &self.sink);
+                    let configuration = self.webext.configuration(
+                        profile,
+                        partition.data_store_identifier(),
+                        &self.sink,
+                    );
                     self.refresh_profile_scriptlets(profile);
                     if crate::platform::imp::proxy::apply(
                         &configuration,
@@ -1888,16 +1896,29 @@ impl EngineHost {
         }
 
         builder = match partition {
-            Partition::Default(profile) | Partition::Persistent(profile) => {
+            Partition::Default(_profile)
+            | Partition::Persistent(_profile)
+            | Partition::Container(_profile, _) => {
                 #[cfg(target_os = "macos")]
                 {
                     use wry::WebViewBuilderExtDarwin;
-                    builder.with_data_store_identifier(profile.bytes())
+                    builder.with_data_store_identifier(partition.data_store_identifier())
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = profile;
-                    builder
+                    #[cfg(target_os = "windows")]
+                    {
+                        if let Partition::Container(_, container) = partition {
+                            use wry::WebViewBuilderExtWindows;
+                            builder.with_profile_name(format!("zephium-{container}"))
+                        } else {
+                            builder
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        builder
+                    }
                 }
             }
             Partition::Ephemeral(_) => builder.with_incognito(true),

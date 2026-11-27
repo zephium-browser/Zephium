@@ -22,6 +22,7 @@ import type {
   FindResultView,
   ImportJobView,
   ItemsChanged,
+  ContainerView,
   KeymapChanged,
   MiniView,
   LayoutChanged,
@@ -78,6 +79,7 @@ export const nativeEventNames = {
   resourceCloseCancelled: "zephium:resource-close-cancelled",
   browserCredentialCapabilityChanged: "zephium:browser-credential-capability",
   itemsChanged: "zephium:items",
+  containersChanged: "zephium:containers",
   tabChanged: "zephium:tab",
   extensionActionsChanged: "zephium:extension-actions",
   extensionActionFailed: "zephium:extension-action-failed",
@@ -132,6 +134,7 @@ export const events = {
     nativeEventNames.browserCredentialCapabilityChanged,
   ),
   itemsChanged: scopedEvent<ItemsChanged>(nativeEventNames.itemsChanged),
+  containersChanged: scopedEvent<ContainerView[]>(nativeEventNames.containersChanged),
   tabChanged: scopedEvent<TabChanged>(nativeEventNames.tabChanged),
   extensionActionsChanged: scopedEvent<ExtensionActionsChanged>(
     nativeEventNames.extensionActionsChanged,

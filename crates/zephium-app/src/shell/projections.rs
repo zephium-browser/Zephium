@@ -187,6 +187,12 @@ impl Shell {
                     profile_name: profile.name.clone(),
                     space_id: window.space.to_string(),
                 }));
+                (self.emit)(Projection::Containers(
+                    self.containers
+                        .for_profile(profile.id)
+                        .map(container_view)
+                        .collect(),
+                ));
             }
         }
         self.project_blocker_status();
@@ -457,6 +463,11 @@ impl Shell {
         profile: Option<ProfileId>,
     ) -> TabView {
         let mut view = self.presentation_tab_view(id, tab, self.tab_icon(id, tab, profile));
+        if !matches!(self.partition_of(id), Partition::Container(_, container)
+            if tab.container == Some(container))
+        {
+            view.container_id = None;
+        }
         if self
             .presentation
             .deferred_first_content_layout
@@ -732,6 +743,7 @@ fn tab_view(
 ) -> TabView {
     TabView {
         id: id.to_string(),
+        container_id: tab.container.map(|container| container.to_string()),
         projection_revision: format!("{revision:032x}"),
         title: failed_pane_title(tab).unwrap_or_else(|| tab.title.clone()),
         url: tab.url.as_ref().map(ToString::to_string),
@@ -874,5 +886,29 @@ fn tab_view(
         ),
         zoom: None,
         audio: None,
+    }
+}
+
+fn container_view(container: &zephium_core::containers::Container) -> zephium_ipc::ContainerView {
+    use zephium_core::containers::{ContainerKind, SpaceAccess};
+    use zephium_core::spaces::SpaceIcon;
+    use zephium_ipc::{ContainerKindView, SpaceIconView};
+
+    zephium_ipc::ContainerView {
+        id: container.id.to_string(),
+        name: container.name.clone(),
+        kind: match container.kind {
+            ContainerKind::Browsing => ContainerKindView::Browsing,
+            ContainerKind::Extensions => ContainerKindView::Extensions,
+        },
+        icon: container.look.icon.as_ref().map(|icon| match icon {
+            SpaceIcon::Symbol(index) => SpaceIconView::Symbol { index: *index },
+            SpaceIcon::Emoji(text) => SpaceIconView::Emoji { text: text.clone() },
+        }),
+        color: container.look.color,
+        spaces: match &container.spaces {
+            SpaceAccess::All => None,
+            SpaceAccess::Selected(spaces) => Some(spaces.iter().map(ToString::to_string).collect()),
+        },
     }
 }

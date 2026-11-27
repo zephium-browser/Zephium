@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
 use objc2_app_kit::{NSMenu, NSMenuItem, NSPopoverBehavior, NSView};
+use objc2_foundation::NSUUID;
 use objc2_foundation::{NSPoint, NSRect, NSRectEdge, NSSize, NSString};
 use objc2_web_kit::{WKWebExtensionAction, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 use zephium_core::extension_data::{
@@ -136,12 +137,27 @@ impl WebextHost {
     pub(crate) fn configuration(
         &mut self,
         profile: ProfileId,
+        data_store_identifier: [u8; 16],
         sink: &Sink,
     ) -> Retained<WKWebViewConfiguration> {
         let mtm = MainThreadMarker::new().expect("engine host runs on the main thread");
         let entry = self.profile(profile, sink);
         let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
-        unsafe { configuration.setWebsiteDataStore(&entry.store) };
+        let identifier = NSUUID::from_bytes(data_store_identifier);
+        let store = if data_store_identifier == profile_uuid(profile).as_bytes() {
+            entry.store.clone()
+        } else {
+            // SAFETY: `mtm` establishes WebKit's main-thread requirement; the
+            // native store identity comes from the validated shell partition.
+            unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) }
+        };
+        if !unsafe { store.isPersistent() }
+            || unsafe { store.identifier() }.map(|value| value.as_bytes())
+                != Some(identifier.as_bytes())
+        {
+            panic!("persistent browser partition did not resolve to its exact WebKit store");
+        }
+        unsafe { configuration.setWebsiteDataStore(&store) };
         if let Some(runtime) = &entry.runtime {
             runtime.configure(&configuration);
         } else {

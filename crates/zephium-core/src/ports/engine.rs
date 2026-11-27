@@ -7,7 +7,9 @@ use crate::extensions::{
     ExtensionBrowserSurface,
 };
 use crate::geometry::Rect;
-use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
+use crate::ids::{
+    ContainerId, ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId,
+};
 use crate::injection::MatchSet;
 pub use crate::permissions::PagePermissionKind as PermissionKind;
 use crate::permissions::{
@@ -82,13 +84,27 @@ pub struct WebExtensionLoaded {
 pub enum Partition {
     Default(ProfileId),
     Persistent(ProfileId),
+    Container(ProfileId, ContainerId),
     Ephemeral(ProfileId),
 }
 
 impl Partition {
     pub fn profile(self) -> ProfileId {
         match self {
-            Partition::Default(p) | Partition::Persistent(p) | Partition::Ephemeral(p) => p,
+            Partition::Default(p)
+            | Partition::Persistent(p)
+            | Partition::Container(p, _)
+            | Partition::Ephemeral(p) => p,
+        }
+    }
+
+    /// Stable identifier used by a persistent native website-data store.
+    pub fn data_store_identifier(self) -> [u8; 16] {
+        match self {
+            Partition::Container(_, container) => container.bytes(),
+            Partition::Default(profile)
+            | Partition::Persistent(profile)
+            | Partition::Ephemeral(profile) => profile.bytes(),
         }
     }
 }
@@ -1350,6 +1366,7 @@ pub trait Engine {
     fn erase_profile_data(
         &self,
         _profile: ProfileId,
+        _containers: Vec<ContainerId>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     );
     /// Close every native view/context on its owning thread. Completion runs

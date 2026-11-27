@@ -695,6 +695,7 @@ impl Shell {
             url: tab.url.as_ref()?.to_string(),
             title: tab.title.clone(),
             zoom: tab.zoom,
+            container: tab.container,
             session_id: now.map(|_| zephium_core::ids::ClosedSessionId::generate()),
             closed_at_ms: now,
             position,
@@ -751,6 +752,12 @@ impl Shell {
             let _ = self.items.remove(id);
             return None;
         }
+        let container = entry.container.filter(|container| {
+            self.containers
+                .get(*container)
+                .is_some_and(|record| record.profile == profile && record.available_in(space))
+        });
+        self.items.set_container(id, container);
         self.items.set_title(id, entry.title.clone());
         self.recently_closed.remove(position);
         self.extension_sessions_changed(profile);

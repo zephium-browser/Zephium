@@ -64,6 +64,7 @@ impl Shell {
             Command::LeaveSplit(id) => self.operation_leave_split(id),
             Command::TabAction { id, action } => self.operation_tab_action(id, action),
             Command::Space(command) => self.operation_space(*command),
+            Command::Container(command) => self.operation_container(*command),
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
@@ -712,6 +713,7 @@ impl Shell {
             );
         }
         self.cancel_discard_probe(id);
+        self.container_recreates.remove(&id);
         let effects = self.items.navigate(id, &input);
         if effects.is_empty() {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);

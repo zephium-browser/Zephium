@@ -466,6 +466,20 @@ impl Shell {
             self.clear_work_pane();
         }
         let mut effects = Vec::new();
+        if self
+            .items
+            .tab(tab)
+            .and_then(|state| state.container)
+            .is_some_and(|container| {
+                self.containers
+                    .get(container)
+                    .is_none_or(|entry| !entry.available_in(target))
+            })
+        {
+            // A container cannot follow a tab outside its authorized Space
+            // set. Rebuild on the destination's ordinary profile partition.
+            effects.extend(self.items.set_container(tab, None));
+        }
         if was_active {
             self.items.set_lifecycle(tab, Lifecycle::Inactive);
             self.space_memory.left_at.insert(target, tab);

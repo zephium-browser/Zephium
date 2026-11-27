@@ -72,6 +72,7 @@ mod blocker_bench;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
+mod containers;
 mod content_fullscreen;
 mod data_export;
 mod default_browser;
@@ -241,6 +242,7 @@ const APPEARANCE_LIGHT: u8 = 1;
 const APPEARANCE_DARK: u8 = 2;
 
 const EVENT_ITEMS: &str = "zephium:items";
+const EVENT_CONTAINERS: &str = "zephium:containers";
 const EVENT_TAB: &str = "zephium:tab";
 const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
@@ -2156,6 +2158,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             spaces::spaces_step,
             spaces::spaces_move_tab,
             spaces::spaces_menu_popup,
+            containers::containers_create,
+            containers::containers_update,
+            containers::containers_remove_from_space,
+            containers::containers_assign_tab,
             operation_status,
             operations_reconcile,
             operation_acknowledge,
@@ -7693,6 +7699,9 @@ fn finish_browser_setup(
             spaces::follow(&emit_handle, &state);
             page_assist::observe_items(&state);
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
+        }
+        Projection::Containers(containers) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_CONTAINERS, &containers)
         }
         Projection::Tab(tab) => {
             #[cfg(feature = "adblock-qa")]

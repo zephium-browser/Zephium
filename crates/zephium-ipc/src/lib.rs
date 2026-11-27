@@ -16,6 +16,11 @@ pub use zoom::*;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct TabView {
     pub id: String,
+    /// Persistent website-data container, or `None` for the profile's
+    /// default browsing session.
+    #[serde(default)]
+    #[specta(optional)]
+    pub container_id: Option<String>,
     /// Process-local monotonically increasing projection revision, encoded as
     /// fixed-width hexadecimal so JavaScript can compare it without losing
     /// integer precision. Privileged chrome rejects an older per-tab delta
@@ -589,6 +594,24 @@ pub struct SpaceView {
     /// The icons of its first tabs in sidebar order, at most three, for the
     /// switcher to stack beside the name. A tab with no icon yet is null.
     pub previews: Vec<Option<IconRef>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerKindView {
+    Browsing,
+    Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ContainerView {
+    pub id: String,
+    pub name: String,
+    pub kind: ContainerKindView,
+    pub icon: Option<SpaceIconView>,
+    pub color: u8,
+    /// `None` means every Space; otherwise only these Space IDs may use it.
+    pub spaces: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1829,6 +1852,7 @@ pub enum Projection {
         state: Option<TabSwitcherState>,
     },
     Items(ItemsState),
+    Containers(Vec<ContainerView>),
     Tab(TabView),
     Favicons(FaviconsView),
     ExtensionActions(ExtensionActionsView),

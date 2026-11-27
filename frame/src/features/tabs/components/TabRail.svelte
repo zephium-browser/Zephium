@@ -22,6 +22,7 @@
   import * as requests from "../lib/space-requests.svelte";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
   import { closeOnMiddleClick, openOnBackgroundMiddleClick } from "../lib/middle-click";
+  import ContainerMenu from "./ContainerMenu.svelte";
 
   let {
     entries,
@@ -137,6 +138,7 @@
 -->
 {#if space && spaces}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
     <RailSpaces active={space} {roomy} />
+    <ContainerMenu />
   </div>{/if}
 <div
   bind:this={stage}
@@ -164,7 +166,11 @@
       >
         {#each entries as tab, index (tab.id)}
           {@const active = tab.id === tabs.activeId()}
+          {@const container = tabs.containersList().find((entry) => entry.id === tab.container_id)}
           <li
+            class="rail-entry"
+            data-space-hue={container?.color ?? 0}
+            data-container={container ? "" : undefined}
             data-cascade
             style:--cascade={index + 1}
             data-motion-key={`tab:${tab.id}`}
@@ -179,7 +185,9 @@
               data-plate
               title={tab.title || m.untitled_tab()}
               aria-current={active ? "page" : undefined}
-              aria-label={tab.title || m.untitled_tab()}
+              aria-label={container
+                ? `${tab.title || m.untitled_tab()}, ${container.name} container`
+                : tab.title || m.untitled_tab()}
               oncontextmenu={(event) => handleContextMenu(event, tab)}
               onpointerdown={(event) => drag.down(event, tab.id)}
               onpointermove={(event) => drag.move(event)}
@@ -258,6 +266,8 @@
   />{/if}
 
 <style>
+  @import "./space-hue.css";
+
   /* Close under the head's rule, so the spaces read as the first thing of
      the column rather than a thing apart from it. */
   .rail-spaces-slot {
@@ -267,6 +277,24 @@
     align-items: center;
     gap: var(--sidebar-row-gap);
     padding-block: 0 2px;
+  }
+
+  .rail-entry[data-container]::after {
+    position: absolute;
+    inset-inline-end: 4px;
+    top: 50%;
+    z-index: 1;
+    width: 2px;
+    height: 14px;
+    transform: translateY(-50%);
+    border-radius: 3px;
+    background: var(--space-hue);
+    content: "";
+    pointer-events: none;
+  }
+
+  .rail-entry {
+    position: relative;
   }
 
   .rail-stage {

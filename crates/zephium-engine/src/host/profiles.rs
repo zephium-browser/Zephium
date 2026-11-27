@@ -217,7 +217,9 @@ pub(super) const MAX_PROFILE_PERSISTENCE_BINDINGS: usize =
 
 fn profile_persistence_class(partition: Partition) -> ProfilePersistenceClass {
     match partition {
-        Partition::Default(_) | Partition::Persistent(_) => ProfilePersistenceClass::Durable,
+        Partition::Default(_) | Partition::Persistent(_) | Partition::Container(_, _) => {
+            ProfilePersistenceClass::Durable
+        }
         Partition::Ephemeral(_) => ProfilePersistenceClass::Ephemeral,
     }
 }
@@ -842,6 +844,7 @@ impl EngineHost {
     pub(crate) fn erase_profile_data(
         &mut self,
         profile: ProfileId,
+        containers: Vec<zephium_core::ids::ContainerId>,
         completion: Arc<crate::erasure::Completion>,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -862,7 +865,7 @@ impl EngineHost {
                     }
                     let rejected = completion.clone();
                     if !super::dispatch::try_with_profile_erasure(move |host| {
-                        host.erase_profile_data(profile, completion)
+                        host.erase_profile_data(profile, containers, completion)
                     }) {
                         rejected
                             .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
@@ -1038,13 +1041,14 @@ impl EngineHost {
         #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
         self.work_data_stores.remove(&profile);
         #[cfg(target_os = "macos")]
-        crate::platform::imp::erase_profile_data(profile, ephemeral_stores, completion);
+        crate::platform::imp::erase_profile_data(profile, containers, ephemeral_stores, completion);
         #[cfg(all(unix, not(target_os = "macos")))]
         crate::platform::imp::erase_profile_data(
             managers,
             manager_provenance_valid,
             vec![self.profiles_root.clone()],
             profile,
+            containers,
             completion,
         );
         #[cfg(target_os = "windows")]
@@ -1058,6 +1062,7 @@ impl EngineHost {
                 self.private_runtime.root().to_owned(),
             ],
             profile,
+            containers,
             completion,
         );
     }

@@ -478,6 +478,7 @@ fn crash_presentation_never_overwrites_the_durable_document_title() {
             .then_some(item.kind)
             .and_then(|kind| match kind {
                 PersistedKind::Tab { title, .. } => Some(title),
+                PersistedKind::ContainerTab { title, .. } => Some(title),
                 PersistedKind::Folder { .. } => None,
                 PersistedKind::BrowserTab { .. } => None,
             })

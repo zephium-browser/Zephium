@@ -80,6 +80,8 @@ struct BoundedClosedTab {
     title: String,
     zoom: f64,
     #[serde(default)]
+    container: Option<zephium_core::ids::ContainerId>,
+    #[serde(default)]
     session_id: Option<zephium_core::ids::ClosedSessionId>,
     #[serde(default)]
     closed_at_ms: Option<u64>,
@@ -114,6 +116,14 @@ enum BoundedKind {
         #[serde(default)]
         last_active_ms: Option<u64>,
     },
+    ContainerTab {
+        url: String,
+        title: String,
+        zoom: f64,
+        #[serde(default)]
+        last_active_ms: Option<u64>,
+        container: zephium_core::ids::ContainerId,
+    },
     BrowserTab {
         page: zephium_core::item::BrowserOwnedTab,
     },
@@ -145,6 +155,9 @@ where
         match &item.kind {
             BoundedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
             BoundedKind::Tab {
+                url, title, zoom, ..
+            }
+            | BoundedKind::ContainerTab {
                 url, title, zoom, ..
             } => {
                 url.len() <= MAX_SESSION_URL_BYTES
@@ -237,6 +250,19 @@ impl BoundedSessionState {
                         zoom,
                         last_active_ms,
                     },
+                    BoundedKind::ContainerTab {
+                        url,
+                        title,
+                        zoom,
+                        last_active_ms,
+                        container,
+                    } => PersistedKind::ContainerTab {
+                        url,
+                        title,
+                        zoom,
+                        last_active_ms,
+                        container,
+                    },
                     BoundedKind::BrowserTab { page } => PersistedKind::BrowserTab { page },
                 },
             });
@@ -268,6 +294,7 @@ impl BoundedSessionState {
                     url: entry.url,
                     title: entry.title,
                     zoom: entry.zoom,
+                    container: entry.container,
                     session_id: entry.session_id,
                     closed_at_ms: entry.closed_at_ms,
                     position: None,
@@ -573,6 +600,7 @@ mod qa_settings_recovery_tests {
                 url,
                 title: "Closed long link".into(),
                 zoom: 1.0,
+                container: None,
                 session_id: None,
                 closed_at_ms: None,
                 position: None,

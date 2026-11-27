@@ -455,6 +455,10 @@ export const commands = {
 	/**  The next (1) or previous (-1) space, for a swipe over the tab list. */
 	spacesStep: (step: number) => __TAURI_INVOKE<OperationAdmission>("spaces_step", { step }),
 	spacesMoveTab: (tab: string, space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_move_tab", { tab, space }),
+	containersCreate: (name: string, icon: SpaceIconView | null, color: number, spaces: string[] | null) => __TAURI_INVOKE<OperationAdmission>("containers_create", { name, icon, color, spaces }),
+	containersUpdate: (container: string, name: string, icon: SpaceIconView | null, color: number, spaces: string[] | null) => __TAURI_INVOKE<OperationAdmission>("containers_update", { container, name, icon, color, spaces }),
+	containersRemoveFromSpace: (container: string) => __TAURI_INVOKE<OperationAdmission>("containers_remove_from_space", { container }),
+	containersAssignTab: (tab: string, container: string | null) => __TAURI_INVOKE<OperationAdmission>("containers_assign_tab", { tab, container }),
 	/**  The switcher at rail width, where the column has no room for its own. */
 	spacesMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("spaces_menu_popup", { x, y }),
 	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
@@ -3245,6 +3249,16 @@ export type SpaceIconView =
 /**  An index into the frame's curated symbols. */
 { kind: "symbol"; index: number } | { kind: "emoji"; text: string };
 
+export type ContainerKindView = "browsing" | "extensions";
+export type ContainerView = {
+	id: string,
+	name: string,
+	kind: ContainerKindView,
+	icon: SpaceIconView | null,
+	color: number,
+	spaces: string[] | null,
+};
+
 export type SpaceId = string;
 
 export type SpaceLookInputV1 = {
@@ -3418,6 +3432,7 @@ export type TabSwitcherState = {
 
 export type TabView = {
 	id: string,
+	container_id?: string | null,
 	/**
 	 *  Process-local monotonically increasing projection revision, encoded as
 	 *  fixed-width hexadecimal so JavaScript can compare it without losing

@@ -877,6 +877,7 @@ pub(crate) fn erase_profile_data(
     manager_provenance_valid: bool,
     roots: Vec<std::path::PathBuf>,
     profile: zephium_core::ids::ProfileId,
+    _containers: Vec<zephium_core::ids::ContainerId>,
     completion: Arc<crate::erasure::Completion>,
 ) {
     use webkit2gtk::{WebsiteDataManagerExt, WebsiteDataManagerExtManual, WebsiteDataTypes};
@@ -1519,7 +1520,14 @@ mod tests {
                 Box::new(move |outcome| tx.send(outcome).unwrap()),
                 Arc::new(AtomicBool::new(true)),
             );
-            erase_profile_data(Vec::new(), false, vec![root.clone()], profile, completion);
+            erase_profile_data(
+                Vec::new(),
+                false,
+                vec![root.clone()],
+                profile,
+                Vec::new(),
+                completion,
+            );
             assert_eq!(
                 rx.recv_timeout(std::time::Duration::from_millis(100))
                     .unwrap(),

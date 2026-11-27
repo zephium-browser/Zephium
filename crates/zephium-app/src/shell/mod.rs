@@ -10,6 +10,7 @@ mod bookmarks;
 mod bootstrap;
 mod browsing_data;
 mod certificates;
+mod containers;
 mod effects;
 mod engine_events;
 mod extension_actions;
@@ -107,6 +108,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "agentic-browser")]
 use zephium_agentic::AgentBrowserShutdownOutcome;
+use zephium_core::containers::Containers;
 #[cfg(test)]
 use zephium_core::extensions::ExtensionBrowserRequestId;
 use zephium_core::extensions::{
@@ -252,6 +254,7 @@ pub struct Shell {
     retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
     profiles: Profiles,
     spaces: Spaces,
+    containers: Containers,
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
     windows: Windows,
@@ -268,6 +271,8 @@ pub struct Shell {
     search: SearchState,
     tab_preferences: tabs::TabPreferences,
     new_tab_destinations: std::collections::HashMap<ItemId, url::Url>,
+    container_recreates:
+        std::collections::HashMap<ItemId, (Option<zephium_core::ids::ContainerId>, url::Url)>,
     proxy: network::ProxyPreference,
     presentation: PresentationState,
     zoom: ZoomState,
@@ -527,9 +532,15 @@ impl Shell {
             chrome,
             emit,
         } = ports;
+        let containers = Containers::from_setting(
+            store
+                .app_setting(zephium_core::containers::SETTINGS_KEY)
+                .as_deref(),
+        );
         Self {
             profiles: Profiles::default(),
             spaces: Spaces::default(),
+            containers,
             items: Items::default(),
             recently_closed: Vec::new(),
             windows: Windows::default(),
@@ -561,6 +572,7 @@ impl Shell {
             },
             tab_preferences: tabs::TabPreferences::load(&*store),
             new_tab_destinations: Default::default(),
+            container_recreates: Default::default(),
             proxy: network::ProxyPreference::load(&*store),
             presentation: PresentationState::default(),
             zoom: ZoomState::load(&*store),
@@ -1018,6 +1030,9 @@ impl Shell {
             }
             Command::Space(command) => {
                 let _ = self.operation_space(*command);
+            }
+            Command::Container(command) => {
+                let _ = self.operation_container(*command);
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {

@@ -26,22 +26,21 @@ use crate::data_kinds::{
     merge_sites, webkit_plan, WebKitDataType, WebKitStep, WEBKIT_CACHE, WEBKIT_SITE_DATA,
 };
 
-/// The native identifier of the profile's own store. Work's store is named by
-/// a different, derived identifier and never by this one.
-pub(crate) fn profile_store_identifier(profile: ProfileId) -> [u8; 16] {
+pub(super) fn profile_store_identifier(profile: ProfileId) -> [u8; 16] {
     profile.bytes()
 }
 
-fn profile_store(profile: ProfileId) -> Option<Retained<WKWebsiteDataStore>> {
+/// The native identifier of the profile's own store. Work's store is named by
+/// a different, derived identifier and never by this one.
+fn profile_store(identifier: [u8; 16]) -> Option<Retained<WKWebsiteDataStore>> {
     let mtm = MainThreadMarker::new()?;
-    let identifier = NSUUID::from_bytes(profile_store_identifier(profile));
+    let identifier = NSUUID::from_bytes(identifier);
     // SAFETY: main thread (`mtm`); the retained store outlives these calls.
     let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
     // SAFETY: as above.
     let exact = unsafe {
         store.isPersistent()
-            && store.identifier().map(|value| value.as_bytes())
-                == Some(profile_store_identifier(profile))
+            && store.identifier().map(|value| value.as_bytes()) == Some(identifier.as_bytes())
     };
     exact.then_some(store)
 }
@@ -81,7 +80,7 @@ fn finish_once(
 /// Removes `kinds` modified at or after `since`, or all of them. Open pages
 /// keep running: nothing here reloads or closes a view.
 pub(crate) fn clear(
-    profile: ProfileId,
+    identifier: [u8; 16],
     kinds: EngineDataKinds,
     since: Option<i64>,
     done: EngineDataCompletion,
@@ -91,7 +90,7 @@ pub(crate) fn clear(
         done.finish(EngineDataReply::Cleared);
         return;
     }
-    let Some(store) = profile_store(profile) else {
+    let Some(store) = profile_store(identifier) else {
         done.finish(EngineDataReply::Failed(EngineDataFailure::Unavailable));
         return;
     };
@@ -177,8 +176,8 @@ fn remove_records(
 }
 
 /// The hosts the profile holds cookies and site data for.
-pub(crate) fn sites(profile: ProfileId, done: EngineDataCompletion) {
-    let Some(store) = profile_store(profile) else {
+pub(crate) fn sites(identifier: [u8; 16], done: EngineDataCompletion) {
+    let Some(store) = profile_store(identifier) else {
         done.finish(EngineDataReply::Failed(EngineDataFailure::Unavailable));
         return;
     };
@@ -207,8 +206,8 @@ pub(crate) fn sites(profile: ProfileId, done: EngineDataCompletion) {
 }
 
 /// Removes cookies, storage and cache for every record on `site`.
-pub(crate) fn forget_site(profile: ProfileId, site: String, done: EngineDataCompletion) {
-    let Some(store) = profile_store(profile) else {
+pub(crate) fn forget_site(identifier: [u8; 16], site: String, done: EngineDataCompletion) {
+    let Some(store) = profile_store(identifier) else {
         done.finish(EngineDataReply::Failed(EngineDataFailure::Unavailable));
         return;
     };

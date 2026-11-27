@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use url::Url;
 
-use crate::ids::{ClosedSessionId, ItemId, ProfileId, SpaceId};
+use crate::ids::{ClosedSessionId, ContainerId, ItemId, ProfileId, SpaceId};
 use crate::item::{
     sanitize_page_title, BrowserOwnedTab, Item, ItemKind, Placement, TabContent, TabState,
 };
@@ -77,6 +77,14 @@ pub enum PersistedKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_active_ms: Option<u64>,
     },
+    ContainerTab {
+        url: String,
+        title: String,
+        zoom: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_active_ms: Option<u64>,
+        container: ContainerId,
+    },
     /// Browser-owned pages have no navigable URL or native content view.
     BrowserTab {
         page: BrowserOwnedTab,
@@ -93,6 +101,9 @@ pub struct PersistedClosedTab {
     pub url: String,
     pub title: String,
     pub zoom: f64,
+    /// Preserves the website session when a container tab is reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerId>,
     /// Absent on legacy snapshots. Never manufacture historical metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<ClosedSessionId>,
@@ -216,11 +227,20 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
                 TabContent::Web => match &tab.url {
                     // A tab without a url (empty New Tab) is not worth persisting.
                     None => return,
-                    Some(url) => PersistedKind::Tab {
-                        url: url.to_string(),
-                        title: tab.title.clone(),
-                        zoom: tab.zoom,
-                        last_active_ms: tab.last_active_ms,
+                    Some(url) => match tab.container {
+                        Some(container) => PersistedKind::ContainerTab {
+                            url: url.to_string(),
+                            title: tab.title.clone(),
+                            zoom: tab.zoom,
+                            last_active_ms: tab.last_active_ms,
+                            container,
+                        },
+                        None => PersistedKind::Tab {
+                            url: url.to_string(),
+                            title: tab.title.clone(),
+                            zoom: tab.zoom,
+                            last_active_ms: tab.last_active_ms,
+                        },
                     },
                 },
             },
@@ -331,7 +351,33 @@ pub fn restore(state: SessionState) -> Restored {
                 };
                 tab.last_active_ms =
                     last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
-                ItemKind::Tab(tab)
+                ItemKind::Tab(Box::new(tab))
+            }
+            PersistedKind::ContainerTab {
+                url,
+                title,
+                zoom,
+                last_active_ms,
+                container,
+            } => {
+                let Ok(url) = Url::parse(&url) else {
+                    continue;
+                };
+                if !navigation::is_browser_target(&url) {
+                    continue;
+                }
+                let mut tab = TabState::new();
+                tab.url = Some(url);
+                tab.title = sanitize_page_title(&title);
+                tab.zoom = if zoom.is_finite() {
+                    zoom.clamp(0.3, 3.0)
+                } else {
+                    1.0
+                };
+                tab.last_active_ms =
+                    last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
+                tab.container = Some(container);
+                ItemKind::Tab(Box::new(tab))
             }
             PersistedKind::BrowserTab { page } => {
                 let Placement::Space { space, .. } = i.placement else {
@@ -343,7 +389,7 @@ pub fn restore(state: SessionState) -> Restored {
                 {
                     continue;
                 }
-                ItemKind::Tab(TabState::browser_owned(page))
+                ItemKind::Tab(Box::new(TabState::browser_owned(page)))
             }
         };
         // insert() enforces parent existence and placement consistency; DFS
@@ -418,6 +464,7 @@ fn canonical_recently_closed(
                 } else {
                     1.0
                 },
+                container: entry.container,
                 session_id: entry.session_id,
                 closed_at_ms: entry.closed_at_ms,
                 position: entry
@@ -655,17 +702,20 @@ mod tests {
                 url: format!("https://example.com/{index}"),
                 title: format!("Title {index}\u{202e}"),
                 zoom: 2.0,
+                container: None,
                 session_id: None,
                 closed_at_ms: None,
                 position: None,
             })
             .collect::<Vec<_>>();
+        recent[3].container = Some(ContainerId::from(55));
         recent.push(PersistedClosedTab {
             profile: ProfileId::from(999),
             space,
             url: "https://foreign.example/".into(),
             title: "Foreign".into(),
             zoom: 1.0,
+            container: None,
             session_id: None,
             closed_at_ms: None,
             position: None,
@@ -676,6 +726,7 @@ mod tests {
             url: "file:///private.txt".into(),
             title: "Local".into(),
             zoom: 1.0,
+            container: None,
             session_id: None,
             closed_at_ms: None,
             position: None,
@@ -692,6 +743,10 @@ mod tests {
         );
         assert_eq!(state.recently_closed.len(), MAX_RECENTLY_CLOSED_TABS);
         assert_eq!(state.recently_closed[0].url, "https://example.com/3");
+        assert_eq!(
+            state.recently_closed[0].container,
+            Some(ContainerId::from(55))
+        );
         assert!(state
             .recently_closed
             .iter()
@@ -712,6 +767,7 @@ mod tests {
             url: "https://example.test/place".into(),
             title: "Place".into(),
             zoom: 1.0,
+            container: None,
             session_id: Some(ClosedSessionId::from(11)),
             closed_at_ms: Some(1_700_000_000_000),
             position,
@@ -752,6 +808,7 @@ mod tests {
             url: format!("https://example.test/{suffix}"),
             title: suffix.into(),
             zoom: 1.0,
+            container: None,
             session_id,
             closed_at_ms,
             position: None,

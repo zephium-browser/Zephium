@@ -75,7 +75,26 @@ impl Shell {
                     .default_profile()
                     .unwrap_or(ProfileId::from(0))
             });
-        self.partition_of_profile(profile)
+        let Some(container) = self.items.tab(id).and_then(|tab| tab.container) else {
+            return self.partition_of_profile(profile);
+        };
+        let Some(container) = self.containers.get(container) else {
+            return Partition::Ephemeral(profile);
+        };
+        let space = match self.items.get(id).map(|item| item.placement) {
+            Some(Placement::Favorites { space }) | Some(Placement::Space { space, .. }) => space,
+            Some(Placement::Mini { .. }) | None => return Partition::Ephemeral(profile),
+        };
+        if container.profile != profile
+            || !container.available_in(space)
+            || self
+                .profiles
+                .get(profile)
+                .is_none_or(|p| p.kind == ProfileKind::Incognito)
+        {
+            return Partition::Ephemeral(profile);
+        }
+        Partition::Container(profile, container.id)
     }
 
     pub(super) fn partition_of_profile(&self, profile: ProfileId) -> Partition {

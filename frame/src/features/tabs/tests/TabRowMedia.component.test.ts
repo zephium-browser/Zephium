@@ -106,6 +106,17 @@ test("the camera indicator offers its own tab's media menu without selecting it"
   expect(native.mute).not.toHaveBeenCalled();
 });
 
+test("a container tab reserves space between the capture and close controls", async () => {
+  const screen = await row(
+    tabFixture({
+      container_id: "container-a",
+      capture: { navigation_id: "000000000000002a", camera: "active", microphone: "none" },
+    }),
+  );
+  const status = screen.container.querySelector(".tab-status") as HTMLElement;
+  expect(status.style.marginInlineEnd).toBe("40px");
+});
+
 // Sampled over the length of the transitions: a hover that lets go and takes
 // hold again shows as a false among the samples.
 async function hoverStaysHeld(button: HTMLElement, duration = 600) {

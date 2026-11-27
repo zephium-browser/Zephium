@@ -1085,6 +1085,7 @@ fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
         url: "https://closed.example/path".into(),
         title: "Closed tab".into(),
         zoom: 1.25,
+        container: None,
         session_id: Some(zephium_core::ids::ClosedSessionId::from(42)),
         closed_at_ms: Some(1_700_000_000_123),
         position: None,
@@ -1586,6 +1587,36 @@ fn failed_save_uses_capped_exponential_backoff_and_keeps_latest() {
     let pending = slot.unwrap();
     assert_eq!(pending.state, latest);
     assert_eq!(pending.retry_at, retry_at, "new snapshots retain backoff");
+}
+
+#[test]
+fn due_session_waits_for_failed_settings_retry() {
+    let now = Instant::now();
+    let mut pending = PendingSession::new(sample(), now - MAX_PENDING_AGE);
+    assert!(pending.due(now));
+
+    let mut hub = Hub::in_memory().unwrap();
+    hub.fail_setting_writes();
+    let mailbox = Mutex::new(PendingSettings::default());
+    mailbox
+        .lock()
+        .unwrap()
+        .pending
+        .insert("keymap".into(), "custom".into());
+    let mut setting_retry = WriteRetry::default();
+    assert!(!flush_settings(
+        &mut hub,
+        &mailbox,
+        &mut setting_retry,
+        false
+    ));
+    let retry_at = setting_retry.retry_at.unwrap();
+    pending.defer_until(retry_at);
+
+    assert!(!pending.due(now));
+    assert_eq!(pending.deadline(), retry_at);
+    assert_eq!(pending.state, sample());
+    assert!(mailbox.lock().unwrap().pending.contains_key("keymap"));
 }
 
 #[test]

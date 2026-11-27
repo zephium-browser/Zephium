@@ -762,8 +762,14 @@ impl Shell {
         let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
             queue: Arc::downgrade(&queue.inner),
         });
+        let containers = self
+            .containers
+            .for_profile(profile)
+            .map(|container| container.id)
+            .collect();
         self.engine.erase_profile_data(
             profile,
+            containers,
             Box::new(move |outcome| {
                 let mut pending = inbox
                     .lock()

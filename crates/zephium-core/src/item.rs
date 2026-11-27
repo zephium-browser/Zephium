@@ -3,7 +3,7 @@
 
 use url::Url;
 
-use crate::ids::{ItemId, ProfileId, SpaceId};
+use crate::ids::{ContainerId, ItemId, ProfileId, SpaceId};
 
 pub const MAX_PAGE_TITLE_CHARS: usize = 512;
 
@@ -122,6 +122,9 @@ pub enum Placement {
 #[derive(Clone, Debug)]
 pub struct TabState {
     pub content: TabContent,
+    /// Durable browsing container for cookies and website-owned storage.
+    /// `None` keeps legacy tabs in their profile's default session.
+    pub container: Option<ContainerId>,
     pub title: String,
     pub url: Option<Url>,
     pub loading: bool,
@@ -196,6 +199,7 @@ impl TabState {
     pub(crate) fn new() -> Self {
         Self {
             content: TabContent::Web,
+            container: None,
             title: "New Tab".into(),
             url: None,
             loading: false,
@@ -249,7 +253,7 @@ impl TabState {
 #[derive(Clone, Debug)]
 pub enum ItemKind {
     Folder { name: String },
-    Tab(TabState),
+    Tab(Box<TabState>),
 }
 
 #[derive(Clone, Debug)]

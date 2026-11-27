@@ -287,6 +287,7 @@ impl Shell {
         self.apply_profile_tombstone(session.profile);
         self.engine.erase_profile_data(
             session.profile,
+            Vec::new(),
             Box::new(|outcome| {
                 if outcome != zephium_core::ports::engine::ProfileDataErasureOutcome::Verified {
                     crate::diagnostic!("private: partition erasure did not verify: {outcome:?}");
