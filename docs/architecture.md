@@ -77,6 +77,14 @@ Engine callbacks and native object access must respect their platform thread
 and lifetime requirements. Keep platform-specific operations in the appropriate
 `platform/` and `host/` modules, with application policy expressed through ports.
 
+The application data directory is also an instance-coordination boundary.
+Instances with different data roots can run independently; launches sharing a
+root coordinate storage admission and wait for active session recovery to finish
+or be abandoned before restoring. Launcher-shortcut ownership is coordinated
+across roots, while each Windows privileged WebView2 runtime generation is
+scoped to its owning process and cleaned only after that process's browsers are
+known to have exited or after a reboot boundary.
+
 **Mini windows.** A mini window holds one page outside the sidebar. Links
 from other apps open in one by default (`tabs.external-position = mini`);
 `window.newMini` opens the launcher in mini mode, which offers only sites, and
