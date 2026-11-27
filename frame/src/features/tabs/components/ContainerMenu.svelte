@@ -32,6 +32,9 @@
   const availableContainers = $derived(
     containers.filter((item) => item.spaces === null || item.spaces.includes(currentSpace ?? "")),
   );
+  const unassignedContainers = $derived(
+    containers.filter((item) => item.spaces !== null && item.spaces.length === 0),
+  );
   const selected = (id: string) => currentTab?.container_id === id;
 
   $effect(() => {
@@ -316,6 +319,39 @@
           </div>
         {/each}
       </div>
+      {#if unassignedContainers.length}
+        <div class="group-label">Not available in any Space</div>
+        <div class="container-options" role="group" aria-label="Containers available in no Spaces">
+          {#each unassignedContainers as container (container.id)}
+            <div
+              class="container-option-wrap unassigned-container"
+              data-space-hue={container.color}
+            >
+              <span class="dot">
+                <Icon
+                  icon={SPACE_SYMBOLS[
+                    container.icon?.kind === "symbol" ? container.icon.index : 0
+                  ] ?? ShieldKeyIcon}
+                  size={13}
+                />
+              </span>
+              <span class="option-name"
+                >{container.icon?.kind === "emoji"
+                  ? `${container.icon.text} `
+                  : ""}{container.name}</span
+              >
+              <button
+                class="edit"
+                type="button"
+                title={`Edit ${container.name}`}
+                aria-label={`Edit ${container.name}`}
+                onclick={() => beginEdit(container)}
+                ><Icon icon={PencilEdit02Icon} size={13} /></button
+              >
+            </div>
+          {/each}
+        </div>
+      {/if}
       {#if operationError}
         <p class="error" role="alert">
           Couldn’t update this container. Try again.
@@ -473,6 +509,12 @@
 
     .container-option-wrap:hover {
       background: var(--row-hover);
+    }
+
+    .unassigned-container .edit {
+      display: grid;
+      width: 24px;
+      height: 24px;
     }
 
     .container-option {
