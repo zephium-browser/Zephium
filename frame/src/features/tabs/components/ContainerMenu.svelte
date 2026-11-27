@@ -23,6 +23,7 @@
   let operationError = $state(false);
   let removeRetry = $state<ContainerView | null>(null);
   let error = $state(false);
+  let previousSpace = $state<string | null>(null);
   const currentSpace = $derived(tabDomain.activeSpaceId());
   const currentTab = $derived(tabDomain.activeTab());
   const containers = $derived(tabDomain.containersList());
@@ -31,6 +32,15 @@
     containers.filter((item) => item.spaces === null || item.spaces.includes(currentSpace ?? "")),
   );
   const selected = (id: string) => currentTab?.container_id === id;
+
+  $effect(() => {
+    const activeSpace = currentSpace;
+    if (previousSpace !== activeSpace) {
+      previousSpace = activeSpace;
+      removeRetry = null;
+      operationError = false;
+    }
+  });
 
   function onWindowKeydown(event: KeyboardEvent) {
     if (open && event.key === "Escape") {
