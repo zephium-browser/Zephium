@@ -3,11 +3,10 @@
 //! of truth for profiles, tabs and focus.
 
 use raw_window_handle::HasWindowHandle;
+use std::collections::BTreeSet;
 #[cfg(target_os = "macos")]
 use std::collections::HashMap;
-use std::sync::Arc;
-#[cfg(target_os = "macos")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Manager, WebviewWindow};
 use zephium_app::{Command, Handle};
 use zephium_core::geometry::Size;
@@ -18,6 +17,11 @@ use crate::UiStartupGate;
 use crate::{shutdown_started, MAIN_LABEL};
 
 const LABEL_PREFIX: &str = "browser-";
+static ALLOWED_CLOSES: OnceLock<Mutex<BTreeSet<u64>>> = OnceLock::new();
+
+fn allowed_closes() -> &'static Mutex<BTreeSet<u64>> {
+    ALLOWED_CLOSES.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
 
 #[cfg(target_os = "macos")]
 struct Factory {
@@ -102,6 +106,34 @@ pub(crate) fn open(app: &tauri::AppHandle, opened: BrowserWindowOpenedView) {
     {
         unbuilt(app, id);
     }
+}
+
+fn close_after_flush(window: WebviewWindow, id: u64) {
+    let app = window.app_handle().clone();
+    let callback_app = app.clone();
+    crate::resource_close::request(app, move || {
+        allowed_closes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
+        let close_id = id;
+        if callback_app
+            .run_on_main_thread(move || {
+                if window.close().is_err() {
+                    allowed_closes()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&close_id);
+                }
+            })
+            .is_err()
+        {
+            allowed_closes()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+        }
+    });
 }
 
 fn unbuilt(app: &tauri::AppHandle, id: u64) {
@@ -193,15 +225,22 @@ fn build(app: &tauri::AppHandle, opened: BrowserWindowOpenedView) -> bool {
         };
         match event {
             tauri::WindowEvent::CloseRequested { api, .. } if !shutdown_started(app) => {
-                api.prevent_close();
-                shell.dispatch(Command::BrowserWindowClosed(id));
+                let admitted = allowed_closes()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id);
+                if !admitted {
+                    api.prevent_close();
+                    close_after_flush(event_window.clone(), id);
+                }
             }
             tauri::WindowEvent::Destroyed => {
-                crate::platform::imp::remove_key_monitor(&event_window);
+                crate::platform::imp::remove_key_monitor(event_window.label());
                 gates()
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&id);
+                crate::resource_close::forget_window(app, event_window.label());
                 shell.dispatch(Command::BrowserWindowClosed(id));
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
@@ -214,6 +253,7 @@ fn build(app: &tauri::AppHandle, opened: BrowserWindowOpenedView) -> bool {
                     window: id,
                     focused: *focused,
                 });
+                crate::presence::report_app_active(event_window.app_handle());
                 if *focused {
                     shell.dispatch(Command::BrowserWindowVisible {
                         window: id,

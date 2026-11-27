@@ -2443,17 +2443,35 @@ fn try_emit_to_privileged<T: Serialize>(
     event: &str,
     payload: &T,
 ) -> bool {
+    let targets = if label == MAIN_LABEL {
+        browser_window::labels(app)
+    } else {
+        vec![label.to_owned()]
+    };
+    try_emit_to_privileged_targets(app, targets, event, payload)
+}
+
+fn try_emit_to_privileged_only<T: Serialize>(
+    app: &tauri::AppHandle,
+    label: &str,
+    event: &str,
+    payload: &T,
+) -> bool {
+    try_emit_to_privileged_targets(app, vec![label.to_owned()], event, payload)
+}
+
+fn try_emit_to_privileged_targets<T: Serialize>(
+    app: &tauri::AppHandle,
+    targets: Vec<String>,
+    event: &str,
+    payload: &T,
+) -> bool {
     let (Ok(event), Ok(payload)) = (serde_json::to_string(event), serde_json::to_string(payload))
     else {
         diagnostic!("projection: failed to serialize privileged event");
         return false;
     };
     let script = format!("window.dispatchEvent(new CustomEvent({event},{{detail:{payload}}}));");
-    let targets = if label == MAIN_LABEL {
-        browser_window::labels(app)
-    } else {
-        vec![label.to_owned()]
-    };
     let mut delivered = false;
     for target in targets {
         let Some(window) = app.get_webview_window(&target) else {
@@ -4265,7 +4283,9 @@ fn execute_command_or(
     }
     // A page that holds the screen is left with its own controls.
     if id == "window.fullscreen" {
-        let Some(window) = browser_window::focused(app) else {
+        let Some(window) =
+            browser_window::focused(app).or_else(|| app.get_webview_window(MAIN_LABEL))
+        else {
             return rejected_operation();
         };
         return if !content_fullscreen::held()
@@ -4368,9 +4388,19 @@ fn execute_command_or(
     // authoritative URL of the page it shows.
     if matches!(
         id,
-        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous" | "work.dictate"
+        "page.copyLink" | "find.show" | "find.next" | "find.previous" | "work.dictate"
     ) {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
+    if id == "note.new" {
+        let label = browser_window::focused(app)
+            .map(|window| window.label().to_owned())
+            .unwrap_or_else(|| MAIN_LABEL.to_owned());
+        return if try_emit_to_privileged_only(app, &label, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
             rejected_operation()
@@ -7839,8 +7869,13 @@ fn finish_browser_setup(
         Projection::RaiseWindow => {
             let app = emit_handle.clone();
             let _ = emit_handle.run_on_main_thread(move || {
-                let Some(window) =
-                    browser_window::focused(&app).or_else(|| app.get_webview_window(MAIN_LABEL))
+                let Some(window) = browser_window::focused(&app)
+                    .or_else(|| app.get_webview_window(MAIN_LABEL))
+                    .or_else(|| {
+                        browser_window::labels(&app)
+                            .into_iter()
+                            .find_map(|label| app.get_webview_window(&label))
+                    })
                 else {
                     return;
                 };
@@ -8260,7 +8295,7 @@ fn finish_browser_setup(
                     // that do not emit a preventable close request first.
                     tauri::WindowEvent::Destroyed => {
                         #[cfg(target_os = "macos")]
-                        platform::imp::remove_key_monitor(&resize_window);
+                        platform::imp::remove_key_monitor(MAIN_LABEL);
                         #[cfg(target_os = "windows")]
                         if !platform::imp::remove_privileged_version_observer(MAIN_LABEL) {
                             diagnostic!(

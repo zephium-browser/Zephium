@@ -1028,12 +1028,60 @@ mod tests {
 
 pub(crate) type KeyTable =
     Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>;
-type KeyMonitorWindows = Rc<RefCell<HashMap<usize, KeyMonitorWindow>>>;
+#[derive(Default)]
+struct KeyMonitorWindows {
+    labels_by_window: HashMap<usize, String>,
+    registrations: HashMap<String, KeyMonitorWindow>,
+}
+
+impl KeyMonitorWindows {
+    fn insert(&mut self, native_window: usize, label: String, registration: KeyMonitorWindow) {
+        self.labels_by_window.insert(native_window, label.clone());
+        self.registrations.insert(label, registration);
+    }
+
+    fn remove_label(&mut self, label: &str) {
+        self.registrations.remove(label);
+        self.labels_by_window
+            .retain(|_, registered| registered != label);
+    }
+
+    fn label_for_window(&self, native_window: usize) -> Option<&str> {
+        self.labels_by_window
+            .get(&native_window)
+            .map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod key_monitor_windows_tests {
+    use super::{KeyMonitorWindow, KeyMonitorWindows};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn destroyed_window_registration_is_removed_by_label() {
+        let mut windows = KeyMonitorWindows::default();
+        windows.insert(
+            42,
+            "browser-42".into(),
+            KeyMonitorWindow {
+                table: Arc::new(RwLock::new(Vec::new())),
+                on: Box::new(|_| {}),
+            },
+        );
+
+        windows.remove_label("browser-42");
+
+        assert_eq!(windows.label_for_window(42), None);
+        assert!(!windows.registrations.contains_key("browser-42"));
+    }
+}
 
 thread_local! {
     static KEY_MONITOR: RefCell<Option<Retained<objc2::runtime::AnyObject>>> =
         const { RefCell::new(None) };
-    static KEY_WINDOWS: RefCell<Option<KeyMonitorWindows>> = const { RefCell::new(None) };
+    static KEY_WINDOWS: RefCell<Option<Rc<RefCell<KeyMonitorWindows>>>> =
+        const { RefCell::new(None) };
 }
 
 struct KeyMonitorWindow {
@@ -1060,11 +1108,15 @@ pub(crate) fn install_key_monitor(
         return;
     };
     let native_window = native_window as usize;
+    let label = window.label().to_owned();
     let windows = KEY_WINDOWS.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let windows = slot.get_or_insert_with(|| Rc::new(RefCell::new(HashMap::new())));
-        windows.borrow_mut().insert(
+        let windows =
+            slot.get_or_insert_with(|| Rc::new(RefCell::new(KeyMonitorWindows::default())));
+        let mut registrations = windows.borrow_mut();
+        registrations.insert(
             native_window,
+            label,
             KeyMonitorWindow {
                 table,
                 on: Box::new(on),
@@ -1088,7 +1140,10 @@ pub(crate) fn install_key_monitor(
         };
         let native_window = Retained::as_ptr(&native_window) as usize;
         let windows = handler_windows.borrow();
-        let Some(target) = windows.get(&native_window) else {
+        let Some(label) = windows.label_for_window(native_window) else {
+            return event.as_ptr();
+        };
+        let Some(target) = windows.registrations.get(label) else {
             return event.as_ptr();
         };
         let flags = event_ref.modifierFlags();
@@ -1130,13 +1185,11 @@ pub(crate) fn install_key_monitor(
     KEY_MONITOR.with(|slot| *slot.borrow_mut() = monitor);
 }
 
-pub(crate) fn remove_key_monitor(window: &WebviewWindow) {
-    let Ok(native_window) = window.ns_window() else {
-        return;
-    };
+pub(crate) fn remove_key_monitor(label: &str) {
     KEY_WINDOWS.with(|slot| {
         if let Some(windows) = slot.borrow().as_ref() {
-            windows.borrow_mut().remove(&(native_window as usize));
+            let mut windows = windows.borrow_mut();
+            windows.remove_label(label);
         }
     });
 }

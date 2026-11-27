@@ -259,11 +259,19 @@ impl Shell {
 
     /// Moves window focus to `id`: lifecycle bookkeeping plus a lazy view.
     pub(super) fn focus_tab(&mut self, id: ItemId) -> Vec<Effect> {
-        let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
+        let Some((focused_window, profile, space)) = self
+            .windows
+            .focused()
+            .map(|win| (win.id, win.profile, win.space))
         else {
             return Vec::new();
         };
         if !self.item_in_scope(id, profile, space) {
+            return Vec::new();
+        }
+        if self.windows.iter().any(|window| {
+            window.id != focused_window && window.profile == profile && window.active == Some(id)
+        }) {
             return Vec::new();
         }
         // Explicit selection supersedes a pending native foreground request.

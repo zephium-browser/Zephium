@@ -102,18 +102,38 @@ impl Gate {
         true
     }
 
-    fn participants(&self) -> Vec<&'static str> {
+    fn forget_window(&mut self, label: &str) -> Vec<(String, String)> {
+        self.touched.remove(label);
+        self.pending.remove(label);
+        if self.prepared && !self.system_closing {
+            self.prepared = false;
+            std::mem::take(&mut self.flushed)
+                .into_iter()
+                .filter(|(participant, _)| participant != label)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn participants(&self) -> Vec<String> {
         // The launcher may not have been created or loaded yet.
         // A window that never used a resource API cannot own a resource draft
         // and may not have a renderer close listener yet. Touched hidden hosts
         // still participate: hiding a view does not discard its pending edits.
-        [super::MAIN_LABEL, super::overlay::PANEL_LABEL]
-            .into_iter()
-            .filter(|label| self.touched.contains(*label))
+        self.touched
+            .iter()
+            .filter(|label| {
+                let label = label.as_str();
+                label == super::MAIN_LABEL
+                    || label == super::overlay::PANEL_LABEL
+                    || super::browser_window::window_of(label).is_some()
+            })
+            .cloned()
             .collect()
     }
 
-    fn requires_another_flush(&self, participants: &[&str]) -> bool {
+    fn requires_another_flush(&self, participants: &[String]) -> bool {
         self.participants()
             .iter()
             .any(|label| !participants.contains(label))
@@ -121,7 +141,7 @@ impl Gate {
 
     /// The person chose to leave what could not be saved. Admission is closed
     /// exactly as after a successful flush.
-    fn leave_unsaved(&mut self, terminal: bool, requests: &[(&'static str, String)]) {
+    fn leave_unsaved(&mut self, terminal: bool, requests: &[(String, String)]) {
         self.prepared = !terminal;
         self.flushed = requests
             .iter()
@@ -131,11 +151,11 @@ impl Gate {
 
     fn enlist_new(
         &mut self,
-        participants: &mut Vec<&'static str>,
+        participants: &mut Vec<String>,
         available: impl Fn(&str) -> bool,
         mut token: impl FnMut() -> String,
     ) -> (
-        Vec<(&'static str, String)>,
+        Vec<(String, String)>,
         Vec<tokio::sync::oneshot::Receiver<bool>>,
     ) {
         let additional: Vec<_> = self
@@ -146,8 +166,8 @@ impl Gate {
         let mut requests = Vec::new();
         let mut receivers = Vec::new();
         for label in additional {
-            participants.push(label);
-            if !available(label) {
+            participants.push(label.clone());
+            if !available(&label) {
                 if let Some(round) = self.round.as_mut() {
                     round.participants_available = false;
                 }
@@ -155,7 +175,7 @@ impl Gate {
             }
             let token = token();
             let (send, receive) = tokio::sync::oneshot::channel();
-            self.pending.insert(label.into(), (token.clone(), send));
+            self.pending.insert(label.clone(), (token.clone(), send));
             receivers.push(receive);
             requests.push((label, token));
         }
@@ -165,7 +185,7 @@ impl Gate {
     fn needs_system_wave(
         &self,
         completed: bool,
-        participants: &[&str],
+        participants: &[String],
         now: std::time::Instant,
     ) -> bool {
         completed
@@ -200,8 +220,8 @@ impl Gate {
         &mut self,
         round: FlushRound,
         completed: bool,
-        participants: &[&str],
-        requests: &[(&'static str, String)],
+        participants: &[String],
+        requests: &[(String, String)],
     ) -> bool {
         let saved = completed
             && round.participants_available
@@ -224,7 +244,7 @@ impl Gate {
         &mut self,
         quit: bool,
         terminal: bool,
-        requests: &[(&'static str, String)],
+        requests: &[(String, String)],
     ) -> bool {
         if !quit || self.system_closing {
             return false;
@@ -252,6 +272,21 @@ pub(super) fn complete(label: &str, token: &str, success: bool) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .complete(label, token, success)
+}
+
+pub(super) fn forget_window(app: &tauri::AppHandle, label: &str) {
+    let flushed = gate()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .forget_window(label);
+    for (participant, token) in flushed {
+        super::emit_to_privileged(
+            app,
+            &participant,
+            "zephium:resource-close-cancelled",
+            &token,
+        );
+    }
 }
 pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'static) {
     if super::updates::blocks_exit(&app) {
@@ -707,8 +742,39 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_browser_renderer_invalidates_the_prepared_flush_for_survivors() {
+        let mut gate = Gate {
+            prepared: true,
+            ..Gate::default()
+        };
+        gate.touched.insert("browser-1".into());
+        gate.touched.insert("browser-2".into());
+        gate.flushed = vec![
+            ("browser-1".into(), "closing-token".into()),
+            ("browser-2".into(), "survivor-token".into()),
+        ];
+        let (send, mut receive) = tokio::sync::oneshot::channel();
+        gate.pending
+            .insert("browser-1".into(), ("closing-token".into(), send));
+
+        let cancelled = gate.forget_window("browser-1");
+
+        assert!(!gate.prepared);
+        assert!(!gate.touched.contains("browser-1"));
+        assert!(gate.pending.is_empty());
+        assert_eq!(cancelled, [("browser-2".into(), "survivor-token".into())]);
+        assert!(
+            matches!(
+                receive.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ),
+            "destroy drops its outstanding reply"
+        );
+    }
+
+    #[test]
     fn leaving_unsaved_work_closes_admission_like_a_successful_flush() {
-        let requests = [("main", "token".to_owned())];
+        let requests = [("main".to_owned(), "token".to_owned())];
         for terminal in [true, false] {
             let mut gate = Gate::default();
             gate.leave_unsaved(terminal, &requests);
@@ -849,7 +915,12 @@ mod tests {
         assert!(gate.complete("main", "current", true));
         assert!(wait_for_flush(vec![receive], deadline).await);
         let round = gate.round.take().unwrap();
-        assert!(gate.finish_system(round, true, &participants, &[("main", "current".into())]));
+        assert!(gate.finish_system(
+            round,
+            true,
+            &participants,
+            &[("main".to_owned(), "current".into())]
+        ));
         assert_eq!(answers.try_iter().collect::<Vec<_>>(), [true, true]);
         assert!(
             !gate.complete("main", "current", true),
@@ -973,7 +1044,7 @@ mod tests {
     #[test]
     fn late_unsaved_prompt_answer_cannot_override_system_shutdown() {
         let mut gate = Gate::default();
-        let requests = [("main", "old-user-token".to_owned())];
+        let requests = [("main".to_owned(), "old-user-token".to_owned())];
         let (normal, answer) = std::sync::mpsc::channel();
         let late_prompt = move |gate: &mut Gate| {
             normal
@@ -1045,14 +1116,14 @@ mod tests {
         assert_eq!(
             additional,
             [(
-                super::super::overlay::PANEL_LABEL,
+                super::super::overlay::PANEL_LABEL.to_owned(),
                 "launcher-token".to_owned()
             )]
         );
         requests.extend(additional);
         assert_eq!(
             requests[0],
-            (super::super::MAIN_LABEL, "main-token".to_owned())
+            (super::super::MAIN_LABEL.to_owned(), "main-token".to_owned())
         );
         assert!(!gate.pending.contains_key(super::super::MAIN_LABEL));
         assert_eq!(gate.pending.len(), 1);

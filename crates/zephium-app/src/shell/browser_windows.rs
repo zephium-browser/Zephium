@@ -21,7 +21,10 @@ impl Shell {
                 zephium_ipc::OperationReason::NoFocusedWindow,
             );
         };
-        if !self.bootstrapped || self.profile_deletion_quarantines(profile) {
+        if !self.bootstrapped
+            || self.profile_deletion_quarantines(profile)
+            || self.incognito_profile(profile)
+        {
             return operation_result(
                 zephium_ipc::OperationOutcome::Rejected,
                 zephium_ipc::OperationReason::InvalidScope,
@@ -164,6 +167,10 @@ impl Shell {
     }
 
     pub(super) fn browser_window_closed(&mut self, window: WindowId) {
+        let was_focused = self
+            .windows
+            .focused()
+            .is_some_and(|focused| focused.id == window);
         let Some(native) = self.windows.close(window) else {
             return;
         };
@@ -174,7 +181,10 @@ impl Shell {
         self.window_visible = self.windows.iter().any(|candidate| {
             candidate.kind == zephium_core::windows::WindowKind::Main && candidate.visible
         });
-        self.window_focused = self.windows.focused().is_some();
+        if was_focused {
+            self.window_focused = false;
+            self.cancel_page_permission_if_not_foreground();
+        }
         (self.emit)(Projection::BrowserWindowClosed(window));
         if self.windows.focused().is_some() {
             self.project_items();

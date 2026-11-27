@@ -65,6 +65,99 @@ fn new_browser_window_gets_its_own_focus_and_closes_without_closing_the_shell() 
 }
 
 #[test]
+fn a_tab_active_in_another_browser_window_cannot_blank_its_content_stage() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first_window = shell.windows.focused().unwrap().id;
+    let first_active = active_id(&screen);
+    let opened = shell.handle_operation(Command::Run("window.new".into()));
+    assert_eq!(opened.outcome, OperationOutcome::Deferred);
+    let second_window = shell
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .find(|window| *window != first_window)
+        .unwrap();
+    shell.handle(Command::BrowserWindowAttached {
+        window: second_window,
+        size: Size::new(1100.0, 720.0),
+    });
+    let second_active = shell.windows.get(second_window).unwrap().active.unwrap();
+    shell.handle(Command::BrowserWindowFocused {
+        window: second_window,
+        focused: true,
+    });
+
+    let result = shell.handle_operation(Command::Activate(first_active));
+
+    assert_eq!(result.outcome, OperationOutcome::NoOp);
+    assert_eq!(
+        shell.windows.get(first_window).unwrap().active,
+        Some(first_active)
+    );
+    assert_eq!(
+        shell.windows.get(second_window).unwrap().active,
+        Some(second_active)
+    );
+}
+
+#[test]
+fn private_scope_cannot_open_a_second_window_that_outlives_its_partition() {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::Bootstrap);
+    assert_eq!(
+        shell
+            .handle_operation(Command::Run("window.newPrivate".into()))
+            .outcome,
+        OperationOutcome::Deferred
+    );
+    let private = shell.windows.focused().unwrap().profile;
+    assert!(shell.incognito_profile(private));
+
+    let rejected = shell.handle_operation(Command::Run("window.new".into()));
+
+    assert_eq!(rejected.outcome, OperationOutcome::Rejected);
+    assert_eq!(shell.windows.iter().count(), 1);
+    assert!(shell.windows.iter().all(
+        |window| window.profile != private || window.id == shell.windows.focused().unwrap().id
+    ));
+    shell.end_private_session();
+    assert!(shell.windows.iter().all(|window| window.profile != private));
+}
+
+#[test]
+fn closing_a_nonfocused_browser_window_does_not_claim_native_focus() {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first_window = shell.windows.focused().unwrap().id;
+    let opened = shell.handle_operation(Command::Run("window.new".into()));
+    assert_eq!(opened.outcome, OperationOutcome::Deferred);
+    let second_window = shell
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .find(|window| *window != first_window)
+        .unwrap();
+    shell.handle(Command::BrowserWindowAttached {
+        window: second_window,
+        size: Size::new(1100.0, 720.0),
+    });
+    shell.handle(Command::BrowserWindowFocused {
+        window: second_window,
+        focused: true,
+    });
+    shell.handle(Command::BrowserWindowFocused {
+        window: second_window,
+        focused: false,
+    });
+    assert!(!shell.window_focused);
+
+    shell.handle(Command::BrowserWindowClosed(first_window));
+
+    assert!(!shell.window_focused);
+}
+
+#[test]
 fn setting_operation_reports_store_admission_without_claiming_durability() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, _screen) = setup_with(store.clone());

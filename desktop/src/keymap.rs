@@ -269,7 +269,10 @@ fn validated_overrides(mut overrides: HashMap<String, String>) -> HashMap<String
         let resolved = commands::resolve(&overrides);
         let conflicts: Vec<_> = overrides
             .iter()
-            .filter(|(id, value)| commands::validate_binding(&resolved, id, Some(value)).is_err())
+            .filter(|(id, value)| {
+                commands::validate_binding(&resolved, id, (!value.is_empty()).then_some(value))
+                    .is_err()
+            })
             .map(|(id, _)| id.clone())
             .collect();
         if conflicts.is_empty() {
@@ -526,6 +529,46 @@ pub(crate) fn keymap_reset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_unbindings_survive_validation_and_replacements() {
+        let mut unbound = HashMap::new();
+        unbound.insert("tab.close".to_owned(), String::new());
+        let unbound = validated_overrides(unbound);
+        assert_eq!(unbound.get("tab.close"), Some(&String::new()));
+        assert_eq!(
+            commands::resolve(&unbound)
+                .iter()
+                .find(|command| command.id == "tab.close")
+                .and_then(|command| command.accelerator.as_deref()),
+            None
+        );
+
+        let mut replacement = HashMap::new();
+        replacement.insert("tab.close".to_owned(), String::new());
+        replacement.insert("tab.new".to_owned(), "CmdOrCtrl+W".to_owned());
+        let replacement = validated_overrides(replacement);
+        let resolved = commands::resolve(&replacement);
+        assert_eq!(replacement.get("tab.close"), Some(&String::new()));
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|command| command.id == "tab.close")
+                .and_then(|command| command.accelerator.as_deref()),
+            None
+        );
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|command| command.id == "tab.new")
+                .and_then(|command| command.accelerator.as_deref()),
+            Some(if cfg!(target_os = "macos") {
+                "Cmd+W"
+            } else {
+                "Ctrl+W"
+            })
+        );
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

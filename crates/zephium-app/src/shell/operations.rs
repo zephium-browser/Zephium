@@ -565,6 +565,14 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        let focused_window = self.windows.focused().map(|window| window.id);
+        if self
+            .windows
+            .iter()
+            .any(|window| Some(window.id) != focused_window && window.active == Some(id))
+        {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
         let active = self.windows.focused().and_then(|window| window.active);
         if active == Some(id)
             && self
