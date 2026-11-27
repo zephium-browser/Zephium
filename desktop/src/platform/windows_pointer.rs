@@ -23,10 +23,10 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, GetMessagePos, GetMessageTime,
-    IsIconic, IsWindow, KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
+    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, GetMessagePos,
+    GetMessageTime, IsIconic, IsWindow, KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
 };
 
 /// About a display frame, as often as the pointer was read while it moved.
