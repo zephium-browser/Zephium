@@ -72,7 +72,9 @@
     error = false;
     try {
       let result;
-      const scope = selectedSpaces.length === spaces.length ? null : [...selectedSpaces];
+      const current = spaces.map((space) => space.id);
+      const chosen = selectedSpaces.filter((id) => current.includes(id));
+      const scope = current.every((id) => chosen.includes(id)) ? null : chosen;
       if (editing === "new")
         result = await tabDomain.createContainer(name.trim(), icon, color, scope);
       else {
