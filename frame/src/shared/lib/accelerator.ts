@@ -148,7 +148,8 @@ const MODIFIER_CODES = new Set([
 /** The accelerator a key press spells, by physical key so it does not change
  *  with the keyboard layout, or null while only modifiers are held. */
 export function acceleratorFrom(event: KeyboardEvent, mac: boolean): string | null {
-  if (!event.code || MODIFIER_CODES.has(event.code)) return null;
+  if (event.isComposing || event.keyCode === 229 || !event.code || MODIFIER_CODES.has(event.code))
+    return null;
   const parts: string[] = [];
   if (event.ctrlKey) parts.push("Ctrl");
   if (event.altKey) parts.push("Alt");

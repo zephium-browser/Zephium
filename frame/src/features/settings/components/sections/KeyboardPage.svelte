@@ -4,6 +4,7 @@
   import { preferences } from "$domain/preferences";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
+  import { isComposing } from "$shared/lib/keyboard";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
@@ -75,7 +76,7 @@
   // a chord being recorded never also runs the command it currently names.
   function keydown(event: KeyboardEvent) {
     const id = recordingId;
-    if (id === null) return;
+    if (id === null || isComposing(event)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     const bare = !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
