@@ -276,7 +276,7 @@
   {/each}
   {#if session.next}<Button
       variant="ghost"
-      disabled={session.loading || session.entries.length >= 2000}
+      disabled={session.loading || !session.canLoadMore}
       onclick={() => void session.reload(true)}>{m.download_more()}</Button
     >{/if}
 </section>
