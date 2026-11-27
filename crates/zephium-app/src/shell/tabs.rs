@@ -478,11 +478,24 @@ impl Shell {
         space: SpaceId,
         at: Option<usize>,
     ) -> Option<ItemId> {
-        let tabs = self.successor_pool(profile, space);
+        let pool = self.successor_pool(profile, space);
+        let focused = self.windows.focused().map(|window| window.id);
+        let available = |id: &ItemId| {
+            !self.windows.iter().any(|window| {
+                Some(window.id) != focused
+                    && window.profile == profile
+                    && window.active == Some(*id)
+            })
+        };
+        let tabs: Vec<_> = pool.iter().filter(|id| available(id)).copied().collect();
         if tabs.is_empty() {
             return None;
         }
-        let at = at.unwrap_or(0);
+        let at = pool
+            .iter()
+            .take(at.unwrap_or(0))
+            .filter(|id| available(id))
+            .count();
         match self.tab_preferences.after_close {
             AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
             AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
