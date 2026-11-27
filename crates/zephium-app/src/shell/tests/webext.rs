@@ -2,7 +2,7 @@ use super::*;
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::engine::WebExtensionLoad;
 
-fn load() -> WebExtensionLoad {
+pub(super) fn load() -> WebExtensionLoad {
     WebExtensionLoad {
         install: ExtensionInstallId::from(1),
         extension_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),

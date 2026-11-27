@@ -1806,6 +1806,69 @@ fn restored_enabled_profile_holds_views_for_its_enabled_policy() {
 }
 
 #[test]
+fn first_page_dispatch_and_extension_loading_settle_independently() {
+    for extension_first in [true, false] {
+        let (mut shell, engine, _, store, screen) = controlled_shell();
+        let profile = store.saved.lock().unwrap().as_ref().unwrap().profiles[0].id;
+        *store.blocker_configs.lock().unwrap() = Some(vec![ProfileBlockerConfig {
+            profile,
+            revision: BlockerConfigRevision::INITIAL,
+            config: BlockerConfig { enabled: true },
+        }]);
+        let load = super::webext::load();
+        let install = load.install;
+        shell.set_web_extensions(profile, vec![load]);
+        shell.handle(Command::Bootstrap);
+        assert_eq!(shell.windows.focused().unwrap().profile, profile);
+        let provisional = initial_installation(&shell, profile);
+        assert!(engine
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("extension-load")));
+
+        shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+            profile,
+            requested: provisional,
+            settlement: ContentRuleSettlement::Applied {
+                generation: provisional,
+            },
+        }));
+        shell.handle(Command::Navigate {
+            id: active_id(&screen),
+            input: "startup.example".into(),
+        });
+        let created = || {
+            engine
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("create ") && call.contains("startup.example"))
+                .count()
+        };
+        assert_eq!(created(), 0);
+        let settle_extension = |shell: &mut Shell| {
+            shell.handle(Command::Engine(EngineEvent::WebExtensionSettled {
+                profile,
+                install,
+                result: Err("fixture load failed".into()),
+            }));
+        };
+        if extension_first {
+            settle_extension(&mut shell);
+            assert_eq!(created(), 0);
+        }
+        shell.handle(Command::BlockerStartupDeadline {
+            profile,
+            token: provisional.get(),
+        });
+        assert_eq!(created(), 1);
+        if !extension_first {
+            settle_extension(&mut shell);
+            assert_eq!(created(), 1);
+        }
+    }
+}
+
+#[test]
 fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
     let (mut shell, engine, compiler, store, screen) = controlled_shell();
     store.saved.lock().unwrap().take();

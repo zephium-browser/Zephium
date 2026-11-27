@@ -41,6 +41,8 @@ use crate::{
 };
 
 use super::wry_download_delegate::WryDownloadDelegate;
+#[cfg(target_os = "macos")]
+use crate::{wkwebview::navigation::MainFrameNavigationHolds, MainFrameNavigationHoldHandler};
 
 pub struct BlockedLoadCounter {
   pub identifier: Retained<NSString>,
@@ -82,6 +84,10 @@ pub struct WryNavigationDelegateIvars {
   pub navigation_policy_function: Box<dyn Fn(String, AppleNavigationAction) -> bool>,
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_hold: Option<Box<MainFrameNavigationHoldHandler>>,
+  #[cfg(target_os = "macos")]
+  pub(crate) main_frame_navigation_holds: MainFrameNavigationHolds,
   #[cfg(target_os = "macos")]
   pub credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
   #[cfg(target_os = "macos")]
@@ -363,6 +369,9 @@ impl WryNavigationDelegate {
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
     apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+    #[cfg(target_os = "macos")] main_frame_navigation_hold: Option<
+      Box<MainFrameNavigationHoldHandler>,
+    >,
     #[cfg(target_os = "macos")] credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
     #[cfg(target_os = "macos")] http_auth_handler: Option<Box<crate::http_auth::HttpAuthHandler>>,
     #[cfg(target_os = "macos")] certificate_failure_handler: Option<
@@ -423,6 +432,10 @@ impl WryNavigationDelegate {
         navigation_policy_function,
         #[cfg(target_os = "macos")]
         main_frame_navigation_attempt_handler,
+        #[cfg(target_os = "macos")]
+        main_frame_navigation_hold,
+        #[cfg(target_os = "macos")]
+        main_frame_navigation_holds: MainFrameNavigationHolds::default(),
         #[cfg(target_os = "macos")]
         credential_challenge_denied_handler,
         #[cfg(target_os = "macos")]

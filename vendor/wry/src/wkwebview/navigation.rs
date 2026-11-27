@@ -1,3 +1,8 @@
+#[cfg(target_os = "macos")]
+use std::{
+  cell::{Cell, RefCell},
+  rc::{Rc, Weak},
+};
 use std::{
   collections::{hash_map::Entry, HashMap, VecDeque},
   sync::{Mutex, OnceLock},
@@ -34,6 +39,117 @@ const APPLE_REDIRECT_EVENT_LIMIT: usize = 32;
 // WebKit's default extension scheme, and the `chrome-extension` base URL the
 // embedder assigns each context so Chrome extensions see their usual origin.
 const WEB_EXTENSION_URL_PREFIXES: [&str; 2] = ["webkit-extension://", "chrome-extension://"];
+
+#[cfg(target_os = "macos")]
+type PolicyAnswer = Box<dyn FnOnce(WKNavigationActionPolicy)>;
+
+#[cfg(target_os = "macos")]
+struct MainFramePolicyDecision(RefCell<Option<PolicyAnswer>>);
+
+#[cfg(target_os = "macos")]
+impl MainFramePolicyDecision {
+  fn is_pending(&self) -> bool {
+    self.0.borrow().is_some()
+  }
+
+  fn settle(&self, policy: WKNavigationActionPolicy) {
+    let answer = self.0.borrow_mut().take();
+    if let Some(answer) = answer {
+      answer(policy);
+    }
+  }
+
+  fn apply(self: &Rc<Self>, allowed: bool, hold: &crate::MainFrameNavigationHoldHandler) {
+    if !self.is_pending() {
+      return;
+    }
+    if !allowed {
+      self.settle(WKNavigationActionPolicy::Cancel);
+      return;
+    }
+    let handle = MainFrameNavigationHold(Rc::downgrade(self));
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold(handle))) {
+      Ok(true) => {}
+      Ok(false) => self.settle(WKNavigationActionPolicy::Allow),
+      Err(_) => self.settle(WKNavigationActionPolicy::Cancel),
+    }
+  }
+}
+
+/// A weak, one-shot release handle for one view's main-frame policy decision.
+/// A superseded or closed view's decision has already been cancelled.
+#[cfg(target_os = "macos")]
+pub struct MainFrameNavigationHold(Weak<MainFramePolicyDecision>);
+
+#[cfg(target_os = "macos")]
+impl MainFrameNavigationHold {
+  /// Whether this exact decision still awaits an answer.
+  pub fn is_pending(&self) -> bool {
+    self
+      .0
+      .upgrade()
+      .is_some_and(|decision| decision.is_pending())
+  }
+
+  /// Releases this decision if it is still pending.
+  pub fn resume(self) {
+    if let Some(decision) = self.0.upgrade() {
+      decision.settle(WKNavigationActionPolicy::Allow);
+    }
+  }
+
+  /// Cancels this decision if it is still pending.
+  pub fn cancel(self) {
+    if let Some(decision) = self.0.upgrade() {
+      decision.settle(WKNavigationActionPolicy::Cancel);
+    }
+  }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(crate) struct MainFrameNavigationHolds {
+  closed: Cell<bool>,
+  current: RefCell<Option<Rc<MainFramePolicyDecision>>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MainFrameNavigationHolds {
+  fn begin(&self, answer: PolicyAnswer) -> Rc<MainFramePolicyDecision> {
+    let decision = Rc::new(MainFramePolicyDecision(RefCell::new(Some(answer))));
+    if self.closed.get() {
+      decision.settle(WKNavigationActionPolicy::Cancel);
+    } else {
+      // Publish the new generation before answering the old one. WebKit can
+      // reenter, and must see the new generation if it does.
+      let previous = self.current.replace(Some(decision.clone()));
+      if let Some(previous) = previous {
+        previous.settle(WKNavigationActionPolicy::Cancel);
+      }
+    }
+    decision
+  }
+
+  pub(crate) fn cancel(&self) {
+    let current = self.current.take();
+    if let Some(current) = current {
+      current.settle(WKNavigationActionPolicy::Cancel);
+    }
+  }
+
+  pub(crate) fn close(&self) {
+    self.closed.set(true);
+    self.cancel();
+  }
+}
+
+#[cfg(target_os = "macos")]
+fn main_frame_hold_handler(
+  target_is_main_frame: Option<bool>,
+  hold: Option<&crate::MainFrameNavigationHoldHandler>,
+) -> Option<&crate::MainFrameNavigationHoldHandler> {
+  hold.filter(|_| target_is_main_frame == Some(true))
+}
 
 #[cfg(target_os = "macos")]
 fn extension_tab_trace_enabled() -> bool {
@@ -603,6 +719,8 @@ fn apply_navigation_update(
 ) -> bool {
   if update.stop_loading {
     if let Some(webview) = webview {
+      #[cfg(target_os = "macos")]
+      this.ivars().main_frame_navigation_holds.cancel();
       unsafe { webview.stopLoading() };
     }
   }
@@ -635,6 +753,8 @@ fn schedule_deferred_navigation_flush(this: &WryNavigationDelegate) {
 }
 
 pub(crate) fn begin_programmatic_navigation(this: &WryNavigationDelegate) -> bool {
+  #[cfg(target_os = "macos")]
+  this.ivars().main_frame_navigation_holds.cancel();
   if this.ivars().navigation_event_handler.is_none() {
     return true;
   }
@@ -922,6 +1042,13 @@ pub(crate) fn navigation_policy(
       false
     };
     if should_download {
+      #[cfg(target_os = "macos")]
+      if action
+        .targetFrame()
+        .is_some_and(|frame| frame.isMainFrame())
+      {
+        this.ivars().main_frame_navigation_holds.cancel();
+      }
       let has_download_handler = this.ivars().has_download_handler;
       if has_download_handler {
         (*handler).call((WKNavigationActionPolicy::Download,));
@@ -940,6 +1067,10 @@ pub(crate) fn navigation_policy(
           Some(false) => crate::NativeUrlTarget::Subframe,
           None => crate::NativeUrlTarget::NewWindow,
         };
+        #[cfg(target_os = "macos")]
+        if matches!(target, crate::NativeUrlTarget::MainFrame) {
+          this.ivars().main_frame_navigation_holds.cancel();
+        }
         crate::report_native_url_refused(this.ivars().native_url_refused_handler.as_ref(), target);
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
@@ -1031,6 +1162,37 @@ pub(crate) fn navigation_policy(
           port,
         }
       });
+      #[cfg(target_os = "macos")]
+      let held = main_frame_hold_handler(
+        target_is_main_frame,
+        this.ivars().main_frame_navigation_hold.as_deref(),
+      )
+      .map(|hold| {
+        let handler = handler.copy();
+        let delegate = objc2::rc::Weak::new(this);
+        let url = url.clone();
+        let decision = this
+          .ivars()
+          .main_frame_navigation_holds
+          .begin(Box::new(move |policy| {
+            if policy == WKNavigationActionPolicy::Cancel {
+              if let Some(delegate) = delegate.load() {
+                with_navigation_state(&delegate.ivars().navigation_event_state, |state| {
+                  state.policy_refused(&url);
+                });
+              }
+            }
+            handler.call((policy,));
+          }));
+        (hold, decision)
+      });
+      #[cfg(target_os = "macos")]
+      if held
+        .as_ref()
+        .is_some_and(|(_, decision)| !decision.is_pending())
+      {
+        return;
+      }
       let policy_allows = function(
         url.clone(),
         AppleNavigationAction {
@@ -1053,10 +1215,22 @@ pub(crate) fn navigation_policy(
         );
       }
       #[cfg(target_os = "macos")]
+      if held
+        .as_ref()
+        .is_some_and(|(_, decision)| !decision.is_pending())
+      {
+        return;
+      }
+      #[cfg(target_os = "macos")]
       if policy_allows && target_is_main_frame == Some(true) {
         if let Some(observe) = &this.ivars().main_frame_navigation_attempt_handler {
           observe(url.clone());
         }
+      }
+      #[cfg(target_os = "macos")]
+      if let Some((hold, decision)) = held {
+        decision.apply(policy_allows, hold);
+        return;
       }
       if !policy_allows && target_is_main_frame == Some(true) {
         with_navigation_state(&this.ivars().navigation_event_state, |state| {
@@ -1135,6 +1309,8 @@ pub(crate) fn web_content_process_did_terminate(
   this: &WryNavigationDelegate,
   _webview: &WKWebView,
 ) {
+  #[cfg(target_os = "macos")]
+  this.ivars().main_frame_navigation_holds.cancel();
   with_navigation_state(&this.ivars().navigation_event_state, |state| {
     state.clear();
   });
@@ -1148,6 +1324,98 @@ pub(crate) fn web_content_process_did_terminate(
 #[cfg(test)]
 mod navigation_event_state_tests {
   use super::*;
+
+  #[cfg(target_os = "macos")]
+  mod main_frame_holds {
+    use super::*;
+    use objc2_web_kit::WKNavigationActionPolicy as Policy;
+
+    fn answer(log: &Rc<RefCell<Vec<WKNavigationActionPolicy>>>) -> PolicyAnswer {
+      let log = log.clone();
+      Box::new(move |policy| log.borrow_mut().push(policy))
+    }
+
+    fn defer(decision: &Rc<MainFramePolicyDecision>) -> MainFrameNavigationHold {
+      let waiting = Rc::new(RefCell::new(None));
+      let saved = waiting.clone();
+      decision.apply(true, &move |hold| {
+        saved.replace(Some(hold));
+        true
+      });
+      waiting.take().unwrap()
+    }
+
+    #[test]
+    fn main_frame_hold_preserves_immediate_admission_and_policy_refusal() {
+      let holds = MainFrameNavigationHolds::default();
+      let log = Rc::new(RefCell::new(Vec::new()));
+      holds.begin(answer(&log)).apply(true, &|hold| {
+        assert!(hold.is_pending());
+        false
+      });
+      let called = Rc::new(Cell::new(false));
+      let observed = called.clone();
+      holds.begin(answer(&log)).apply(false, &move |_| {
+        observed.set(true);
+        true
+      });
+      assert!(!called.get());
+      assert_eq!(*log.borrow(), [Policy::Allow, Policy::Cancel]);
+
+      let hook = |_: MainFrameNavigationHold| true;
+      assert!(main_frame_hold_handler(Some(true), Some(&hook)).is_some());
+      assert!(main_frame_hold_handler(Some(true), None).is_none());
+      assert!(main_frame_hold_handler(Some(false), Some(&hook)).is_none());
+      assert!(main_frame_hold_handler(None, Some(&hook)).is_none());
+    }
+
+    #[test]
+    fn a_replacement_cancels_only_its_own_views_hold() {
+      let first_view = MainFrameNavigationHolds::default();
+      let second_view = MainFrameNavigationHolds::default();
+      let log = Rc::new(RefCell::new(Vec::new()));
+      let first = first_view.begin(answer(&log));
+      let old = defer(&first);
+      let other = second_view.begin(answer(&log));
+      let other_waiting = defer(&other);
+      let replacement = first_view.begin(answer(&log));
+      assert!(!old.is_pending());
+      old.resume();
+      assert!(other.is_pending());
+      assert!(replacement.is_pending());
+      assert_eq!(*log.borrow(), [Policy::Cancel]);
+
+      let waiting = defer(&replacement);
+      assert_eq!(*log.borrow(), [Policy::Cancel]);
+      waiting.resume();
+      first_view.cancel();
+      assert_eq!(*log.borrow(), [Policy::Cancel, Policy::Allow]);
+      second_view.close();
+      other_waiting.resume();
+      assert_eq!(
+        *log.borrow(),
+        [Policy::Cancel, Policy::Allow, Policy::Cancel]
+      );
+    }
+
+    #[test]
+    fn teardown_cancels_pending_and_reentrant_policy_answers_once() {
+      let holds = Rc::new(MainFrameNavigationHolds::default());
+      let weak_holds = Rc::downgrade(&holds);
+      let log = Rc::new(RefCell::new(Vec::new()));
+      let first_answer = answer(&log);
+      let first = holds.begin(Box::new(move |policy| {
+        first_answer(policy);
+        weak_holds.upgrade().unwrap().close();
+      }));
+      let stale = defer(&first);
+      let replacement = holds.begin(answer(&log));
+      assert!(!replacement.is_pending());
+      stale.resume();
+      assert!(!holds.begin(answer(&log)).is_pending());
+      assert_eq!(*log.borrow(), [Policy::Cancel; 3]);
+    }
+  }
 
   fn phases(update: &AppleNavigationUpdate) -> Vec<NavigationEventPhase> {
     update.events.iter().map(|event| event.phase).collect()

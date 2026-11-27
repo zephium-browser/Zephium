@@ -8,6 +8,8 @@ mod drag_drop;
 #[cfg(target_os = "macos")]
 pub(crate) mod http_auth;
 mod navigation;
+#[cfg(target_os = "macos")]
+pub use navigation::MainFrameNavigationHold;
 #[cfg(feature = "mac-proxy")]
 mod proxy;
 #[cfg(target_os = "macos")]
@@ -900,6 +902,8 @@ impl InnerWebView {
         #[cfg(target_os = "macos")]
         attributes.main_frame_navigation_attempt_handler,
         #[cfg(target_os = "macos")]
+        attributes.main_frame_navigation_hold,
+        #[cfg(target_os = "macos")]
         attributes.credential_challenge_denied_handler,
         #[cfg(target_os = "macos")]
         pl_attrs.http_auth_handler,
@@ -1184,6 +1188,8 @@ impl InnerWebView {
 
   /// Reloads the current page.
   pub fn reload(&self) -> crate::Result<()> {
+    #[cfg(target_os = "macos")]
+    self.cancel_main_frame_navigation_hold();
     // Safety: objc runtime calls are unsafe
     unsafe { self.webview.reload() }
       .map(|_| ())
@@ -1191,12 +1197,16 @@ impl InnerWebView {
   }
 
   pub fn go_forward(&self) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    self.cancel_main_frame_navigation_hold();
     unsafe { self.webview.goForward() }
       .map(|_| ())
       .ok_or(crate::Error::NativeObjectUnavailable("WKWebView.goForward"))
   }
 
   pub fn go_back(&self) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    self.cancel_main_frame_navigation_hold();
     unsafe { self.webview.goBack() }
       .map(|_| ())
       .ok_or(crate::Error::NativeObjectUnavailable("WKWebView.goBack"))
@@ -1251,6 +1261,8 @@ impl InnerWebView {
         return Err(Error::WebKitNavigationIdentityUnavailable);
       }
       let Some(navigation) = self.webview.loadRequest(&request) else {
+        #[cfg(target_os = "macos")]
+        self.cancel_main_frame_navigation_hold();
         self
           .navigation_policy_delegate
           .cancel_programmatic_navigation();
@@ -1260,6 +1272,8 @@ impl InnerWebView {
         .navigation_policy_delegate
         .register_programmatic_navigation(&navigation, absolute_url)
       {
+        #[cfg(target_os = "macos")]
+        self.cancel_main_frame_navigation_hold();
         self.webview.stopLoading();
         return Err(Error::WebKitNavigationIdentityUnavailable);
       }
@@ -1269,12 +1283,23 @@ impl InnerWebView {
   }
 
   fn navigate_to_string(&self, html: &str) {
+    #[cfg(target_os = "macos")]
+    self.cancel_main_frame_navigation_hold();
     // Safety: objc runtime calls are unsafe
     unsafe {
       self
         .webview
         .loadHTMLString_baseURL(&NSString::from_str(html), None);
     }
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(crate) fn cancel_main_frame_navigation_hold(&self) {
+    self
+      .navigation_policy_delegate
+      .ivars()
+      .main_frame_navigation_holds
+      .cancel();
   }
 
   fn set_user_agent(&self, user_agent: &str) {
@@ -1893,6 +1918,12 @@ pub fn platform_webview_version() -> Result<String> {
 
 impl Drop for InnerWebView {
   fn drop(&mut self) {
+    #[cfg(target_os = "macos")]
+    self
+      .navigation_policy_delegate
+      .ivars()
+      .main_frame_navigation_holds
+      .close();
     url_scheme_handler::cancel_pending_for_webview(&self.id);
     for admission in &self.webview.ivars().custom_protocol_admission {
       admission.seal_and_drain();

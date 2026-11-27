@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,8 +11,13 @@ use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
-use objc2_app_kit::{NSMenu, NSMenuItem, NSPopoverBehavior, NSView};
-use objc2_foundation::{NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+use objc2_app_kit::{
+    NSEventTrackingRunLoopMode, NSMenu, NSMenuItem, NSModalPanelRunLoopMode, NSPopoverBehavior,
+    NSView,
+};
+use objc2_foundation::{
+    NSPoint, NSRect, NSRectEdge, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+};
 use objc2_web_kit::{WKWebExtensionAction, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 use zephium_core::extension_data::{
     ExtensionDataCall, ExtensionDataChange, ExtensionDataInterest, ExtensionDataReply,
@@ -73,6 +79,7 @@ pub(crate) enum BrowserRequestOutcome {
 }
 
 struct ProfileRuntime {
+    load_gate: Rc<ExtensionLoadGate>,
     runtime: Option<Runtime>,
     store: Retained<WKWebsiteDataStore>,
     bridge: Rc<Bridge>,
@@ -170,6 +177,22 @@ impl WebextHost {
             .filter_map(|entry| entry.page_script.as_ref())
     }
 
+    pub(super) fn navigation_hold(
+        &self,
+        profile: ProfileId,
+        permit: EventPermit,
+    ) -> impl Fn(wry::MainFrameNavigationHold) -> bool + 'static {
+        let gate = self
+            .profiles
+            .get(&profile)
+            .map(|entry| Rc::downgrade(&entry.load_gate));
+        move |hold| {
+            gate.as_ref()
+                .and_then(std::rc::Weak::upgrade)
+                .is_some_and(|gate| gate.hold(hold, &permit))
+        }
+    }
+
     /// Prepares the profile and, when supported, its runtime before its first view.
     pub(super) fn prepare(&mut self, profile: ProfileId, sink: &Sink) {
         self.profile(profile, sink);
@@ -204,6 +227,7 @@ impl WebextHost {
                 .as_ref()
                 .map(|runtime| zephium_webext_macos::PageScript::new(runtime.controller(), false));
             ProfileRuntime {
+                load_gate: Rc::default(),
                 runtime,
                 store,
                 bridge,
@@ -289,6 +313,8 @@ impl WebextHost {
             sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
             return;
         };
+        entry.load_gate.state.borrow_mut().started(Instant::now());
+        let gate = Rc::downgrade(&entry.load_gate);
         runtime.load(spec, move |result| {
             let result = result.map(|loaded| {
                 let extension_id = loaded.id.clone();
@@ -327,6 +353,9 @@ impl WebextHost {
                 result,
             });
             sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+            if let Some(gate) = gate.upgrade() {
+                gate.settled();
+            }
         });
     }
 
@@ -1520,6 +1549,212 @@ impl AuthFlowRegistry {
 
 thread_local! {
     static AUTH_FLOWS: RefCell<AuthFlowRegistry> = RefCell::new(AuthFlowRegistry::default());
+}
+
+/// How long a page may wait for its profile's extensions to finish loading.
+/// Chrome loads extensions before restoring tabs, so their content scripts
+/// reach restored pages; here both start together at launch.
+const EXTENSION_LOAD_HOLD: Duration = Duration::from_millis(1500);
+const MAX_HELD_EXTENSION_NAVIGATIONS: usize = super::resources::MAX_NATIVE_VIEW_RESOURCES;
+
+struct LoadGate<T> {
+    loading: usize,
+    deadline: Option<Instant>,
+    held: Vec<T>,
+}
+
+enum LoadDeadline<T> {
+    Wait(Duration),
+    Release(Vec<T>),
+}
+
+impl<T> Default for LoadGate<T> {
+    fn default() -> Self {
+        Self {
+            loading: 0,
+            deadline: None,
+            held: Vec::new(),
+        }
+    }
+}
+
+impl<T> LoadGate<T> {
+    fn started(&mut self, now: Instant) {
+        self.loading += 1;
+        self.deadline = Some(now + EXTENSION_LOAD_HOLD);
+    }
+
+    /// The held navigations to release once nothing is loading.
+    fn settled(&mut self) -> Vec<T> {
+        self.loading = self.loading.saturating_sub(1);
+        if self.loading > 0 {
+            return Vec::new();
+        }
+        self.deadline = None;
+        std::mem::take(&mut self.held)
+    }
+
+    /// How long a held navigation still waits, or `None` when nothing is
+    /// loading or the deadline has passed; a load that never settles cannot
+    /// hold pages.
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        let deadline = self.deadline.filter(|_| self.loading > 0)?;
+        deadline
+            .checked_duration_since(now)
+            .filter(|wait| !wait.is_zero())
+    }
+
+    fn hold(
+        &mut self,
+        now: Instant,
+        hold: T,
+        is_pending: impl FnMut(&T) -> bool,
+    ) -> Option<Duration> {
+        let wait = self.remaining(now)?;
+        self.held.retain(is_pending);
+        if self.held.len() >= MAX_HELD_EXTENSION_NAVIGATIONS {
+            return None;
+        }
+        self.held.push(hold);
+        Some(wait)
+    }
+
+    fn expire(&mut self, now: Instant, is_pending: impl FnMut(&T) -> bool) -> LoadDeadline<T> {
+        self.held.retain(is_pending);
+        if self.held.is_empty() {
+            return LoadDeadline::Release(Vec::new());
+        }
+        match self.remaining(now) {
+            Some(wait) => LoadDeadline::Wait(wait),
+            None => LoadDeadline::Release(std::mem::take(&mut self.held)),
+        }
+    }
+}
+
+struct HeldNavigation {
+    hold: wry::MainFrameNavigationHold,
+    permit: EventPermit,
+}
+
+impl HeldNavigation {
+    fn is_pending(&self) -> bool {
+        self.hold.is_pending()
+    }
+
+    fn release(self) {
+        if self.permit.active_token().is_some() {
+            self.hold.resume();
+        } else {
+            self.hold.cancel();
+        }
+    }
+}
+
+#[derive(Default)]
+struct ExtensionLoadGate {
+    state: RefCell<LoadGate<HeldNavigation>>,
+    timer: RefCell<Option<Retained<NSTimer>>>,
+}
+
+impl ExtensionLoadGate {
+    fn hold(self: &Rc<Self>, hold: wry::MainFrameNavigationHold, permit: &EventPermit) -> bool {
+        if permit.active_token().is_none() {
+            // An unadopted warm spare may still load its blank parking page.
+            if permit.allows_navigation("about:blank") {
+                return false;
+            }
+            hold.cancel();
+            return true;
+        }
+        let held = HeldNavigation {
+            hold,
+            permit: permit.clone(),
+        };
+        let Some(wait) =
+            self.state
+                .borrow_mut()
+                .hold(Instant::now(), held, HeldNavigation::is_pending)
+        else {
+            return false;
+        };
+        if self.timer.borrow().is_none() {
+            self.arm_timer(wait);
+        }
+        true
+    }
+
+    fn settled(&self) {
+        let released = {
+            let mut state = self.state.borrow_mut();
+            let released = state.settled();
+            if state.loading > 0 {
+                return;
+            }
+            released
+        };
+        if let Some(timer) = self.timer.take() {
+            timer.invalidate();
+        }
+        released.into_iter().for_each(HeldNavigation::release);
+    }
+
+    fn arm_timer(self: &Rc<Self>, wait: Duration) {
+        let gate = Rc::downgrade(self);
+        let block = block2::RcBlock::new(move |timer: NonNull<NSTimer>| {
+            let Some(gate) = gate.upgrade() else {
+                return;
+            };
+            let current = gate
+                .timer
+                .borrow()
+                .as_ref()
+                .is_some_and(|current| std::ptr::eq(Retained::as_ptr(current), timer.as_ptr()));
+            if !current {
+                return;
+            }
+            drop(gate.timer.take());
+            let deadline = gate
+                .state
+                .borrow_mut()
+                .expire(Instant::now(), HeldNavigation::is_pending);
+            match deadline {
+                LoadDeadline::Wait(wait) => gate.arm_timer(wait),
+                LoadDeadline::Release(released) => {
+                    released.into_iter().for_each(HeldNavigation::release);
+                }
+            }
+        });
+        let timer = schedule_load_deadline(&NSRunLoop::mainRunLoop(), wait, &block);
+        *self.timer.borrow_mut() = Some(timer);
+    }
+}
+
+impl Drop for ExtensionLoadGate {
+    fn drop(&mut self) {
+        if let Some(timer) = self.timer.get_mut().take() {
+            timer.invalidate();
+        }
+        for held in self.state.get_mut().held.drain(..) {
+            held.hold.cancel();
+        }
+    }
+}
+
+fn schedule_load_deadline(
+    run_loop: &NSRunLoop,
+    wait: Duration,
+    block: &block2::Block<dyn Fn(NonNull<NSTimer>)>,
+) -> Retained<NSTimer> {
+    // SAFETY: the caller schedules on its own run-loop thread, where the
+    // copied block will run. Explicit modes also work before AppKit marks
+    // its tracking and modal modes as common.
+    unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(wait.as_secs_f64(), false, block);
+        run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes);
+        run_loop.addTimer_forMode(&timer, NSModalPanelRunLoopMode);
+        run_loop.addTimer_forMode(&timer, NSEventTrackingRunLoopMode);
+        timer
+    }
 }
 
 /// The Shell replies to tabs.create before first navigation. Bind only at
@@ -2833,5 +3068,102 @@ mod tests {
         assert_eq!(first_line("\n  Dark Reader \t"), "Dark Reader");
         assert_eq!(first_line("a\u{7}b"), "ab");
         assert_eq!(first_line(""), "");
+    }
+
+    #[test]
+    fn navigations_wait_until_every_extension_load_settles() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        assert_eq!(gate.hold(now, 1, |_| true), None);
+
+        gate.started(now);
+        gate.started(now);
+        assert_eq!(gate.hold(now, 1, |_| true), Some(EXTENSION_LOAD_HOLD));
+        assert!(gate.settled().is_empty());
+        assert_eq!(gate.settled(), vec![1]);
+        assert_eq!(gate.hold(now, 2, |_| true), None);
+    }
+
+    #[test]
+    fn a_load_that_never_settles_holds_pages_only_until_the_deadline() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        let half = EXTENSION_LOAD_HOLD / 2;
+        assert_eq!(gate.hold(now + half, 1, |_| true), Some(half));
+        assert_eq!(gate.hold(now + EXTENSION_LOAD_HOLD, 2, |_| true), None);
+        assert!(matches!(
+            gate.expire(now + EXTENSION_LOAD_HOLD, |_| true),
+            LoadDeadline::Release(held) if held == vec![1]
+        ));
+    }
+
+    #[test]
+    fn a_later_load_keeps_a_held_navigation_past_the_first_deadline() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        assert_eq!(gate.hold(now, 1, |_| true), Some(EXTENSION_LOAD_HOLD));
+        let second = Duration::from_millis(1000);
+        gate.started(now + second);
+        assert!(matches!(
+            gate.expire(now + EXTENSION_LOAD_HOLD, |_| true),
+            LoadDeadline::Wait(wait) if wait == second
+        ));
+        assert!(matches!(
+            gate.expire(now + second + EXTENSION_LOAD_HOLD, |_| true),
+            LoadDeadline::Release(held) if held == vec![1]
+        ));
+    }
+
+    #[test]
+    fn a_navigation_released_by_its_timer_is_not_released_again() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        assert!(gate.hold(now, 1, |_| true).is_some());
+        assert!(matches!(
+            gate.expire(now + EXTENSION_LOAD_HOLD, |_| true),
+            LoadDeadline::Release(held) if held == vec![1]
+        ));
+        assert!(gate.settled().is_empty());
+    }
+
+    #[test]
+    fn replaced_holds_free_capacity_and_a_full_gate_refuses_new_holds() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        for id in 0..MAX_HELD_EXTENSION_NAVIGATIONS {
+            assert!(gate.hold(now, id, |_| true).is_some());
+        }
+        let next = MAX_HELD_EXTENSION_NAVIGATIONS;
+        assert_eq!(gate.hold(now, next, |_| true), None);
+        assert!(gate.hold(now, next, |id| *id != 0).is_some());
+        assert_eq!(gate.settled(), (1..=next).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn extension_deadline_runs_in_modal_and_tracking_modes() {
+        use objc2_foundation::NSDate;
+
+        objc2::rc::autoreleasepool(|_| {
+            let run_loop = NSRunLoop::currentRunLoop();
+            // SAFETY: These constants are AppKit-owned run-loop mode names.
+            for mode in unsafe { [NSModalPanelRunLoopMode, NSEventTrackingRunLoopMode] } {
+                let fired = Rc::new(Cell::new(false));
+                let observed = fired.clone();
+                let block = block2::RcBlock::new(move |_: NonNull<NSTimer>| observed.set(true));
+                let timer = schedule_load_deadline(&run_loop, Duration::from_millis(1), &block);
+                let limit = NSDate::dateWithTimeIntervalSinceNow(1.0);
+                while !fired.get() && limit.timeIntervalSinceNow() > 0.0 {
+                    if !run_loop.runMode_beforeDate(mode, &limit) {
+                        break;
+                    }
+                }
+                timer.invalidate();
+                assert!(fired.get());
+            }
+        });
     }
 }

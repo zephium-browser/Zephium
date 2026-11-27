@@ -235,6 +235,12 @@ impl EngineHost {
     pub(crate) fn close(&mut self, id: ItemId) {
         #[cfg(target_os = "macos")]
         {
+            use wry::WebViewExtMacOS;
+
+            if let Some(view) = self.views.get(&id) {
+                view.event_permit.revoke();
+                view.cancel_main_frame_navigation_hold();
+            }
             self.discarded_states.remove(&id);
             self.prepared_discard_states.remove(&id);
             self.restore_snapshots.remove(&id);

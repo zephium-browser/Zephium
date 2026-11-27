@@ -358,3 +358,17 @@ must be reviewed during upstream rebases.
   metadata-free refusal instead of silently disappearing. WebKit identifies
   child-frame refusals separately; these never manufacture a whole-tab
   navigation failure or a partial URL/native identity.
+
+### Held main-frame navigations (macOS)
+
+`with_main_frame_navigation_hold` can delay an admitted main-frame navigation
+after the host policy and attempt observer run. The view's delegate owns one
+pending decision, tied to that exact action. The embedder receives a weak,
+one-shot handle and must release it after its load completes or times out.
+A newer main-frame attempt, stop, renderer exit or view teardown cancels the
+old decision. Releasing a cancelled handle has no effect. Denied, subframe
+and target-less actions do not enter the hold.
+
+Zephium's shell releases the blocker's startup hold before dispatching the
+first view or navigation. WebKit then waits for in-flight profile extensions,
+with a deadline of 1.5 s after the latest load began.

@@ -408,6 +408,11 @@ use objc2_web_kit::WKUserContentController;
 pub(crate) mod wkwebview;
 #[cfg(target_os = "macos")]
 pub use wkwebview::context_menu_download_in_progress;
+#[cfg(target_os = "macos")]
+pub use wkwebview::MainFrameNavigationHold;
+
+#[cfg(target_os = "macos")]
+type MainFrameNavigationHoldHandler = dyn Fn(MainFrameNavigationHold) -> bool;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use wkwebview::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -778,6 +783,8 @@ struct WebViewAttributes<'a> {
   /// The callback is observational and must not grant page authority.
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_hold: Option<Box<MainFrameNavigationHoldHandler>>,
   /// Notification only: a native credential challenge is about to be cancelled.
   /// Carries no challenge data and cannot change TLS or credential policy.
   #[cfg(target_os = "macos")]
@@ -1042,6 +1049,8 @@ impl Default for WebViewAttributes<'_> {
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
       main_frame_navigation_attempt_handler: None,
+      #[cfg(target_os = "macos")]
+      main_frame_navigation_hold: None,
       #[cfg(target_os = "macos")]
       credential_challenge_denied_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
@@ -1560,6 +1569,18 @@ impl<'a> WebViewBuilder<'a> {
     callback: impl Fn(String) + 'static,
   ) -> Self {
     self.attrs.main_frame_navigation_attempt_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Returning `true` defers an admitted main-frame navigation. The callback
+  /// must eventually resume or cancel its handle. Returning `false` proceeds
+  /// immediately. Supersession and teardown cancel the decision in either case.
+  #[cfg(target_os = "macos")]
+  pub fn with_main_frame_navigation_hold(
+    mut self,
+    callback: impl Fn(MainFrameNavigationHold) -> bool + 'static,
+  ) -> Self {
+    self.attrs.main_frame_navigation_hold = Some(Box::new(callback));
     self
   }
 
@@ -3262,6 +3283,9 @@ impl WebViewExtDarwin for WebView {
 /// Additional methods on `WebView` that are specific to macOS.
 #[cfg(target_os = "macos")]
 pub trait WebViewExtMacOS {
+  /// Cancels this view's pending main-frame policy decision, if any.
+  fn cancel_main_frame_navigation_hold(&self);
+
   /// Observes only the exact host-owned subscription rule list. Returns false
   /// if the optional private WebKit action class/getter is unavailable.
   fn set_content_block_counter(
@@ -3307,6 +3331,10 @@ pub trait WebViewExtMacOS {
 
 #[cfg(target_os = "macos")]
 impl WebViewExtMacOS for WebView {
+  fn cancel_main_frame_navigation_hold(&self) {
+    self.webview.cancel_main_frame_navigation_hold();
+  }
+
   fn set_content_block_counter(
     &self,
     identifier: &str,

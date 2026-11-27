@@ -1556,6 +1556,14 @@ impl EngineHost {
                 #[cfg(feature = "agentic-browser")]
                 super::page_reader::attempt(&attempt_reader, &target);
             });
+            if !matches!(partition, Partition::Ephemeral(_)) {
+                // The shell's blocker startup gate admits the view or load
+                // first. This gate delays only WebKit's policy decision.
+                builder = builder.with_main_frame_navigation_hold(
+                    self.webext
+                        .navigation_hold(partition.profile(), event_permit.clone()),
+                );
+            }
         }
         for script in wry_document_start_scripts(&scripts) {
             builder = builder.with_initialization_script_for_main_only(

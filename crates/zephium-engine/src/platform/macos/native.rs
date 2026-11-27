@@ -361,10 +361,14 @@ fn validate_data_store_postcondition(
 
 /// WebKit revalidates the page and its subresources against the origin.
 pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
+    use wry::WebViewExtMacOS;
+    view.cancel_main_frame_navigation_hold();
     unsafe { webkit(view).reloadFromOrigin() }.is_some()
 }
 
 pub fn stop_loading(view: &wry::WebView) {
+    use wry::WebViewExtMacOS;
+    view.cancel_main_frame_navigation_hold();
     unsafe { webkit(view).stopLoading() };
 }
 
