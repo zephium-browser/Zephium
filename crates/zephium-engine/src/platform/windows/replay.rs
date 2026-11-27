@@ -1,4 +1,4 @@
-//! Read-only native provenance for the first, safely reloadable document.
+//! Read-only native provenance for the current, safely reloadable document.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,12 +8,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use webview2_com::{NavigationStartingEventHandler, WebResourceRequestedEventHandler};
 use windows_core::{w, PWSTR};
 
-#[derive(Default)]
-struct NavigationWitness {
-    bootstrap: Option<u64>,
-    document: Option<u64>,
-    get_uri: Option<String>,
-}
+use crate::replay_witness::NavigationWitness;
 
 #[derive(Default)]
 struct Witness {
@@ -24,8 +19,8 @@ struct Witness {
 
 /// Installed before the first content load. The owner additionally requires
 /// engine-initiated GET provenance, fresh activity checks, zero scroll and no
-/// meaningful back/forward history. Later navigations remain resident rather
-/// than losing history or replaying an unobserved POST as a URL load.
+/// meaningful back/forward history. Native history guards remain separate; an unobserved POST never grants
+/// URL replay provenance.
 pub(crate) struct RequestWitness {
     core: ICoreWebView2,
     resource_token: i64,
@@ -55,27 +50,20 @@ impl RequestWitness {
                 let request = unsafe { args.Request() }.ok()?;
                 let mut uri = PWSTR::null();
                 let received = unsafe { request.Uri(&mut uri) };
-                let uri = super::take_pwstr_bounded(uri, 8192, 8192);
+                let uri = super::take_pwstr_bounded(
+                    uri,
+                    super::PAGE_URL_UTF16_LIMIT,
+                    super::PAGE_URL_UTF8_LIMIT,
+                );
                 received.ok()?;
                 let uri = uri?;
-                // The owned empty bootstrap never grants GET provenance.
-                if allow_owned_bootstrap && uri == "about:blank" {
-                    return Some(());
-                }
-                if !(uri.starts_with("http://") || uri.starts_with("https://")) {
-                    return None;
-                }
                 let mut method = PWSTR::null();
                 let received = unsafe { request.Method(&mut method) };
                 let method = super::take_pwstr_bounded(method, 32, 32);
                 received.ok()?;
-                if method.as_deref() != Some("GET") {
-                    return None;
-                }
+                let method = method?;
                 let mut navigation = observed.navigation.lock().ok()?;
-                // Do not accept a resource from before our first owned load.
-                navigation.document?;
-                navigation.get_uri = Some(uri);
+                navigation.requested(uri, &method);
                 Some(())
             }));
             if !matches!(result, Ok(Some(()))) {
@@ -107,26 +95,17 @@ impl RequestWitness {
                 unsafe { args.NavigationId(&mut id) }.ok()?;
                 let mut uri = PWSTR::null();
                 let received = unsafe { args.Uri(&mut uri) };
-                let uri = super::take_pwstr_bounded(uri, 8192, 8192);
+                let uri = super::take_pwstr_bounded(
+                    uri,
+                    super::PAGE_URL_UTF16_LIMIT,
+                    super::PAGE_URL_UTF8_LIMIT,
+                );
                 received.ok()?;
                 let uri = uri?;
                 let mut navigation = observed.navigation.lock().ok()?;
-                if allow_owned_bootstrap && uri == "about:blank" && navigation.document.is_none() {
-                    if navigation.bootstrap.is_some_and(|prior| prior != id) {
-                        return None;
-                    }
-                    navigation.bootstrap = Some(id);
-                    return Some(());
-                }
-                if !(uri.starts_with("http://") || uri.starts_with("https://")) {
-                    return None;
-                }
-                if navigation.document.is_some_and(|prior| prior != id) {
-                    return None;
-                }
-                navigation.document = Some(id);
-                navigation.get_uri = None;
-                Some(())
+                navigation
+                    .started(id, uri, allow_owned_bootstrap)
+                    .then_some(())
             }));
             if !matches!(result, Ok(Some(()))) {
                 observed.unsafe_history.store(true, Ordering::Release);
@@ -155,12 +134,11 @@ impl RequestWitness {
     pub(crate) fn allows_replay(&self, current_url: &str) -> bool {
         !self.state.retired.load(Ordering::Acquire)
             && !self.state.unsafe_history.load(Ordering::Acquire)
-            && self.state.navigation.lock().is_ok_and(|navigation| {
-                navigation
-                    .get_uri
-                    .as_deref()
-                    .is_some_and(|uri| uri.split('#').next() == current_url.split('#').next())
-            })
+            && self
+                .state
+                .navigation
+                .lock()
+                .is_ok_and(|navigation| navigation.allows(current_url))
     }
 
     pub(crate) fn has_owned_blank_bootstrap(&self) -> bool {

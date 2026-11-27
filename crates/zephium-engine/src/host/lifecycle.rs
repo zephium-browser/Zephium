@@ -316,7 +316,8 @@ impl EngineHost {
             {
                 self.retire_fullscreen_view(view)
             }
-            removed => drop(removed),
+            Some(view) => self.release_closed_view(profile, view),
+            None => {}
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         drop(removed);
@@ -486,9 +487,13 @@ impl EngineHost {
         for id in ids {
             self.close(id);
         }
-        // Shutdown cannot wait for WebKit to animate a fullscreen page home.
+        // Shutdown cannot wait for WebKit to animate a fullscreen page home,
+        // and ends every web process itself.
         #[cfg(target_os = "macos")]
-        self.fullscreen_retiring.clear();
+        {
+            self.fullscreen_retiring.clear();
+            self.closing.clear();
+        }
         self.spare = None;
         self.begin_content_policy_shutdown();
         self.navigation_snapshots.clear();

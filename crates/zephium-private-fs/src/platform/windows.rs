@@ -23,6 +23,13 @@ use windows::Win32::System::IO::OVERLAPPED;
 use super::{DirectoryMode, RegularMode};
 use crate::PrivateFsError;
 
+pub(crate) fn rename_file_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    if !std::fs::symlink_metadata(source)?.file_type().is_file() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+    native::rename_file_no_replace(source, target)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RawIdentity {
     volume_serial_number: u64,

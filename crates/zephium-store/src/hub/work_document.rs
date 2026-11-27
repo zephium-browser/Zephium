@@ -133,6 +133,35 @@ impl Hub {
         if self.recovery_required.is_some() {
             return Err(WorkError::Unavailable);
         }
+        if let WorkRequest::Environment {
+            call:
+                call @ (environment::WorkEnvironmentCall::ComposerRead { .. }
+                | environment::WorkEnvironmentCall::ComposerSave { .. }),
+            space_available,
+            ..
+        } = &request
+        {
+            let space = call.space().ok_or(WorkError::Invalid)?;
+            if !self.session_scopes.contains(&(profile, space)) {
+                return Err(WorkError::NotFound);
+            }
+            if self.session_backup_checkpoint_pending {
+                super::session::checkpoint_session_backup(&self.meta)
+                    .map_err(|_| WorkError::OutcomeUnknown)?;
+                self.session_backup_checkpoint_pending = false;
+            }
+            let clearing = matches!(call, environment::WorkEnvironmentCall::ComposerSave {text,..} if text.is_empty());
+            let tx = self.meta.transaction().map_err(db)?;
+            let reply = super::work_composer::apply(&tx, profile, call.clone(), *space_available)?;
+            tx.commit().map_err(db)?;
+            if clearing {
+                self.session_backup_checkpoint_pending = true;
+                super::session::checkpoint_session_backup(&self.meta)
+                    .map_err(|_| WorkError::OutcomeUnknown)?;
+                self.session_backup_checkpoint_pending = false;
+            }
+            return Ok(WorkReply::Environment(reply));
+        }
         if let WorkRequest::Personal(request) = request {
             use zephium_core::work::personal::{
                 WorkHistoryHit, WorkPersonalReply, WorkPersonalRequest,

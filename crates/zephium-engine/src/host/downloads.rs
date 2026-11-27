@@ -396,6 +396,28 @@ impl Downloads {
         transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
     }
 
+    /// Foreground/capacity refusal remains visible without holding a native
+    /// transfer or admitting filesystem work. The existing recent ring bounds
+    /// page-triggered refusal records and both Updates/List project that ring.
+    fn refused(
+        &self,
+        partition: Partition,
+        navigation: &NavigationEpochTracker,
+        error: DownloadError,
+    ) {
+        let Some((_, url)) = navigation.resident_document_snapshot() else {
+            return;
+        };
+        let Some(record) = refused_download_record(self.session, &url, error) else {
+            return;
+        };
+        let mut recent = self.recent.borrow_mut();
+        recent.push_front((partition, record));
+        recent.truncate(RECENT_LIMIT);
+        drop(recent);
+        self.changed(partition.profile());
+    }
+
     fn persist(&self, id: DownloadId) {
         let entry = self
             .active
@@ -1046,6 +1068,36 @@ impl Downloads {
     }
 }
 
+fn refused_download_record(
+    session: DownloadId,
+    context: &str,
+    error: DownloadError,
+) -> Option<DownloadRecord> {
+    let origin = PageOrigin::from_url(&url::Url::parse(context).ok()?).ok()?;
+    Some(DownloadRecord {
+        id: DownloadId::generate(),
+        session,
+        revision: 1,
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_secs() as i64),
+        filename: "download".into(),
+        source: origin.as_str().into(),
+        source_is_context: true,
+        state: DownloadState::Failed,
+        received: 0,
+        total: None,
+        error: Some(error),
+        destination: None,
+        staging: None,
+        staging_identity: None,
+        identity: None,
+        writer: None,
+        writer_released: true,
+        insecure: false,
+    })
+}
+
 /// A finished download waits to be confirmed unless the person already kept
 /// it: a type that can run, or a file that came over plain http.
 fn needs_confirmation(kept: bool, filename: &str, insecure: bool) -> bool {
@@ -1117,6 +1169,34 @@ fn native_terminal_transition(
 #[cfg(test)]
 mod state_tests {
     use super::*;
+    #[test]
+    fn refused_background_and_capacity_downloads_project_a_failed_row_without_paths_or_url_secrets()
+    {
+        for reason in [DownloadError::Unavailable, DownloadError::Capacity] {
+            let record = refused_download_record(
+                DownloadId::generate(),
+                "https://example.test/export?private=token#secret",
+                reason,
+            )
+            .unwrap();
+            assert!(record.validate());
+            let view = record.view();
+            assert_eq!(view.state, DownloadState::Failed);
+            assert_eq!(view.error, Some(reason));
+            assert_eq!(view.source, "https://example.test");
+            assert!(view.source_is_context);
+            assert!(
+                record.writer.is_none() && record.destination.is_none() && record.staging.is_none()
+            );
+        }
+        assert!(refused_download_record(
+            DownloadId::generate(),
+            "about:blank",
+            DownloadError::Unavailable
+        )
+        .is_none());
+    }
+
     #[test]
     fn cancellation_wins_before_publication_and_late_native_events_cannot_rewrite_finalization() {
         assert_eq!(

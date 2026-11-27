@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { BrowserCommand } from "vitest/node";
 import { ensurePhotos } from "./scripts/canvas-bench/photos";
+import type { WebKitFootprint } from "./src/shared/testing/webkit-footprint";
 
 /** Photo-sized JPEGs for the canvas bench, served at /node_modules/.canvas-bench/photos/. */
 export const benchPhotos: BrowserCommand<[count: number], void> = (_context, count) =>
@@ -9,12 +10,6 @@ export const benchPhotos: BrowserCommand<[count: number], void> = (_context, cou
     fileURLToPath(new URL("./node_modules/.canvas-bench/photos", import.meta.url)),
     count,
   );
-
-export type WebKitFootprint = {
-  /** Physical footprint of every WebKit process this run started, in MB. */
-  total: number;
-  processes: { pid: number; name: string; mb: number; cpu: string }[];
-};
 
 type Row = { pid: number; ppid: number; started: number; command: string };
 

@@ -174,3 +174,44 @@ fn extension_close_requires_own_granted_document_and_live_view() {
     permit.revoke();
     assert!(!permit.allows_extension_document_close(own));
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extension_frame_requires_granted_extension_document_and_live_view() {
+    let token = Arc::new(AtomicBool::new(true));
+    let grants = super::ExtensionNavigationGrants::default();
+    let permit = EventPermit::bound(&token).with_extensions(grants.clone());
+    let menu = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/inline/menu/menu.html";
+    assert!(!permit.allows_extension_frame(menu));
+    grants
+        .lock()
+        .unwrap()
+        .insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    assert!(permit.allows_extension_frame(menu));
+    for url in [
+        // Ordinary frames are the security handler's, never an extension grant.
+        "https://example.com/frame",
+        "about:blank",
+        "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/inline/menu/menu.html",
+        "chrome-extension://user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/inline/menu/menu.html",
+        "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:8080/inline/menu/menu.html",
+        "chrome://settings",
+        "edge://settings",
+    ] {
+        assert!(!permit.allows_extension_frame(url), "{url}");
+    }
+    let without_grants = EventPermit::bound(&token);
+    assert!(!without_grants.allows_extension_frame(menu));
+    let spare = EventPermit::inactive().with_extensions(grants.clone());
+    assert!(!spare.allows_extension_frame(menu));
+    assert!(spare.bind_once(&token));
+    assert!(spare.allows_extension_frame(menu));
+    grants.lock().unwrap().clear();
+    assert!(!permit.allows_extension_frame(menu));
+    grants
+        .lock()
+        .unwrap()
+        .insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    permit.revoke();
+    assert!(!permit.allows_extension_frame(menu));
+}

@@ -19,8 +19,8 @@ import { runWith, slackSend } from "./ask-fixtures";
 const native = vi.hoisted(() => ({ work: vi.fn() }));
 
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ faviconProbe: async () => true, workCall: native.work });
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({ faviconProbe: async () => true, workCall: native.work });
 });
 
 const draft: DraftView = {

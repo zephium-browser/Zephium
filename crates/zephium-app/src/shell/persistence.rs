@@ -68,6 +68,12 @@ impl Shell {
 
     pub(super) fn persist(&mut self) {
         self.persistence.persist_first_dirty = None;
+        self.publish_current_session();
+    }
+
+    /// Publishes a scope durability barrier without changing the scheduled
+    /// debounce identity; the Store settles this snapshot before composer I/O.
+    pub(super) fn publish_current_session(&self) {
         // The durable session is loaded by Bootstrap. Before that ordered
         // point, an empty in-memory shell is not authoritative: persisting it
         // during an immediate quit would erase a valid previous session.

@@ -1,9 +1,13 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
+import { tick } from "svelte";
 import "$styles/global.css";
-import type { LauncherTrigger } from "$shared/ipc/bindings";
+import type { LauncherTrigger, TriggerChange } from "$shared/ipc/bindings";
 import LauncherShortcut from "../components/LauncherShortcut.svelte";
+
+// These tests read the macOS keycaps (⌘, ⌥, ⇧); Windows spells its shortcuts out.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 
 const trigger = (shortcut: string): LauncherTrigger => ({
   shortcut,
@@ -61,6 +65,25 @@ test("records a shortcut, keeps listening after a refusal, and applies the next"
   await page.viewport(720, 220);
   await page.screenshot({ path: "../../../../../target/settings-launcher-shortcut.png" });
   delete document.documentElement.dataset.theme;
+});
+
+test("closing settings during a save releases the launcher even if the shortcut is refused", async () => {
+  const original = trigger("CmdOrCtrl+Shift+Space");
+  native.state.mockResolvedValue(original);
+  let finish!: (change: TriggerChange) => void;
+  const result = new Promise<TriggerChange>((resolve) => (finish = resolve));
+  native.set.mockReturnValueOnce(result);
+
+  const screen = await render(LauncherShortcut);
+  await screen.getByRole("button", { name: "Record a shortcut" }).click();
+  await userEvent.keyboard("{Meta>}{Shift>}z{/Shift}{/Meta}");
+  expect(native.set).toHaveBeenCalledOnce();
+  await screen.unmount();
+  finish({ type: "rejected", reason: "app_command", trigger: original });
+  await result;
+  await tick();
+
+  expect(native.record.mock.calls).toEqual([[true], [false]]);
 });
 
 test("double tap says what it is waiting for, and where to grant it", async () => {

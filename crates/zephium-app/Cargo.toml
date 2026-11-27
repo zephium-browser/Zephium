@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Non-shipping Windows recovery-journal qualification; the dependency refuses release builds.
+windows-namespace-validation = ["work-runtime", "zephium-private-fs/windows-namespace-validation"]
 # Dormant composition seam for the production agent browser runtime. The
 # ordinary desktop graph does not enable it until a concrete lifecycle owner
 # and its full platform qualification are integrated.
@@ -20,7 +22,7 @@ work-execution-probe = ["work-execution", "zephium-agent-controller/probe-harnes
 macos-page-permission-prompts = []
 
 [dependencies]
-socket2 = { version = "=0.6.4", optional = true }
+socket2 = { version = "=0.6.5", optional = true }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json.workspace = true
@@ -31,7 +33,7 @@ sha2 = { version = "=0.10.9", optional = true }
 sha1 = { version = "=0.10.6", optional = true }
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"], optional = true }
 tokio = { workspace = true, optional = true, features = ["time", "process", "io-util", "net"] }
-chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+jiff = { version = "=0.2.39", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 zephium-agentic = { workspace = true, optional = true }
 zephium-agent-controller = { workspace = true, optional = true, features = ["provider-transport"] }
 zephium-agent-runtime = { workspace = true, optional = true }
@@ -42,12 +44,12 @@ base64.workspace = true
 url.workspace = true
 
 regex = { version = "=1.12.4", optional = true }
-globset = { version = "=0.4.19", optional = true }
-ignore = { version = "=0.4.33", optional = true }
+globset = { version = "=0.4.21", optional = true }
+ignore = { version = "=0.4.34", optional = true }
 grep-searcher = { version = "=0.1.17", optional = true }
 grep-regex = { version = "=0.1.14", optional = true }
 grep-matcher = { version = "=0.1.9", optional = true }
-similar = { version = "=3.2.0", optional = true }
+similar = { version = "=3.2.1", optional = true }
 zephium-mcp = { path = "../zephium-mcp", version = "=0.1.0", features = ["keychain"], optional = true }
 lopdf = { version = "=0.45.0", default-features = false, optional = true }
 
@@ -56,7 +58,7 @@ objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "=0.2.186", optional = true }
+libc = { version = "=0.2.191", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-core = "0.61"

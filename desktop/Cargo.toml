@@ -137,7 +137,7 @@ zephium-notes.workspace = true
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
-window-vibrancy = "=0.8.0"
+window-vibrancy = "=0.8.1"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
@@ -164,6 +164,7 @@ tauri = { workspace = true, features = ["unstable"] }
 windows = { version = "0.61", features = ["Win32_Graphics_Gdi"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+zephium-credentials.workspace = true
 zephium-work-composition = { workspace = true, optional = true }
 zephium-blocker = { workspace = true, features = ["runtime", "runtime-exact"] }
 raw-window-handle.workspace = true
@@ -185,7 +186,7 @@ zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] 
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tauri-plugin-global-shortcut.workspace = true
-rfd = { version = "=0.16.0", default-features = false, features = ["common-controls-v6"] }
+rfd = { version = "=0.18.0", default-features = false, features = ["common-controls-v6"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }

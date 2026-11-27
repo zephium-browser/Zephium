@@ -15,9 +15,9 @@ use zephium_core::ids::ItemId;
 use zephium_core::session::{MAX_SESSION_ITEMS, MAX_SPLIT_DEPTH};
 use zephium_core::split::{Axis, Pane};
 
-// A valid URL is at most 8 KiB. JSON escaping can at most double the raw bytes
-// of the display strings accepted by the store, so 16 KiB admits every valid
-// snapshot string while preventing a single near-16-MiB token allocation.
+// Generic record URLs are capped at 8 KiB. JSON escaping can double these
+// display strings, so their lexical bound remains 16 KiB. Session and Work
+// records explicitly select their independently bounded ingress below.
 pub(crate) const MAX_RAW_STRING_BYTES: usize = 16 * 1024;
 const MAX_SCALAR_TOKEN_BYTES: usize = 256;
 const MAX_STRUCTURAL_TOKENS: usize = 100_000;
@@ -30,9 +30,15 @@ pub(crate) fn preflight(input: &str) -> Result<PreflightedJson<'_>, &'static str
     preflight_with_string_limit(input, MAX_RAW_STRING_BYTES)
 }
 
+/// Session tabs preserve every URL admitted by the browser. Their complete
+/// snapshot cap and typed collection/string checks remain independently enforced.
+pub(crate) fn preflight_session(input: &str) -> Result<PreflightedJson<'_>, &'static str> {
+    preflight_with_string_limit(input, 2 * zephium_core::navigation::MAX_URL_BYTES)
+}
+
 /// Work execution rows are independently capped at 512 KiB before this pass.
 /// Their semantic artifact text permits 32 KiB, with at most 2x JSON escaping
-/// from the canonical writer. Session ingress keeps its existing smaller bound.
+/// from the canonical writer. Generic record ingress keeps its smaller bound.
 pub(crate) fn preflight_work_execution(input: &str) -> Result<PreflightedJson<'_>, &'static str> {
     preflight_with_string_limit(
         input,
@@ -418,13 +424,27 @@ mod tests {
     }
 
     #[test]
-    fn work_text_ingress_does_not_expand_session_string_admission() {
+    fn work_text_ingress_does_not_expand_generic_record_string_admission() {
         let text = "\t".repeat(zephium_core::work::artifact::MAX_ARTIFACT_TEXT_BYTES);
         let body = serde_json::to_string(&text).unwrap();
         assert!(preflight_work_execution(&body).is_ok());
         assert!(preflight(&body).is_err());
         let oversized = serde_json::to_string(&(text + "\t")).unwrap();
         assert!(preflight_work_execution(&oversized).is_err());
+    }
+
+    #[test]
+    fn browser_session_url_admission_does_not_expand_generic_record_tokens() {
+        let long =
+            serde_json::to_string(&format!("https://example.test/#{}", "x".repeat(32 * 1024)))
+                .unwrap();
+        assert!(preflight_session(&long).is_ok());
+        assert!(preflight(&long).is_err());
+        assert!(preflight_session(
+            &serde_json::to_string(&"x".repeat(2 * zephium_core::navigation::MAX_URL_BYTES + 1))
+                .unwrap()
+        )
+        .is_err());
     }
 
     #[test]

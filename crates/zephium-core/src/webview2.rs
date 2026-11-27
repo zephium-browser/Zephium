@@ -363,6 +363,82 @@ pub fn canonical_user_data_directory(path: &Path) -> io::Result<PathBuf> {
     path.canonicalize()
 }
 
+/// Resolve the app's data root once, at startup, to the directory it really is.
+///
+/// Windows lets a person's profile live on another drive behind a junction
+/// (`C:\Users\name` → `D:\Users\name`). Every WebView2 user-data path is built
+/// under this root, and [`canonical_user_data_directory`] refuses any
+/// redirecting component, so the root is resolved through what redirects
+/// above it here, once, and everything below is built on the resolved
+/// directory: a junction retargeted later no longer leads anywhere Zephium
+/// uses. The root itself is Zephium's own directory and must not redirect,
+/// and the resolved root passes the same walk as every user-data path, so
+/// nothing at or below it can redirect either.
+///
+/// The result keeps the ordinary Win32 spelling (`D:\…`) where that names the
+/// same directory: WebView2 refuses some extensions given a `\\?\` path.
+pub fn resolve_data_root(path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "data root must be absolute",
+        ));
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "data root contains relative traversal components",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    #[cfg(target_os = "windows")]
+    let is_reparse_point = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(target_os = "windows"))]
+    let is_reparse_point = false;
+    if metadata.file_type().is_symlink() || is_reparse_point || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "data root is itself a redirecting/non-directory path: {}",
+                path.display()
+            ),
+        ));
+    }
+    let resolved = canonical_user_data_directory(&path.canonicalize()?)?;
+    Ok(win32_spelling(&resolved)
+        .filter(|plain| plain.canonicalize().is_ok_and(|again| again == resolved))
+        .unwrap_or(resolved))
+}
+
+/// `\\?\D:\rest` as `D:\rest`; other spellings have no plain form here.
+fn win32_spelling(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return None;
+    };
+    let Prefix::VerbatimDisk(drive) = prefix.kind() else {
+        return None;
+    };
+    let mut plain = PathBuf::from(format!("{}:\\", char::from(drive)));
+    for component in components {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => plain.push(part),
+            _ => return None,
+        }
+    }
+    Some(plain)
+}
+
 /// Compare the actual directory reported by `ICoreWebView2Environment7`
 /// against the directory Zephium assigned to the environment. Both operands
 /// are resolved independently so spelling, relative components, and Windows
@@ -815,6 +891,155 @@ mod tests {
             user_data_directory_matches(&expected, &alias)
                 .unwrap_err()
                 .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    /// A directory junction, as Windows makes one for a moved profile.
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J {}", link.display());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_profile_behind_a_junction_is_resolved_once_and_nothing_below_may_redirect() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        // `C:\Users\name` → `D:\Users\name`, as in #447.
+        let real = temp_root.join("moved").join("name");
+        let real_root = real.join("AppData").join("Roaming").join("app.zephium");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let profile = temp_root.join("name");
+        junction(&profile, &real);
+        let root = profile.join("AppData").join("Roaming").join("app.zephium");
+
+        // The user-data walk still refuses the junction: that is the report.
+        assert_eq!(
+            canonical_user_data_directory(&root).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let resolved = resolve_data_root(&root).unwrap();
+        assert!(
+            !resolved.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "kept the ordinary spelling: {}",
+            resolved.display()
+        );
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            real_root.canonicalize().unwrap()
+        );
+        // What is built on the resolved root passes the strict walk.
+        let main = resolved.join("privileged-runtime");
+        std::fs::create_dir(&main).unwrap();
+        assert!(user_data_directory_matches(&main, &main).unwrap());
+
+        // Retargeting the profile junction afterwards changes nothing in use.
+        let other = temp_root.join("other").join("name");
+        std::fs::create_dir_all(other.join("AppData").join("Roaming").join("app.zephium")).unwrap();
+        std::fs::remove_dir(&profile).unwrap();
+        junction(&profile, &other);
+        assert_eq!(
+            main.canonicalize().unwrap(),
+            real_root.canonicalize().unwrap().join("privileged-runtime")
+        );
+
+        // A junction at or below the resolved root is still refused.
+        let elsewhere = temp_root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::create_dir(elsewhere.join("profile")).unwrap();
+        let below = resolved.join("web-content");
+        junction(&below, &elsewhere);
+        assert_eq!(
+            canonical_user_data_directory(&below.join("profile"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_data_root_that_is_itself_a_junction_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let elsewhere = temp_root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let root = temp_root.join("app.zephium");
+        junction(&root, &elsewhere);
+        assert_eq!(
+            resolve_data_root(&root).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn a_malformed_or_missing_data_root_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        assert_eq!(
+            resolve_data_root(Path::new("relative-root"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let mut traversal = temp_root.join("root").into_os_string();
+        traversal.push(format!("{0}child{0}..", std::path::MAIN_SEPARATOR));
+        assert_eq!(
+            resolve_data_root(Path::new(&traversal)).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            resolve_data_root(&temp_root.join("missing"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let file = temp_root.join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(
+            resolve_data_root(&file).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let direct = temp_root.join("direct");
+        std::fs::create_dir(&direct).unwrap();
+        assert_eq!(
+            resolve_data_root(&direct).unwrap().canonicalize().unwrap(),
+            direct.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_a_verbatim_drive_path_has_a_plain_spelling() {
+        assert_eq!(
+            win32_spelling(Path::new(r"\\?\D:\Users\name\AppData")),
+            Some(PathBuf::from(r"D:\Users\name\AppData"))
+        );
+        assert_eq!(win32_spelling(Path::new(r"\\?\UNC\server\share\x")), None);
+        assert_eq!(win32_spelling(Path::new(r"D:\already\plain")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_data_root_is_refused() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let real = temp_root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let root = temp_root.join("root");
+        symlink(&real, &root).unwrap();
+        assert_eq!(
+            resolve_data_root(&root).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
     }

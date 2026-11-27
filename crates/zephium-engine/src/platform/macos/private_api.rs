@@ -18,10 +18,13 @@ const IMPLEMENTED: &[(&CStr, &[&CStr])] = &[
             c"_hideFindUI",
             c"_isPlayingAudio",
             c"_webProcessIdentifier",
+            c"_isJITEnabled:",
+            c"_killWebContentProcessAndResetState",
             c"_inspector",
         ],
     ),
     (c"WKBackForwardList", &[c"_clear"]),
+    (c"WKWebExtensionContext", &[c"_backgroundWebView"]),
     (
         c"WKUserContentController",
         &[c"_removeAllUserScriptsAssociatedWithContentWorld:"],

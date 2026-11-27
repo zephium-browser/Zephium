@@ -309,7 +309,8 @@ impl Shell {
                     ),
                 }
             }
-            (_, PageRequestDecision::Dismiss) | (PageRequest::Popup { url: None }, _) => {
+            (_, PageRequestDecision::Dismiss)
+            | (PageRequest::Popup { url: None } | PageRequest::NavigationRefused { .. }, _) => {
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
             (PageRequest::ExternalApp { url, .. }, _) => {

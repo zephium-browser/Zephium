@@ -7,7 +7,7 @@ import { uiCommands } from "$domain/ui-commands";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import VoiceStage from "./VoiceStage.svelte";
 
-const native = vi.hoisted(() => ({ start: vi.fn<() => Promise<VoiceStartV1>>() }));
+const native = vi.hoisted(() => ({ start: vi.fn<(request: string) => Promise<VoiceStartV1>>() }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -23,6 +23,7 @@ const settle = () => new Promise((done) => setTimeout(done, 450));
 
 /** A voice speaking in phrases, fed as native sends it: three levels a tenth of a second. */
 function speak(take: number) {
+  const owningRequest = request();
   let step = 0;
   const timer = setInterval(() => {
     const levels = [0, 1, 2].map((at) => {
@@ -31,13 +32,16 @@ function speak(take: number) {
       return Math.round(phrase * (45 + 40 * Math.abs(Math.sin(t * 1.7))));
     });
     step += 1;
-    emitNativeEvent("voiceLevels", { take, levels });
+    emitNativeEvent("voiceLevels", { take, request: owningRequest, levels });
   }, 100);
   return () => clearInterval(timer);
 }
 
+const request = () => native.start.mock.calls.at(-1)?.[0] ?? "";
+
 const change = (take: number, rest: Partial<VoiceChanged>): VoiceChanged => ({
   take,
+  request: request(),
   phase: "listening",
   engine: "on_device",
   partial: null,

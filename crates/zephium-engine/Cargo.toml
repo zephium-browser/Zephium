@@ -101,7 +101,7 @@ required-features = ["native-agentic-semantic-probe"]
 zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
 wry = { workspace = true, features = ["devtools"] }
-dirs = "6"
+dirs = "7"
 serde_json.workspace = true
 base64 = "0.22"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
@@ -109,7 +109,7 @@ sha2 = "=0.10.9"
 serde = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 
 [dev-dependencies]
 tempfile.workspace = true

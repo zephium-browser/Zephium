@@ -14,6 +14,15 @@
     const value = preferences.value("tabs.home");
     if (!editing) draft = value;
   });
+
+  async function save(event: SubmitEvent) {
+    event.preventDefault();
+    const submitted = draft;
+    await preferences.set("tabs.home", submitted.trim());
+    if (draft !== submitted) return;
+    invalid = preferences.saveFailed();
+    if (!invalid) editing = false;
+  }
 </script>
 
 <SettingsRow
@@ -21,15 +30,7 @@
   title={m.pref_general_home()}
   description={m.pref_general_home_help()}
 >
-  <form
-    onsubmit={(event) => {
-      event.preventDefault();
-      void preferences.set("tabs.home", draft.trim()).then(() => {
-        invalid = preferences.saveFailed();
-        if (!invalid) editing = false;
-      });
-    }}
-  >
+  <form onsubmit={save}>
     <Field
       label={m.pref_general_home()}
       labelHidden

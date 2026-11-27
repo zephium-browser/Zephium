@@ -2129,6 +2129,7 @@ impl InnerWebView {
       )?;
     }
 
+    let native_url_refused = attributes.native_url_refused_handler.clone();
     // Legacy page load handler.
     if let Some(on_page_load_handler) = attributes.on_page_load_handler.take() {
       let on_page_load_handler = Rc::new(on_page_load_handler);
@@ -2171,6 +2172,7 @@ impl InnerWebView {
     let nav_callback = attributes.navigation_handler.take();
     if nav_callback.is_some() || navigation_event_handler.is_some() {
       let starting_handler = navigation_event_handler.clone();
+      let starting_refused = native_url_refused.clone();
       let starting_urls = in_flight_navigation_urls.clone();
       webview.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |_, args| {
@@ -2184,10 +2186,17 @@ impl InnerWebView {
 
           let uri = {
             let mut uri = PWSTR::null();
-            args.Uri(&mut uri)?;
-            take_pwstr_bounded(uri, PAGE_URL_LIMIT)
+            let received = args.Uri(&mut uri);
+            let uri = take_pwstr_bounded(uri, PAGE_URL_LIMIT);
+            received.ok().and(uri)
           };
 
+          if uri.is_none() {
+            crate::report_native_url_refused(
+              starting_refused.as_ref(),
+              crate::NativeUrlTarget::MainFrame,
+            );
+          }
           let admitted = match (&nav_callback, uri.as_ref()) {
             (Some(callback), Some(uri)) => callback(uri.clone()),
             (Some(_), None) => false,
@@ -2279,10 +2288,15 @@ impl InnerWebView {
           };
           let uri = {
             let mut uri = PWSTR::null();
-            args.Uri(&mut uri)?;
-            take_pwstr_bounded(uri, PAGE_URL_LIMIT)
+            let received = args.Uri(&mut uri);
+            let uri = take_pwstr_bounded(uri, PAGE_URL_LIMIT);
+            received.ok().and(uri)
           };
           let Some(uri) = uri else {
+            crate::report_native_url_refused(
+              native_url_refused.as_ref(),
+              crate::NativeUrlTarget::NewWindow,
+            );
             return Ok(());
           };
 

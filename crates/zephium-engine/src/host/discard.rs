@@ -734,7 +734,10 @@ impl EngineHost {
         else {
             return false;
         };
-        if self.erasure_tombstones.contains(&profile) || self.picker.is_some() {
+        if self.erasure_tombstones.contains(&profile)
+            || self.picker.is_some()
+            || view.navigation.has_assistant_edit()
+        {
             return false;
         }
         #[cfg(target_os = "macos")]
@@ -1328,11 +1331,9 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let next: std::collections::HashSet<ItemId> = ids.into_iter().collect();
-            for (id, view) in &self.views {
-                crate::platform::imp::set_background_suspension(&view.view, next.contains(id));
-            }
             let woken: Vec<ItemId> = self.dormant.difference(&next).copied().collect();
             self.dormant = next;
+            self.apply_background_suspension();
             for id in woken {
                 self.refresh_missed_styles(id);
             }
@@ -1341,6 +1342,27 @@ impl EngineHost {
         let _ = request;
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = ids;
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn apply_background_suspension(&self) {
+        let votes: Vec<_> = self
+            .views
+            .iter()
+            .map(|(id, view)| {
+                (
+                    view,
+                    crate::platform::imp::background_preferences_key(&view.view),
+                    self.dormant.contains(id),
+                )
+            })
+            .collect();
+        let groups = crate::background_groups::suspension_groups(
+            votes.iter().map(|(_, key, suspend)| (*key, *suspend)),
+        );
+        for (view, key, _) in votes {
+            crate::platform::imp::set_background_suspension(&view.view, groups[&key]);
+        }
     }
 
     #[cfg(target_os = "windows")]
