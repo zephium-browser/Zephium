@@ -1906,7 +1906,6 @@ impl EngineHost {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = profile;
                     #[cfg(target_os = "windows")]
                     {
                         if let Partition::Container(_, container) = partition {
