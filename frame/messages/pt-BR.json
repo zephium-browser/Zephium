@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Pressione as teclas…",
   "launcher_shortcut_reset": "Redefinir",
   "launcher_shortcut_ready": "Funciona em qualquer app.",
+  "launcher_shortcut_owner_unavailable": "Apenas uma instância do Zephium pode alterar o atalho do iniciador por vez.",
   "launcher_shortcut_unregistered": "Inativo: outro app pode estar usando. Grave um atalho diferente.",
   "launcher_shortcut_invalid": "Essa tecla não pode ser usada em um atalho.",
   "launcher_shortcut_needs_modifier": "Segure ⌘, ⌃ ou ⌥ junto com a tecla, para que ela não digite.",

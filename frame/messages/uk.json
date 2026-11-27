@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Натисніть клавіші…",
   "launcher_shortcut_reset": "Скинути",
   "launcher_shortcut_ready": "Працює в будь-якій програмі.",
+  "launcher_shortcut_owner_unavailable": "Змінювати комбінацію запуску одночасно може лише один екземпляр Zephium.",
   "launcher_shortcut_unregistered": "Не активна: її може використовувати інша програма. Запишіть іншу комбінацію.",
   "launcher_shortcut_invalid": "Цю клавішу не можна використати для комбінації.",
   "launcher_shortcut_needs_modifier": "Утримуйте ⌘, ⌃ або ⌥ разом із клавішею, щоб вона не друкувалася.",

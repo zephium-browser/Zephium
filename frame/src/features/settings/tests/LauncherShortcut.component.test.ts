@@ -14,6 +14,7 @@ const trigger = (shortcut: string): LauncherTrigger => ({
   default_shortcut: "CmdOrCtrl+Shift+Space",
   registered: true,
   editable: true,
+  ownership_available: true,
   double_tap: "off",
   double_tap_supported: true,
   accessibility: false,
@@ -65,6 +66,32 @@ test("records a shortcut, keeps listening after a refusal, and applies the next"
   await page.viewport(720, 220);
   await page.screenshot({ path: "../../../../../target/settings-launcher-shortcut.png" });
   delete document.documentElement.dataset.theme;
+});
+
+test("refreshes the recorder when this instance takes shortcut ownership", async () => {
+  native.state
+    .mockResolvedValueOnce({ ...trigger("CmdOrCtrl+Shift+Space"), editable: false, ownership_available: false })
+    .mockResolvedValue({ ...trigger("CmdOrCtrl+Shift+Space") });
+  const screen = await render(LauncherShortcut);
+  const recorder = screen.getByRole("button", { name: "Record a shortcut" });
+  await expect.element(recorder).toBeDisabled();
+  await expect
+    .element(screen.getByText("Only one Zephium instance can change the launcher shortcut at a time."))
+    .toBeVisible();
+  await vi.waitFor(() => expect(recorder).toBeEnabled(), { timeout: 2500 });
+  expect(native.state).toHaveBeenCalledTimes(2);
+});
+
+test("keeps refreshing until the owned shortcut is registered", async () => {
+  native.state
+    .mockResolvedValueOnce({ ...trigger("CmdOrCtrl+Shift+Space"), registered: false })
+    .mockResolvedValue({ ...trigger("CmdOrCtrl+Shift+Space"), registered: true });
+  const screen = await render(LauncherShortcut);
+  await expect
+    .element(screen.getByText("Not active: another app may be using it. Record a different one."))
+    .toBeVisible();
+  await vi.waitFor(() => expect(native.state).toHaveBeenCalledTimes(2), { timeout: 2500 });
+  await expect.element(screen.getByText("Works from any app.")).toBeVisible();
 });
 
 test("closing settings during a save releases the launcher even if the shortcut is refused", async () => {

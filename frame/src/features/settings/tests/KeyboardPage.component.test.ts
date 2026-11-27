@@ -25,6 +25,7 @@ const trigger: LauncherTrigger = {
   default_shortcut: "CmdOrCtrl+Shift+Space",
   registered: true,
   editable: true,
+  ownership_available: true,
   double_tap: "off",
   double_tap_supported: false,
   accessibility: false,

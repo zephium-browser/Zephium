@@ -6,6 +6,9 @@
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::{Duration, Instant};
 
+use super::runtime_generation::{
+    BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
+};
 use windows::core::PWSTR;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows::Win32::Foundation::{
@@ -18,9 +21,6 @@ use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
     WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_BASIC_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-};
-use zephium_core::webview2::{
-    BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
 };
 
 const BROWSER_IMAGE: &str = "msedgewebview2.exe";

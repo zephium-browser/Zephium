@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Appuyez sur des touches…",
   "launcher_shortcut_reset": "Réinitialiser",
   "launcher_shortcut_ready": "Fonctionne depuis n'importe quelle app.",
+  "launcher_shortcut_owner_unavailable": "Une seule instance de Zephium peut modifier le raccourci du lanceur à la fois.",
   "launcher_shortcut_unregistered": "Inactif : une autre app l'utilise peut-être. Enregistrez-en un autre.",
   "launcher_shortcut_invalid": "Cette touche ne peut pas servir de raccourci.",
   "launcher_shortcut_needs_modifier": "Maintenez ⌘, ⌃ ou ⌥ avec la touche, pour qu'elle ne tape pas de texte.",

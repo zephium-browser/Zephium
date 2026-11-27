@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Pulsa teclas…",
   "launcher_shortcut_reset": "Restablecer",
   "launcher_shortcut_ready": "Funciona desde cualquier app.",
+  "launcher_shortcut_owner_unavailable": "Solo una instancia de Zephium puede cambiar el atajo del lanzador a la vez.",
   "launcher_shortcut_unregistered": "No está activo: es posible que otra app lo esté usando. Graba otro distinto.",
   "launcher_shortcut_invalid": "Esa tecla no se puede usar como atajo.",
   "launcher_shortcut_needs_modifier": "Mantén ⌘, ⌃ o ⌥ con la tecla para que no escriba.",

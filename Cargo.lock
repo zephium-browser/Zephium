@@ -7709,7 +7709,6 @@ dependencies = [
  "tempfile",
  "ulid",
  "url",
- "winreg 0.56.0",
  "zeroize",
 ]
 
@@ -7839,6 +7838,7 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-numerics",
  "windows-sys 0.61.2",
+ "winreg 0.56.0",
  "wry",
  "zephium-agentic",
  "zephium-blocker",

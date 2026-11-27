@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Premi i tasti…",
   "launcher_shortcut_reset": "Ripristina",
   "launcher_shortcut_ready": "Funziona da qualsiasi app.",
+  "launcher_shortcut_owner_unavailable": "Solo un'istanza di Zephium alla volta può modificare la scorciatoia del launcher.",
   "launcher_shortcut_unregistered": "Non attiva: un'altra app potrebbe usarla. Registrane un'altra.",
   "launcher_shortcut_invalid": "Questo tasto non può essere usato come scorciatoia.",
   "launcher_shortcut_needs_modifier": "Tieni premuto ⌘, ⌃ o ⌥ insieme al tasto, così non viene digitato.",

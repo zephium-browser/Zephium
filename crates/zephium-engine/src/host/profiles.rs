@@ -1466,7 +1466,7 @@ mod tests;
 #[cfg(target_os = "windows")]
 #[must_use]
 pub(super) fn expect_private_browser(
-    private_runtime: &zephium_core::webview2::RuntimeGeneration,
+    private_runtime: &crate::RuntimeGeneration,
     folder: &std::path::Path,
 ) -> bool {
     if !folder.starts_with(private_runtime.root()) {

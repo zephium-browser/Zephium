@@ -546,7 +546,7 @@ pub(crate) struct EngineHost {
     #[cfg(not(target_os = "windows"))]
     content_rule_cache: PathBuf,
     #[cfg(target_os = "windows")]
-    private_runtime: zephium_core::webview2::RuntimeGeneration,
+    private_runtime: crate::RuntimeGeneration,
     views: HashMap<ItemId, ObservedView>,
     // Run-owned agent pages are intentionally absent from ordinary tab,
     // session, stage, navigation-snapshot, and extension-principal maps. The

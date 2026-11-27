@@ -517,10 +517,13 @@ pub struct SqliteStore {
     shutdown_clean: AtomicBool,
 }
 
+type SetAsideStartupSessionReply = Option<(SessionLoad, Option<std::path::PathBuf>)>;
+type SetAsideStartupSessionReceiver = Receiver<SetAsideStartupSessionReply>;
+
 impl SqliteStore {
     /// After an explicit startup recovery choice, preserves the current
     /// bounded session bytes and restarts without tabs, retaining draft scopes.
-    pub fn set_aside_startup_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+    pub fn queue_set_aside_startup_session(&self) -> Option<SetAsideStartupSessionReceiver> {
         let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -532,7 +535,14 @@ impl SqliteStore {
         let (send, receive) = mpsc::channel();
         self.tx.try_send(Cmd::SetAsideStartupSession(send)).ok()?;
         drop(lifecycle);
-        receive.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
+        Some(receive)
+    }
+
+    pub fn set_aside_startup_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        self.queue_set_aside_startup_session()?
+            .recv_timeout(STORE_RPC_TIMEOUT)
+            .ok()
+            .flatten()
     }
 
     fn admits_writes(&self) -> bool {

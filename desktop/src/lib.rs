@@ -86,6 +86,7 @@ mod focus_alerts;
 mod haptics;
 mod help;
 mod history_menu;
+mod instance_lease;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -448,8 +449,17 @@ struct UiStartupGate {
     visible: Arc<AtomicBool>,
     handed_over: Arc<AtomicBool>,
     browser_revealed: Arc<AtomicBool>,
+    recovery_pending: Arc<AtomicBool>,
     health_generation: Arc<std::sync::atomic::AtomicU64>,
     health_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+}
+
+fn startup_watchdog_should_fail(
+    deadline_elapsed: bool,
+    visible: bool,
+    recovery_pending: bool,
+) -> bool {
+    deadline_elapsed && !visible && !recovery_pending
 }
 
 // WebView2 cold starts compete with runtime servicing and antivirus scanning.
@@ -475,9 +485,18 @@ impl UiStartupGate {
             visible: Arc::new(AtomicBool::new(false)),
             handed_over: Arc::new(AtomicBool::new(false)),
             browser_revealed: Arc::new(AtomicBool::new(false)),
+            recovery_pending: Arc::new(AtomicBool::new(false)),
             health_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             health_task: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn set_recovery_pending(&self, pending: bool) {
+        self.recovery_pending.store(pending, Ordering::Release);
+    }
+
+    fn recovery_pending(&self) -> bool {
+        self.recovery_pending.load(Ordering::Acquire)
     }
 
     /// Onboarding first, then the browser in the same window.
@@ -1412,6 +1431,8 @@ struct StartupHealth {
     admitted: AtomicBool,
 }
 
+struct StartupRecoveryBarrier(std::path::PathBuf);
+
 impl StartupHealth {
     fn new(attempt: startup_recovery::StartupAttempt) -> Self {
         Self {
@@ -1458,11 +1479,13 @@ fn offer_startup_recovery(
     store: Arc<SqliteStore>,
     data_dir: std::path::PathBuf,
     attempt: Option<startup_recovery::StartupAttempt>,
+    recovery_gate: startup_recovery::RecoveryGate,
     continuation: StartupContinuation,
     advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
     #[cfg(target_os = "windows")] environments: Arc<AtomicU8>,
 ) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let recovery_gate = Arc::new(Mutex::new(Some(recovery_gate)));
     app.dialog().message("Zephium did not finish starting on recent attempts. You can open it without restoring tabs. Your saved session will be preserved in a recovery file, and unsent Work drafts will remain available.")
         .title("Recover Zephium startup")
         .kind(MessageDialogKind::Warning)
@@ -1470,18 +1493,27 @@ fn offer_startup_recovery(
         .show(move |accepted| {
             let answer = continuation.clone();
             let close_app = app.clone();
+            let close_gate = recovery_gate.clone();
             answer.answer(accepted, move || {
+            let worker_gate = recovery_gate.clone();
             tauri::async_runtime::spawn(async move {
                 let worker_guard = continuation.clone();
                 let recovered = tauri::async_runtime::spawn_blocking(move || -> Result<_, std::io::Error> {
                     if !worker_guard.available() { return Ok(None); }
-                    let Some((load, _artifact)) = store.set_aside_startup_session() else {
+                    let Some(recovery_result) = store.queue_set_aside_startup_session() else {
+                        return Err(std::io::Error::other("startup session recovery could not be queued"));
+                    };
+                    let Some((load, _artifact)) = recovery_result
+                        .recv()
+                        .map_err(|_| std::io::Error::other("startup session recovery worker stopped"))?
+                    else {
                         return Err(std::io::Error::other("startup session could not be preserved"));
                     };
                     if matches!(load, zephium_core::ports::store::SessionLoad::RecoveryRequired { .. } | zephium_core::ports::store::SessionLoad::Failed) {
                         return Err(std::io::Error::other("startup session recovery remained unavailable"));
                     }
                     let attempt = match attempt { Some(attempt) => attempt, None => startup_recovery::recover_marker_after_choice(&data_dir)? };
+                    drop(worker_gate.lock().map_err(|_| std::io::Error::other("startup recovery gate is unavailable"))?.take());
                     Ok(Some((store, data_dir, attempt)))
                 }).await;
                 if !continuation.available() { return; }
@@ -1491,9 +1523,21 @@ fn offer_startup_recovery(
                     let result = match recovered {
                         Ok(Ok(Some((store, data_dir, attempt)))) => {
                             dispatch.manage(StartupHealth::new(attempt));
-                            finish_browser_setup(&dispatch, store, data_dir, advisories,
-                                #[cfg(target_os = "windows")] environments,
-                            )
+                            #[cfg(target_os = "windows")]
+                            {
+                                prepare_runtime_then_finish_browser_setup(
+                                    dispatch.clone(),
+                                    store,
+                                    data_dir,
+                                    advisories,
+                                    environments,
+                                );
+                                Ok(())
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                finish_browser_setup(&dispatch, store, data_dir, advisories)
+                            }
                         }
                         Ok(Ok(None)) => return,
                         Ok(Err(error)) => Err(error.into()),
@@ -1504,7 +1548,10 @@ fn offer_startup_recovery(
                     request_orderly_terminal_failure(&app);
                 }
             });
-            }, move || request_orderly_terminal_failure(&close_app));
+            }, move || {
+                drop(close_gate.lock().ok().and_then(|mut gate| gate.take()));
+                request_orderly_terminal_failure(&close_app)
+            });
         });
 }
 
@@ -2359,10 +2406,10 @@ fn resolve_privileged_target(
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Debug)]
 struct PrivilegedRuntimeDirectories {
     main: std::path::PathBuf,
     panel: std::path::PathBuf,
+    private_runtime: zephium_engine::RuntimeGeneration,
 }
 
 #[cfg(target_os = "windows")]
@@ -2370,10 +2417,60 @@ fn prepare_privileged_runtime_directories(
     data_dir: &std::path::Path,
 ) -> std::io::Result<PrivilegedRuntimeDirectories> {
     let prepared = privileged_runtime_windows::prepare(data_dir, MAIN_LABEL, overlay::PANEL_LABEL)?;
+    let private_runtime = zephium_engine::RuntimeGeneration::prepare(
+        &data_dir
+            .join("web-content")
+            .join("private-runtime")
+            .join(std::process::id().to_string()),
+        zephium_engine::RuntimeGenerationKind::RawPrivate,
+        &zephium_engine::WindowsLeftoverProcesses,
+    )?;
     Ok(PrivilegedRuntimeDirectories {
         main: prepared.main,
         panel: prepared.panel,
+        private_runtime,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_runtime_then_finish_browser_setup(
+    app: tauri::AppHandle,
+    store: Arc<SqliteStore>,
+    data_dir: std::path::PathBuf,
+    runtime_security_advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
+    setup_privileged_environments: Arc<AtomicU8>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let preparation_root = data_dir.clone();
+        let prepared = tauri::async_runtime::spawn_blocking(move || {
+            prepare_privileged_runtime_directories(&preparation_root)
+        })
+        .await;
+        let dispatch = app.clone();
+        let scheduled = app.run_on_main_thread(move || {
+            let result: SetupResult = match prepared {
+                Ok(Ok(privileged_runtime)) => finish_browser_setup(
+                    &dispatch,
+                    store,
+                    data_dir,
+                    runtime_security_advisories,
+                    privileged_runtime,
+                    setup_privileged_environments,
+                ),
+                Ok(Err(error)) => Err(error.into()),
+                Err(error) => Err(std::io::Error::other(format!(
+                    "privileged runtime preparation worker failed: {error}"
+                ))
+                .into()),
+            };
+            if let Err(error) = result {
+                request_setup_failure(&dispatch, error);
+            }
+        });
+        if scheduled.is_err() {
+            request_orderly_terminal_failure(&app);
+        }
+    });
 }
 
 #[cfg(target_os = "windows")]
@@ -2975,11 +3072,51 @@ fn dispatch_with_id(
 
 #[tauri::command]
 #[specta::specta]
-fn tabs_bootstrap(caller: WebviewWindow, shell: State<'_, Handle>) {
+async fn tabs_bootstrap(caller: WebviewWindow, app: tauri::AppHandle) {
     if !authorize(&caller, CallerPolicy::Main, "tabs_bootstrap") {
         return;
     }
-    shell.dispatch(Command::Bootstrap);
+    let Some(barrier) = app.try_state::<StartupRecoveryBarrier>() else {
+        request_startup_failure(
+            &app,
+            std::io::Error::other("startup recovery barrier is unavailable"),
+        );
+        return;
+    };
+    let data_dir = barrier.0.clone();
+    let Some(startup_gate) = app.try_state::<UiStartupGate>() else {
+        request_startup_failure(
+            &app,
+            std::io::Error::other("UI startup gate is unavailable"),
+        );
+        return;
+    };
+    startup_gate.set_recovery_pending(true);
+    let Some(shell) = app.try_state::<Handle>() else {
+        startup_gate.set_recovery_pending(false);
+        request_startup_failure(&app, std::io::Error::other("shell is unavailable"));
+        return;
+    };
+    let shell = shell.inner().clone();
+    let recovery_result = tauri::async_runtime::spawn_blocking(move || {
+        startup_recovery::wait_for_recovery(&data_dir)
+    })
+    .await;
+    startup_gate.set_recovery_pending(false);
+    match recovery_result {
+        Ok(Ok(())) => {
+            shell.dispatch(Command::Bootstrap);
+        }
+        Ok(Err(error)) => {
+            request_startup_failure(&app, error);
+        }
+        Err(_) => {
+            request_startup_failure(
+                &app,
+                std::io::Error::other("startup recovery barrier did not complete"),
+            );
+        }
+    }
 }
 
 static BLOCKER_STATS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -7238,6 +7375,7 @@ fn finish_browser_setup(
     store: Arc<SqliteStore>,
     data_dir: std::path::PathBuf,
     runtime_security_advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
+    #[cfg(target_os = "windows")] privileged_runtime: PrivilegedRuntimeDirectories,
     #[cfg(target_os = "windows")] setup_privileged_environments: Arc<AtomicU8>,
 ) -> SetupResult {
     let shutdown = app
@@ -7266,8 +7404,6 @@ fn finish_browser_setup(
     #[cfg(not(feature = "adblock-qa"))]
     account::install(app);
 
-    #[cfg(target_os = "windows")]
-    let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;
     #[cfg(target_os = "windows")]
     let runtime_security_advisories =
         runtime_security_advisories.with_optional(privileged_runtime_windows::cleanup_advisory());
@@ -7417,9 +7553,26 @@ fn finish_browser_setup(
     std::thread::Builder::new()
                 .name("zephium-ui-startup-watchdog".into())
                 .spawn(move || {
-                    std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
-                    if startup_watchdog_gate.is_visible() {
-                        return;
+                    loop {
+                        std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
+                        if startup_watchdog_gate.is_visible() {
+                            return;
+                        }
+                        if startup_watchdog_should_fail(
+                            true,
+                            startup_watchdog_gate.is_visible(),
+                            startup_watchdog_gate.recovery_pending(),
+                        ) {
+                            break;
+                        }
+                        while startup_watchdog_gate.recovery_pending()
+                            && !startup_watchdog_gate.is_visible()
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        if startup_watchdog_gate.is_visible() {
+                            return;
+                        }
                     }
                     let exit_app = startup_watchdog_app.clone();
                     let exit_gate = startup_watchdog_gate.clone();
@@ -7498,6 +7651,8 @@ fn finish_browser_setup(
     let engine = Arc::new(zephium_engine::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
+        #[cfg(target_os = "windows")]
+        privileged_runtime.private_runtime,
         dispatch.clone(),
         data_dir.join("web-content"),
         runtime_security_advisories,
@@ -8468,7 +8623,8 @@ fn finish_browser_setup(
                 !accelerator.is_empty() && *accelerator != launcher_trigger::DEFAULT
             })
             .cloned();
-        launcher_trigger::install(&handle, keymap_override);
+        launcher_trigger::install(&handle, keymap_override.clone());
+        launcher_trigger::monitor_global_shortcut_owner(&handle, keymap_override);
     }
     #[cfg(target_os = "linux")]
     {
@@ -8606,6 +8762,14 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let setup_privileged_environments = attempted_privileged_environments.clone();
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            external_links::bring_forward(app);
+            external_links::hand_off(
+                app,
+                external_links::external_arguments(argv.into_iter().skip(1)),
+                true,
+            );
+        }))
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
@@ -8613,14 +8777,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        // Must register first: a second launch (file association, dock, a
-        // stale instance holding the global hotkey and the profile dbs)
-        // focuses the running window and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
-        }));
+        .plugin(tauri_plugin_updater::Builder::new().build());
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
     // fail startup when Xwayland is absent). Linux selects an actual GDK
@@ -8736,6 +8893,31 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                #[cfg(not(target_os = "linux"))]
+                {
+                    match app
+                        .path()
+                        .config_dir()
+                        .map_err(std::io::Error::other)
+                        .and_then(|config_dir| {
+                            let coordination_dir = instance_lease::shortcut_coordination_dir(
+                                &config_dir,
+                                &app.config().identifier,
+                            );
+                            std::fs::create_dir_all(&coordination_dir)?;
+                            instance_lease::GlobalShortcutOwner::acquire(&coordination_dir)
+                        }) {
+                        Ok(owner) => {
+                            if !app.manage(owner) {
+                                return Err(std::io::Error::other(
+                                    "global shortcut ownership state is already installed",
+                                )
+                                .into());
+                            }
+                        }
+                        Err(error) => diagnostic!("shortcut coordination unavailable: {error}"),
+                    }
+                }
                 #[cfg(target_os = "windows")]
                 updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
@@ -8773,6 +8955,8 @@ pub fn run() {
                 // private data root is secured. A corrupt/newer database must
                 // fail before either privileged chrome or raw content creates
                 // native renderer state.
+                let startup_gate =
+                    instance_lease::FileLease::acquire(&data_dir.join(".startup-admission.lock"))?;
                 #[cfg(all(target_os = "windows", feature = "work-product"))]
                 let store = {
                     #[cfg(feature = "webext-qa")]
@@ -8826,16 +9010,32 @@ pub fn run() {
                             error.kind(),
                             "startup recovery marker is unavailable",
                         )
-                        .into())
+                        .into());
                     }
                 };
+                let recovery_gate = if recovery_needed {
+                    Some(startup_recovery::acquire_recovery_gate(&data_dir)?)
+                } else {
+                    None
+                };
+                if !app.manage(StartupRecoveryBarrier(data_dir.clone())) {
+                    return Err(std::io::Error::other(
+                        "startup recovery barrier is already installed",
+                    )
+                    .into());
+                }
+                drop(startup_gate);
                 let continuation = StartupContinuation::new(shutdown.inner().clone());
                 if recovery_needed {
+                    let recovery_gate = recovery_gate.ok_or_else(|| {
+                        std::io::Error::other("startup recovery gate is unavailable")
+                    })?;
                     offer_startup_recovery(
                         app.handle().clone(),
                         store,
                         data_dir,
                         startup.ok(),
+                        recovery_gate,
                         continuation,
                         runtime_security_advisories,
                         #[cfg(target_os = "windows")]
@@ -8845,13 +9045,20 @@ pub fn run() {
                 }
                 app.manage(StartupHealth::new(startup?));
                 if continuation.admit() {
+                    #[cfg(target_os = "windows")]
+                    prepare_runtime_then_finish_browser_setup(
+                        app.handle().clone(),
+                        store,
+                        data_dir,
+                        runtime_security_advisories,
+                        setup_privileged_environments,
+                    );
+                    #[cfg(not(target_os = "windows"))]
                     finish_browser_setup(
                         app.handle(),
                         store,
                         data_dir,
                         runtime_security_advisories,
-                        #[cfg(target_os = "windows")]
-                        setup_privileged_environments,
                     )?;
                 }
                 Ok(())
@@ -8936,6 +9143,43 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_runtime_preparation_runs_off_thread_before_browser_setup() {
+        let production = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let worker = production
+            .split("fn prepare_runtime_then_finish_browser_setup(")
+            .nth(1)
+            .and_then(|body| {
+                body.split("fn cleanup_privileged_runtime_after_exit")
+                    .next()
+            })
+            .expect("privileged runtime worker");
+        let blocking = worker.find("spawn_blocking").expect("blocking worker");
+        let awaited = worker.find(".await").expect("worker completion");
+        let main_thread = worker
+            .find("run_on_main_thread")
+            .expect("main-thread browser setup");
+        let finish = worker
+            .find("finish_browser_setup(")
+            .expect("browser setup after preparation");
+        assert!(blocking < awaited && awaited < main_thread && main_thread < finish);
+
+        let setup = production
+            .split("fn finish_browser_setup(")
+            .nth(1)
+            .and_then(|body| body.split("fn navigation_lock(").next())
+            .expect("browser setup body");
+        assert!(!setup.contains("prepare_privileged_runtime_directories"));
+        assert!(setup.contains("privileged_runtime.main.clone()"));
+    }
+
+    #[test]
+    fn recovery_wait_suspends_an_elapsed_ui_startup_deadline() {
+        assert!(!super::startup_watchdog_should_fail(true, false, true));
+        assert!(super::startup_watchdog_should_fail(true, false, false));
+        assert!(!super::startup_watchdog_should_fail(true, true, false));
+    }
+
     fn composed_setup_source(production: &str) -> String {
         let initial = production
             .split(".setup(move |app| {")

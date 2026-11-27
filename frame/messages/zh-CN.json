@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "按下按键…",
   "launcher_shortcut_reset": "重置",
   "launcher_shortcut_ready": "在任何 App 中都可使用。",
+  "launcher_shortcut_owner_unavailable": "同一时间只能由一个 Zephium 实例更改启动器快捷键。",
   "launcher_shortcut_unregistered": "未启用：其他 App 可能正在使用它。请录制另一个快捷键。",
   "launcher_shortcut_invalid": "此按键不能用作快捷键。",
   "launcher_shortcut_needs_modifier": "请与按键一同按住 ⌘、⌃ 或 ⌥，以免输入文字。",

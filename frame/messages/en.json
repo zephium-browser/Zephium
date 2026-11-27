@@ -1496,6 +1496,7 @@
   "launcher_shortcut_press": "Press keys…",
   "launcher_shortcut_reset": "Reset",
   "launcher_shortcut_ready": "Works from any app.",
+  "launcher_shortcut_owner_unavailable": "Only one Zephium instance can change the launcher shortcut at a time.",
   "launcher_shortcut_unregistered": "Not active: another app may be using it. Record a different one.",
   "launcher_shortcut_invalid": "That key can’t be used for a shortcut.",
   "launcher_shortcut_needs_modifier": "Hold ⌘, ⌃ or ⌥ with the key, so it doesn’t type.",

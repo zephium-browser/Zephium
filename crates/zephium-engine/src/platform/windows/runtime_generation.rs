@@ -37,9 +37,55 @@ const MAX_RECORD_BYTES: u64 = 512;
 // restarting Windows, after which valid marked generations become reclaimable.
 const MAX_SAME_BOOT_GENERATIONS: usize = 32;
 const MAX_TOTAL_GENERATIONS: usize = 128;
+const MAX_SCANNED_PID_ROOTS: usize = 4096;
 const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SCANNED_ENTRIES: usize = 250_000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+const FILE_SHARE_DELETE: u32 = 0x00000004;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+const FILE_LIST_DIRECTORY: u32 = 0x00000001;
+const FILE_READ_ATTRIBUTES: u32 = 0x00000080;
+
+fn acquire_lifecycle_lock<T>(
+    operation: &str,
+    mut open: impl FnMut() -> io::Result<T>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> io::Result<T> {
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(10);
+    let backoff = Duration::from_millis(100);
+    let mut first_attempt = true;
+    let mut last_contention = None;
+    loop {
+        if !first_attempt && elapsed() >= timeout {
+            let error = last_contention
+                .unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "lock wait timed out"));
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{operation}: {error}"),
+            ));
+        }
+        first_attempt = false;
+        let error = match open() {
+            Ok(lease) => return Ok(lease),
+            Err(error) => error,
+        };
+        let remaining = timeout.saturating_sub(elapsed());
+        if !matches!(error.raw_os_error(), Some(32 | 33)) || remaining.is_zero() {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{operation}: {error}"),
+            ));
+        }
+        last_contention = Some(error);
+        sleep(backoff.min(remaining));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeGenerationKind {
@@ -68,10 +114,8 @@ pub struct RuntimeGeneration {
     generation: String,
     kind: RuntimeGenerationKind,
     report: GenerationReport,
-    // Deny all sharing modes. This independently prevents two Zephium parent
-    // processes from classifying/removing one root concurrently while the
-    // outer single-instance plugin is still settling.
     _lease: File,
+    _root_pin: File,
 }
 
 /// One browser process a generation started: its id and its creation time
@@ -119,6 +163,21 @@ pub struct GenerationReport {
     pub overdue: Option<String>,
 }
 
+impl GenerationReport {
+    fn merge(&mut self, mut other: Self) {
+        self.reclaimed_after_exit
+            .append(&mut other.reclaimed_after_exit);
+        self.reclaimed_after_termination
+            .append(&mut other.reclaimed_after_termination);
+        self.reclaimed_empty.append(&mut other.reclaimed_empty);
+        self.kept_running.append(&mut other.kept_running);
+        self.kept_unchecked.append(&mut other.kept_unchecked);
+        if let Some(reason) = other.overdue {
+            note_overdue(self, &reason);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeCleanupTicket {
     root: PathBuf,
@@ -155,6 +214,26 @@ fn direct_directory(path: &Path) -> io::Result<PathBuf> {
         ));
     }
     super::canonical_user_data_directory(path)
+}
+
+fn open_direct_directory(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || is_reparse(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the per-process runtime root is not a direct directory",
+        ));
+    }
+    Ok(file)
+}
+
+fn directory_identity(file: &File) -> io::Result<(u64, [u8; 16])> {
+    crate::platform::windows::native_paths::directory_identity(file)
 }
 
 fn open_boot_registry(kind: RuntimeGenerationKind) -> io::Result<RegKey> {
@@ -443,6 +522,129 @@ fn maintain_generations(
     }
     if usage.over_budget || usage.bytes > MAX_QUARANTINE_BYTES {
         note_overdue(report, "leftover WebView2 data is over its 2 GiB budget");
+    }
+    Ok(())
+}
+
+fn maintain_pid_generations(
+    generations: &Path,
+    boot: &RegKey,
+    kind: RuntimeGenerationKind,
+    leftovers: &dyn LeftoverProcesses,
+    report: &mut GenerationReport,
+) -> io::Result<()> {
+    let mut usage = QuarantineUsage::default();
+    let mut inspected = 0_usize;
+    for entry in fs::read_dir(generations)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                note_overdue(
+                    report,
+                    &format!("a per-process generation entry could not be inspected ({error})"),
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if name == LEASE_FILE {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
+                return Err(remediation_error(
+                    "the WebView2 runtime lifecycle lease is not a direct file",
+                ));
+            }
+            usage.bytes = usage.bytes.saturating_add(metadata.len());
+            continue;
+        }
+        inspected = inspected.saturating_add(1);
+        if inspected > MAX_TOTAL_GENERATIONS {
+            note_overdue(
+                report,
+                "the per-process runtime root holds more generations than one launch inspects",
+            );
+            break;
+        }
+        let Some(generation) = name.to_str().filter(|generation| {
+            ProfileId::parse(generation).is_some_and(|id| id.to_string() == *generation)
+        }) else {
+            usage.generations = usage.generations.saturating_add(1);
+            note_overdue(
+                report,
+                "a per-process runtime root holds an unrecognized entry",
+            );
+            continue;
+        };
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                usage.generations = usage.generations.saturating_add(1);
+                note_overdue(
+                    report,
+                    &format!("a per-process generation could not be inspected ({error})"),
+                );
+                continue;
+            }
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            usage.generations = usage.generations.saturating_add(1);
+            note_overdue(
+                report,
+                "a per-process runtime generation is not a direct directory",
+            );
+            continue;
+        }
+        match marker_status(&entry.path(), kind, generation) {
+            Ok(MarkerStatus::Matches) => {
+                if let Err(error) = maintain_generation(
+                    &entry.path(),
+                    &name,
+                    boot,
+                    kind,
+                    leftovers,
+                    &mut usage,
+                    report,
+                ) {
+                    note_overdue(
+                        report,
+                        &format!("a marked per-process generation could not be cleared ({error})"),
+                    );
+                }
+            }
+            Ok(MarkerStatus::Missing) => {
+                usage.generations = usage.generations.saturating_add(1);
+                note_overdue(
+                    report,
+                    "an unmarked per-process generation was left untouched",
+                );
+            }
+            Ok(MarkerStatus::Invalid) => {
+                usage.generations = usage.generations.saturating_add(1);
+                note_overdue(
+                    report,
+                    "a per-process generation with an invalid marker was left untouched",
+                );
+            }
+            Err(error) => {
+                usage.generations = usage.generations.saturating_add(1);
+                note_overdue(
+                    report,
+                    &format!("a per-process generation marker could not be inspected ({error})"),
+                );
+            }
+        }
+    }
+    if usage.generations >= MAX_TOTAL_GENERATIONS {
+        note_overdue(report, "128 per-process runtime generations are waiting");
+    }
+    if usage.same_boot_generations >= MAX_SAME_BOOT_GENERATIONS {
+        note_overdue(
+            report,
+            "32 per-process WebView2 generations from runs that did not close cleanly are waiting",
+        );
+    }
+    if usage.over_budget || usage.bytes > MAX_QUARANTINE_BYTES {
+        note_overdue(report, "per-process runtime data is over its 2 GiB budget");
     }
     Ok(())
 }
@@ -802,16 +1004,111 @@ impl RuntimeGeneration {
             RuntimeGenerationKind::Privileged => "privileged runtime lifecycle lock",
         };
         let started = std::time::Instant::now();
-        let lease = super::acquire_lifecycle_lock(
+        let (lease, root_pin) = acquire_lifecycle_lock(
             operation,
             || {
-                OpenOptions::new()
+                fs::create_dir_all(configured_root)?;
+                let checked_root = direct_directory(configured_root)?;
+                if checked_root != generations {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the runtime root changed during lifecycle-lock admission",
+                    ));
+                }
+                let root_pin = open_direct_directory(&checked_root)?;
+                let pinned_identity = directory_identity(&root_pin)?;
+                let current_root = open_direct_directory(&checked_root)?;
+                if directory_identity(&current_root)? != pinned_identity {
+                    return Err(io::Error::from_raw_os_error(32));
+                }
+                drop(current_root);
+                let lease_path = checked_root.join(LEASE_FILE);
+                let before = match fs::symlink_metadata(&lease_path) {
+                    Ok(metadata)
+                        if metadata.is_file()
+                            && !metadata.file_type().is_symlink()
+                            && !is_reparse(&metadata) =>
+                    {
+                        metadata
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        match OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                            .open(&lease_path)
+                        {
+                            Ok(_) => return Err(io::Error::from_raw_os_error(32)),
+                            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                                return Err(io::Error::from_raw_os_error(32));
+                            }
+                            Err(error) if error.raw_os_error() == Some(5) => {
+                                let lease_is_absent = fs::symlink_metadata(&lease_path)
+                                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+                                let root_is_pinned = open_direct_directory(&checked_root)
+                                    .and_then(|root| directory_identity(&root))
+                                    .is_ok_and(|identity| identity == pinned_identity);
+                                if lease_is_absent && root_is_pinned {
+                                    return Err(io::Error::from_raw_os_error(32));
+                                }
+                                return Err(error);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Ok(_) => {
+                        return Err(remediation_error(
+                            "the WebView2 runtime lifecycle lease is not a direct file",
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
+                let lease = match OpenOptions::new()
                     .read(true)
                     .write(true)
                     .create(true)
                     .truncate(false)
-                    .share_mode(0)
-                    .open(generations.join(LEASE_FILE))
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .open(&lease_path)
+                {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Err(io::Error::from_raw_os_error(32));
+                    }
+                    Err(error) => return Err(error),
+                    Ok(lease) => lease,
+                };
+                match lease.try_lock() {
+                    Ok(()) => {}
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        return Err(io::Error::from_raw_os_error(32));
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => return Err(error),
+                }
+                let opened = lease.metadata()?;
+                let current = fs::symlink_metadata(&lease_path)?;
+                if !opened.is_file()
+                    || is_reparse(&opened)
+                    || !current.is_file()
+                    || current.file_type().is_symlink()
+                    || is_reparse(&current)
+                    || before.creation_time() != opened.creation_time()
+                    || opened.creation_time() != current.creation_time()
+                    || before.file_size() != opened.file_size()
+                    || opened.file_size() != current.file_size()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the WebView2 runtime lifecycle lease changed during admission",
+                    ));
+                }
+                let after_root = direct_directory(configured_root)?;
+                if after_root != checked_root {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the runtime root changed during lifecycle-lock admission",
+                    ));
+                }
+                Ok((lease, root_pin))
             },
             || started.elapsed(),
             std::thread::sleep,
@@ -822,6 +1119,7 @@ impl RuntimeGeneration {
         // Only an exact cleanup ticket or this run's own process proof removes
         // a marker; otherwise Windows retires the volatile registry at reboot.
         let mut report = GenerationReport::default();
+        maintain_sibling_roots(configured_root, kind, leftovers, &mut report);
         maintain_generations(&generations, &boot, kind, leftovers, &mut report)?;
 
         let generation = ProfileId::generate().to_string();
@@ -842,6 +1140,7 @@ impl RuntimeGeneration {
             kind,
             report,
             _lease: lease,
+            _root_pin: root_pin,
         })
     }
 
@@ -965,6 +1264,416 @@ impl RuntimeGeneration {
     }
 }
 
+fn maintain_sibling_roots(
+    current_root: &Path,
+    kind: RuntimeGenerationKind,
+    leftovers: &dyn LeftoverProcesses,
+    report: &mut GenerationReport,
+) {
+    let Some(parent_path) = current_root.parent() else {
+        note_overdue(
+            report,
+            "the runtime root has no parent for sibling inspection",
+        );
+        return;
+    };
+    let parent = match direct_directory(parent_path) {
+        Ok(parent) => parent,
+        Err(error) => {
+            note_overdue(
+                report,
+                &format!("the runtime parent could not be inspected ({error})"),
+            );
+            return;
+        }
+    };
+    let Some(current_name) = current_root.file_name() else {
+        note_overdue(
+            report,
+            "the runtime root has no name for sibling inspection",
+        );
+        return;
+    };
+    let legacy_lease = match legacy_parent_lease(&parent) {
+        Ok(lease) => lease,
+        Err(error) => {
+            note_overdue(
+                report,
+                &format!("the legacy runtime lease could not be inspected ({error})"),
+            );
+            None
+        }
+    };
+    let mut inspected = 0_usize;
+    let entries = match fs::read_dir(&parent) {
+        Ok(entries) => entries,
+        Err(error) => {
+            note_overdue(
+                report,
+                &format!("other per-process runtime roots could not be inspected ({error})"),
+            );
+            return;
+        }
+    };
+    let mut candidates = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_SCANNED_PID_ROOTS {
+            note_overdue(
+                report,
+                "more per-process runtime directories exist than one launch inspects",
+            );
+            break;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                note_overdue(report, "a per-process runtime root could not be inspected");
+                continue;
+            }
+        };
+        candidates.push(entry);
+    }
+    candidates.sort_by_key(|entry| entry.file_name());
+    for entry in candidates {
+        let name = entry.file_name();
+        if name == current_name {
+            continue;
+        }
+        let name_text = name.to_string_lossy().into_owned();
+        let process_root = name_text.parse::<u32>().is_ok_and(|pid| pid != 0);
+        let legacy_generation =
+            ProfileId::parse(&name_text).filter(|generation| generation.to_string() == name_text);
+        if !process_root && legacy_generation.is_none() {
+            continue;
+        }
+        let root = match direct_directory(&entry.path()) {
+            Ok(root) if root.parent() == Some(parent.as_path()) => root,
+            Ok(_) => {
+                note_overdue(
+                    report,
+                    "a runtime sibling resolved outside its expected parent",
+                );
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                note_overdue(
+                    report,
+                    &format!("a runtime sibling could not be inspected ({error})"),
+                );
+                continue;
+            }
+        };
+        let mut lease = if process_root {
+            let lease_path = root.join(LEASE_FILE);
+            let before = match fs::symlink_metadata(&lease_path) {
+                Ok(metadata)
+                    if metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && !is_reparse(&metadata) =>
+                {
+                    metadata
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    note_overdue(
+                        report,
+                        "a per-process runtime root has no lifecycle lease and may need cleanup",
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    note_overdue(
+                        report,
+                        &format!("a per-process runtime lease could not be inspected ({error})"),
+                    );
+                    continue;
+                }
+                Ok(_) => {
+                    note_overdue(report, "a per-process runtime lease is not a direct file");
+                    continue;
+                }
+            };
+            let lease = match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&lease_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.raw_os_error() == Some(32) => continue,
+                Err(error) => {
+                    note_overdue(
+                        report,
+                        &format!("a per-process runtime lease could not be opened ({error})"),
+                    );
+                    continue;
+                }
+            };
+            match lease.metadata() {
+                Ok(metadata)
+                    if metadata.is_file()
+                        && !is_reparse(&metadata)
+                        && before.creation_time() == metadata.creation_time()
+                        && before.file_size() == metadata.file_size() => {}
+                Ok(_) => {
+                    note_overdue(
+                        report,
+                        "a per-process runtime lease changed during inspection",
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    note_overdue(
+                        report,
+                        &format!("a per-process runtime lease could not be inspected ({error})"),
+                    );
+                    continue;
+                }
+            }
+            match lease.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => continue,
+                Err(std::fs::TryLockError::Error(error)) => {
+                    note_overdue(
+                        report,
+                        &format!("a per-process runtime lease could not be locked ({error})"),
+                    );
+                    continue;
+                }
+            }
+            Some(lease)
+        } else {
+            if legacy_lease.is_none() {
+                continue;
+            }
+            match marker_status(&root, kind, &name_text) {
+                Ok(MarkerStatus::Matches | MarkerStatus::Missing) => {}
+                Ok(MarkerStatus::Invalid) => continue,
+                Err(error) => {
+                    note_overdue(
+                        report,
+                        &format!("a legacy runtime generation could not be inspected ({error})"),
+                    );
+                    continue;
+                }
+            }
+            None
+        };
+        if process_root {
+            match inspect_pid_root(&root, kind) {
+                Ok(PidRootInspection::Empty) => {
+                    if let Some(lease) = lease.take() {
+                        if let Err(error) = retire_empty_pid_root(&root, kind, lease) {
+                            note_overdue(
+                                report,
+                                &format!(
+                                    "an empty per-process runtime root could not be retired ({error})"
+                                ),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                Ok(PidRootInspection::Unowned) => continue,
+                Ok(PidRootInspection::Owned) => {}
+                Err(error) => {
+                    note_overdue(
+                        report,
+                        &format!(
+                            "a per-process runtime root could not be fully inspected ({error})"
+                        ),
+                    );
+                    continue;
+                }
+            }
+        }
+        inspected += 1;
+        if inspected > MAX_TOTAL_GENERATIONS {
+            note_overdue(
+                report,
+                "more owned per-process runtime roots exist than one launch inspects",
+            );
+            break;
+        }
+        let mut sibling_report = GenerationReport::default();
+        let maintained = if process_root {
+            open_boot_registry(kind).and_then(|boot| {
+                maintain_pid_generations(&root, &boot, kind, leftovers, &mut sibling_report)
+            })
+        } else {
+            open_boot_registry(kind).and_then(|boot| {
+                maintain_generation(
+                    &root,
+                    &name,
+                    &boot,
+                    kind,
+                    leftovers,
+                    &mut QuarantineUsage::default(),
+                    &mut sibling_report,
+                )
+            })
+        };
+        report.merge(sibling_report);
+        match maintained {
+            Ok(()) => {
+                if process_root {
+                    match inspect_pid_root(&root, kind) {
+                        Ok(PidRootInspection::Empty) => {
+                            if let Some(lease) = lease.take() {
+                                if let Err(error) = retire_empty_pid_root(&root, kind, lease) {
+                                    note_overdue(
+                                        report,
+                                        &format!(
+                                            "an empty per-process runtime root could not be retired ({error})"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            note_overdue(
+                                report,
+                                &format!(
+                                    "a per-process runtime root could not be fully inspected ({error})"
+                                ),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => {
+                note_overdue(
+                    report,
+                    "an earlier per-process runtime root could not be maintained",
+                );
+            }
+        }
+        drop(lease);
+    }
+}
+
+fn legacy_parent_lease(parent: &Path) -> io::Result<Option<File>> {
+    let path = parent.join(LEASE_FILE);
+    let before = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !before.is_file() || before.file_type().is_symlink() || is_reparse(&before) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the legacy runtime lease is not a direct file",
+        ));
+    }
+    let lease = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(lease) => lease,
+        Err(error) if error.raw_os_error() == Some(32) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let after = lease.metadata()?;
+    if !after.is_file()
+        || is_reparse(&after)
+        || before.creation_time() != after.creation_time()
+        || before.file_size() != after.file_size()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the legacy runtime lease changed during inspection",
+        ));
+    }
+    match lease.try_lock() {
+        Ok(()) => Ok(Some(lease)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+enum PidRootInspection {
+    Empty,
+    Owned,
+    Unowned,
+}
+
+fn inspect_pid_root(root: &Path, kind: RuntimeGenerationKind) -> io::Result<PidRootInspection> {
+    let mut has_owned_generation = false;
+    let mut has_other_entry = false;
+    let mut generations = 0_usize;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_name() == LEASE_FILE {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the per-process runtime lease is not a direct file",
+                ));
+            }
+            continue;
+        }
+        generations = generations.saturating_add(1);
+        if generations > MAX_TOTAL_GENERATIONS {
+            return Err(io::Error::other(
+                "the per-process runtime root has more generations than one launch inspects",
+            ));
+        }
+        has_other_entry = true;
+        let Some(generation) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if ProfileId::parse(&generation).is_none_or(|id| id.to_string() != generation) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            continue;
+        }
+        if marker_status(&entry.path(), kind, &generation)? == MarkerStatus::Matches {
+            has_owned_generation = true;
+        }
+    }
+    Ok(if has_owned_generation {
+        PidRootInspection::Owned
+    } else if has_other_entry {
+        PidRootInspection::Unowned
+    } else {
+        PidRootInspection::Empty
+    })
+}
+
+fn retire_empty_pid_root(root: &Path, kind: RuntimeGenerationKind, lease: File) -> io::Result<()> {
+    if !matches!(inspect_pid_root(root, kind)?, PidRootInspection::Empty) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotEmpty,
+            "the per-process runtime root changed during cleanup",
+        ));
+    }
+    let lease_path = root.join(LEASE_FILE);
+    let held_metadata = lease.metadata()?;
+    let path_metadata = fs::symlink_metadata(&lease_path)?;
+    if !path_metadata.is_file()
+        || path_metadata.file_type().is_symlink()
+        || is_reparse(&path_metadata)
+        || held_metadata.creation_time() != path_metadata.creation_time()
+        || held_metadata.file_size() != path_metadata.file_size()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the per-process runtime lease changed during cleanup",
+        ));
+    }
+    fs::remove_file(lease_path)?;
+    drop(lease);
+    fs::remove_dir(root)
+}
+
 impl RuntimeCleanupTicket {
     pub fn root(&self) -> &Path {
         &self.root
@@ -988,7 +1697,175 @@ impl RuntimeCleanupTicket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
+
+    #[test]
+    fn lifecycle_lock_retries_contention_until_open_succeeds() {
+        for code in [32, 33] {
+            let elapsed = Cell::new(Duration::ZERO);
+            let mut attempts = 0;
+            let lease = acquire_lifecycle_lock(
+                "privileged runtime lifecycle lock",
+                || {
+                    attempts += 1;
+                    if attempts <= 3 {
+                        Err(io::Error::from_raw_os_error(code))
+                    } else {
+                        Ok("lease")
+                    }
+                },
+                || elapsed.get(),
+                |delay| {
+                    assert_eq!(delay, Duration::from_millis(100));
+                    elapsed.set(elapsed.get() + delay);
+                },
+            )
+            .unwrap();
+            assert_eq!(lease, "lease");
+            assert_eq!(attempts, 4);
+            assert_eq!(elapsed.get(), Duration::from_millis(300));
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_stops_after_ten_seconds_with_operation_and_os_error() {
+        for operation in [
+            "privileged runtime lifecycle lock",
+            "private runtime lifecycle lock",
+        ] {
+            for code in [32, 33] {
+                let elapsed = Cell::new(Duration::ZERO);
+                let mut attempts = 0;
+                let error = acquire_lifecycle_lock::<()>(
+                    operation,
+                    || {
+                        attempts += 1;
+                        Err(io::Error::from_raw_os_error(code))
+                    },
+                    || elapsed.get(),
+                    |delay| elapsed.set(elapsed.get() + delay),
+                )
+                .unwrap_err();
+                assert_eq!(attempts, 100);
+                assert_eq!(elapsed.get(), Duration::from_secs(10));
+                assert_eq!(error.kind(), io::Error::from_raw_os_error(code).kind());
+                assert_eq!(
+                    error.to_string(),
+                    format!("{operation}: {}", io::Error::from_raw_os_error(code))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_does_not_retry_other_errors() {
+        for code in [2, 5, 112] {
+            let mut attempts = 0;
+            let error = acquire_lifecycle_lock::<()>(
+                "private runtime lifecycle lock",
+                || {
+                    attempts += 1;
+                    Err(io::Error::from_raw_os_error(code))
+                },
+                || Duration::ZERO,
+                |_| panic!("unrelated errors must not wait"),
+            )
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "private runtime lifecycle lock: {}",
+                    io::Error::from_raw_os_error(code)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_bounds_backoff_by_remaining_time() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut attempts = 0;
+        let error = acquire_lifecycle_lock::<()>(
+            "privileged runtime lifecycle lock",
+            || {
+                attempts += 1;
+                elapsed.set(elapsed.get() + Duration::from_millis(9990));
+                Err(io::Error::from_raw_os_error(32))
+            },
+            || elapsed.get(),
+            |delay| {
+                assert_eq!(delay, Duration::from_millis(10));
+                elapsed.set(elapsed.get() + delay);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(error
+            .to_string()
+            .starts_with("privileged runtime lifecycle lock:"));
+    }
+
+    #[test]
+    fn lifecycle_lock_does_not_open_again_after_sleep_crosses_deadline() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut attempts = 0;
+        let error = acquire_lifecycle_lock::<()>(
+            "private runtime lifecycle lock",
+            || {
+                attempts += 1;
+                elapsed.set(Duration::from_millis(9990));
+                Err(io::Error::from_raw_os_error(32))
+            },
+            || elapsed.get(),
+            |delay| elapsed.set(elapsed.get() + delay + Duration::from_millis(1)),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.kind(), io::Error::from_raw_os_error(32).kind());
+    }
+
+    #[test]
+    fn runtime_root_pin_blocks_directory_retirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-root");
+        fs::create_dir(&root).unwrap();
+        let pin = open_direct_directory(&root).unwrap();
+        let second = open_direct_directory(&root).unwrap();
+        assert_eq!(
+            directory_identity(&pin).unwrap(),
+            directory_identity(&second).unwrap()
+        );
+        drop(second);
+        assert!(fs::remove_dir(&root).is_err());
+        drop(pin);
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn pid_root_without_lease_is_reported_for_later_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("private-runtime");
+        fs::create_dir(&parent).unwrap();
+        let current = parent.join("current");
+        fs::create_dir(&current).unwrap();
+        let abandoned = parent.join("12345");
+        fs::create_dir(&abandoned).unwrap();
+
+        let mut report = GenerationReport::default();
+        maintain_sibling_roots(
+            &current,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+            &mut report,
+        );
+
+        assert!(report
+            .overdue
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no lifecycle lease")));
+    }
 
     struct NoLeftovers;
 
@@ -1504,6 +2381,350 @@ mod tests {
                 .unwrap();
             second.cleanup_ticket().cleanup_after_proven_exit().unwrap();
         }
+    }
+
+    #[test]
+    fn a_new_process_root_reclaims_proven_orphaned_sibling_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let stale_root = temp.path().join("101");
+        let stale = RuntimeGeneration::prepare(
+            &stale_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        drop(stale);
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_process_root_reclaims_marked_generations_from_the_legacy_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        let stale = RuntimeGeneration::prepare(
+            &runtime_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        drop(stale);
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_process_root_migrates_unmarked_legacy_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        let stale = RuntimeGeneration::prepare(
+            &runtime_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        fs::remove_file(stale_generation.join(GENERATION_MARKER)).unwrap();
+        let generation = stale.generation.clone();
+        drop(stale);
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(stale_generation.exists());
+        assert_eq!(
+            marker_status(
+                &stale_generation,
+                RuntimeGenerationKind::RawPrivate,
+                &generation
+            )
+            .unwrap(),
+            MarkerStatus::Matches
+        );
+        assert!(current.report().overdue.is_some());
+        assert!(current_boot_contains(
+            &open_boot_registry(RuntimeGenerationKind::RawPrivate).unwrap(),
+            &generation
+        )
+        .unwrap());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_process_root_preserves_active_generations_from_the_legacy_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        let active = RuntimeGeneration::prepare(
+            &runtime_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        active.expect_browser().unwrap();
+        active.record_browser_process(BROWSER).unwrap();
+        fs::write(active.root().join("owned-data"), b"private").unwrap();
+        let active_generation = active.root().to_owned();
+        let cleanup = active.cleanup_ticket();
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(active_generation.exists());
+        assert_eq!(
+            fs::read(active_generation.join("owned-data")).unwrap(),
+            b"private"
+        );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+
+        drop(active);
+        cleanup.cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn legacy_generation_scan_stops_at_its_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(runtime_root.join(LEASE_FILE))
+            .unwrap();
+        let mut generations = Vec::new();
+        for _ in 0..=MAX_TOTAL_GENERATIONS {
+            let generation = ProfileId::generate().to_string();
+            let path = runtime_root.join(&generation);
+            fs::create_dir(&path).unwrap();
+            write_generation_marker(&path, RuntimeGenerationKind::RawPrivate, &generation).unwrap();
+            generations.push(path);
+        }
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(current.report().overdue.is_some());
+        assert!(generations.iter().any(|generation| generation.exists()));
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn sibling_root_scan_leaves_active_process_generations_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = RuntimeGeneration::prepare(
+            &temp.path().join("101"),
+            RuntimeGenerationKind::Privileged,
+            &NoLeftovers,
+        )
+        .unwrap();
+        active.expect_browser().unwrap();
+        active.record_browser_process(BROWSER).unwrap();
+        fs::write(active.root().join("owned-data"), b"private").unwrap();
+        let active_generation = active.root().to_owned();
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::Privileged,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(active_generation.exists());
+        assert_eq!(
+            fs::read(active_generation.join("owned-data")).unwrap(),
+            b"private"
+        );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+        active.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn sibling_root_scan_ignores_unmarked_numeric_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let unrelated_root = temp.path().join("101");
+        fs::create_dir(&unrelated_root).unwrap();
+        fs::write(unrelated_root.join(LEASE_FILE), b"").unwrap();
+        let unrelated_generation = unrelated_root.join(ProfileId::generate().to_string());
+        fs::create_dir(&unrelated_generation).unwrap();
+        fs::write(unrelated_generation.join("owned-data"), b"preserve").unwrap();
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(unrelated_generation.join("owned-data")).unwrap(),
+            b"preserve"
+        );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn empty_pid_roots_do_not_hide_later_orphans_or_raise_overdue() {
+        let temp = tempfile::tempdir().unwrap();
+        let stale = RuntimeGeneration::prepare(
+            &temp.path().join("999999"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        drop(stale);
+
+        let empty_roots = (1000..(1000 + MAX_TOTAL_GENERATIONS as u32 + 1))
+            .map(|pid| temp.path().join(pid.to_string()))
+            .collect::<Vec<_>>();
+        for root in &empty_roots {
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join(LEASE_FILE), b"").unwrap();
+        }
+        assert!(empty_roots.iter().all(|root| root.exists()));
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("2000000"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        assert!(empty_roots.iter().all(|root| !root.exists()));
+        assert!(current.report().overdue.is_none());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn incomplete_pid_root_inspection_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_TOTAL_GENERATIONS {
+            fs::write(temp.path().join(format!("entry-{index}")), b"").unwrap();
+        }
+        assert!(inspect_pid_root(temp.path(), RuntimeGenerationKind::RawPrivate).is_err());
+    }
+
+    #[test]
+    fn pid_root_lease_does_not_count_toward_generation_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join(LEASE_FILE), b"").unwrap();
+        for _ in 0..MAX_TOTAL_GENERATIONS {
+            let generation = ProfileId::generate().to_string();
+            let path = temp.path().join(&generation);
+            fs::create_dir(&path).unwrap();
+            write_generation_marker(&path, RuntimeGenerationKind::RawPrivate, &generation).unwrap();
+        }
+        assert!(matches!(
+            inspect_pid_root(temp.path(), RuntimeGenerationKind::RawPrivate),
+            Ok(PidRootInspection::Owned)
+        ));
+        let generation = ProfileId::generate().to_string();
+        let path = temp.path().join(&generation);
+        fs::create_dir(&path).unwrap();
+        write_generation_marker(&path, RuntimeGenerationKind::RawPrivate, &generation).unwrap();
+        assert!(inspect_pid_root(temp.path(), RuntimeGenerationKind::RawPrivate).is_err());
+    }
+
+    #[test]
+    fn pid_root_maintenance_keeps_unmarked_children_and_reports_sibling_reclamation() {
+        let temp = tempfile::tempdir().unwrap();
+        let stale_root = temp.path().join("101");
+        let stale = RuntimeGeneration::prepare(
+            &stale_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        let stale_name = stale.generation.clone();
+        drop(stale);
+
+        let unmarked_name = ProfileId::generate().to_string();
+        let unmarked = stale_root.join(&unmarked_name);
+        fs::create_dir(&unmarked).unwrap();
+        fs::write(unmarked.join("unrelated-data"), b"preserve").unwrap();
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        assert_eq!(
+            fs::read(unmarked.join("unrelated-data")).unwrap(),
+            b"preserve"
+        );
+        assert!(!unmarked.join(GENERATION_MARKER).exists());
+        assert!(current.report().reclaimed_after_exit.contains(&stale_name));
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
     }
 
     #[test]

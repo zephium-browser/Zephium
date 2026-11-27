@@ -492,7 +492,7 @@ fn remove_one_profile_directory(root: &Path, profile: ProfileId) -> bool {
 /// Exercise exact root-removal identity and durability behavior independently
 /// of a platform runtime manager. Production profile erasure deletes only
 /// typed profile children; Windows runtime-generation roots are now owned by
-/// `zephium_core::webview2::RuntimeGeneration` and use its provenance gate.
+/// `zephium_engine::RuntimeGeneration` and use its provenance gate.
 #[cfg(test)]
 pub(crate) fn remove_owned_root_once(root: &Path) -> io::Result<bool> {
     match direct_directory_identity(root) {

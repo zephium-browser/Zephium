@@ -8,13 +8,20 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const MARKER: &str = ".startup-recovery";
 const LOCK: &str = ".startup-recovery-lock";
-const MAGIC: &[u8; 4] = b"ZST\x01";
-const RECORD_BYTES: usize = 29;
+const ACTIVE_PREFIX: &str = ".startup-recovery-active-";
+const RETIRED_PREFIX: &str = ".startup-recovery-retired-";
+const PENDING_RECOVERY: &str = ".startup-recovery-pending";
+const MAGIC_V1: &[u8; 4] = b"ZST\x01";
+const MAGIC_V2: &[u8; 4] = b"ZST\x02";
+const MAGIC: &[u8; 4] = b"ZST\x03";
+const V1_RECORD_BYTES: usize = 29;
+const RECORD_BYTES: usize = 37;
 const INCOMPLETE_LIMIT: u8 = 2;
+const MAX_ACTIVE_STARTS: usize = 64;
 const MAX_DAMAGED_MARKER_BYTES: usize = 4 * 1024;
 const MAX_PRESERVED_MARKERS: usize = 8;
 
@@ -22,27 +29,56 @@ const MAX_PRESERVED_MARKERS: usize = 8;
 struct Record {
     generation: u64,
     nonce: [u8; 16],
+    wave: u64,
     incomplete: u8,
+    successful: bool,
 }
 
 impl Record {
-    fn decode(bytes: [u8; RECORD_BYTES]) -> io::Result<Self> {
+    fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let (wave, incomplete, successful) = match bytes.len() {
+            V1_RECORD_BYTES if bytes.get(..4) == Some(MAGIC_V1.as_slice()) => (None, 28, false),
+            RECORD_BYTES if bytes.get(..4) == Some(MAGIC_V2.as_slice()) => (
+                Some(u64::from_le_bytes(
+                    bytes[28..36].try_into().map_err(|_| invalid())?,
+                )),
+                36,
+                false,
+            ),
+            RECORD_BYTES if bytes.get(..4) == Some(MAGIC.as_slice()) => (
+                Some(u64::from_le_bytes(
+                    bytes[28..36].try_into().map_err(|_| invalid())?,
+                )),
+                36,
+                bytes[36] & 0x80 != 0,
+            ),
+            _ => return Err(invalid()),
+        };
         let mut generation = [0; 8];
         generation.copy_from_slice(&bytes[4..12]);
         let generation = u64::from_le_bytes(generation);
         let mut nonce = [0; 16];
         nonce.copy_from_slice(&bytes[12..28]);
-        if &bytes[..4] != MAGIC
-            || generation == 0
+        let wave = wave.unwrap_or(generation);
+        let incomplete = if successful {
+            bytes[incomplete] & 0x7f
+        } else {
+            bytes[incomplete]
+        };
+        if generation == 0
             || nonce == [0; 16]
-            || bytes[28] > INCOMPLETE_LIMIT
+            || wave == 0
+            || incomplete > INCOMPLETE_LIMIT
+            || (successful && incomplete != 0)
         {
             return Err(invalid());
         }
         Ok(Self {
             generation,
             nonce,
-            incomplete: bytes[28],
+            wave,
+            incomplete,
+            successful,
         })
     }
 
@@ -51,7 +87,8 @@ impl Record {
         bytes[..4].copy_from_slice(MAGIC);
         bytes[4..12].copy_from_slice(&self.generation.to_le_bytes());
         bytes[12..28].copy_from_slice(&self.nonce);
-        bytes[28] = self.incomplete;
+        bytes[28..36].copy_from_slice(&self.wave.to_le_bytes());
+        bytes[36] = self.incomplete | if self.successful { 0x80 } else { 0 };
         bytes
     }
 }
@@ -60,6 +97,72 @@ struct Root {
     path: PathBuf,
     directory: File,
     identity: Identity,
+}
+
+struct ActiveStart {
+    file: Mutex<Option<File>>,
+    path: PathBuf,
+    wave: u64,
+}
+
+pub(crate) struct RecoveryGate(File);
+
+impl Drop for RecoveryGate {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+pub(crate) fn acquire_recovery_gate(data_dir: &Path) -> io::Result<RecoveryGate> {
+    let root = Root::open(data_dir)?;
+    let path = root.path.join(PENDING_RECOVERY);
+    let file = match create_recovery_gate(&path) {
+        Ok(file) => {
+            file.sync_all()?;
+            sync_directory(&root.directory)?;
+            file
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => open(&path, false, true)?,
+        Err(error) => return Err(error),
+    };
+    let expected = identity(&file, false)?;
+    file.try_lock().map_err(io::Error::from)?;
+    if identity(&open(&path, false, true)?, false)? != expected {
+        return Err(invalid());
+    }
+    root.verify()?;
+    Ok(RecoveryGate(file))
+}
+
+pub(crate) fn wait_for_recovery(data_dir: &Path) -> io::Result<()> {
+    let root = Root::open(data_dir)?;
+    let path = root.path.join(PENDING_RECOVERY);
+    let file = match open(&path, false, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let expected = identity(&file, false)?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => {
+                if identity(&open(&path, false, true)?, false)? != expected {
+                    return Err(invalid());
+                }
+                file.unlock()?;
+                root.verify()?;
+                return Ok(());
+            }
+            Err(error) => {
+                let error = io::Error::from(error);
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                root.verify()?;
+            }
+        }
+    }
 }
 
 impl Root {
@@ -90,6 +193,14 @@ impl Root {
     }
 
     fn lock(&self) -> io::Result<File> {
+        self.lock_with_wait(false)
+    }
+
+    fn lock_for_report(&self) -> io::Result<File> {
+        self.lock_with_wait(true)
+    }
+
+    fn lock_with_wait(&self, wait: bool) -> io::Result<File> {
         self.verify()?;
         let path = self.path.join(LOCK);
         let file = match create_new(&path) {
@@ -105,7 +216,18 @@ impl Root {
         if file.metadata()?.len() != 0 {
             return Err(invalid());
         }
-        file.try_lock().map_err(io::Error::from)?;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(error) => {
+                    let error = io::Error::from(error);
+                    if error.kind() != io::ErrorKind::WouldBlock || !wait {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
         // A replaced lock must never split cooperating owners into two locks.
         if identity(&open(&path, false, true)?, false)? != expected {
             return Err(invalid());
@@ -118,7 +240,7 @@ impl Root {
         let Some(bytes) = self.read_bytes(MARKER, RECORD_BYTES)? else {
             return Ok(None);
         };
-        Record::decode(bytes.try_into().map_err(|_| invalid())?).map(Some)
+        Record::decode(&bytes).map(Some)
     }
 
     fn read_bytes(&self, name: &str, limit: usize) -> io::Result<Option<Vec<u8>>> {
@@ -139,6 +261,159 @@ impl Root {
             return Err(invalid());
         }
         Ok(Some(bytes))
+    }
+
+    fn active_waves(&self) -> io::Result<Vec<u64>> {
+        self.verify()?;
+        let mut waves = Vec::new();
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(wave) = active_wave(name)? else {
+                continue;
+            };
+            let path = entry.path();
+            let file = open(&path, false, true)?;
+            match file.try_lock() {
+                Ok(()) => {
+                    file.unlock()?;
+                    drop(file);
+                    fs::remove_file(path)?;
+                }
+                Err(error) => {
+                    let error = io::Error::from(error);
+                    if error.kind() != io::ErrorKind::WouldBlock {
+                        return Err(error);
+                    }
+                    if waves.len() >= MAX_ACTIVE_STARTS {
+                        return Err(invalid());
+                    }
+                    waves.push(wave);
+                }
+            }
+        }
+        waves.sort_unstable();
+        waves.dedup();
+        Ok(waves)
+    }
+
+    fn create_active(&self, wave: u64, nonce: [u8; 16]) -> io::Result<ActiveStart> {
+        self.verify()?;
+        let path = self.path.join(active_name(wave, nonce));
+        let file = create_active(&path)?;
+        identity(&file, false)?;
+        file.try_lock().map_err(io::Error::from)?;
+        file.sync_all()?;
+        sync_directory(&self.directory)?;
+        Ok(ActiveStart {
+            file: Mutex::new(Some(file)),
+            path,
+            wave,
+        })
+    }
+
+    fn clear_active_start(&self, active: &ActiveStart) -> io::Result<()> {
+        self.verify()?;
+        if active.path.parent() != Some(self.path.as_path())
+            || active
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| active_wave(name).ok())
+                != Some(Some(active.wave))
+        {
+            return Err(invalid());
+        }
+        let mut active_file = active.file.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(lease_file) = active_file.as_ref() else {
+            return Ok(());
+        };
+        let path_file = match open(&active.path, false, true) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if identity(&path_file, false)? != identity(lease_file, false)? {
+            return Err(invalid());
+        }
+        drop(path_file);
+        match fs::remove_file(&active.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        sync_directory(&self.directory)?;
+        active_file.take();
+        Ok(())
+    }
+
+    fn has_active_start(&self, active: &ActiveStart) -> io::Result<bool> {
+        self.verify()?;
+        if active.path.parent() != Some(self.path.as_path()) {
+            return Err(invalid());
+        }
+        let active_file = active.file.lock().unwrap_or_else(|e| e.into_inner());
+        if active_file.is_none() {
+            return Ok(false);
+        }
+        let file = match open(&active.path, false, true) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                file.unlock()?;
+                Ok(false)
+            }
+            Err(error) => {
+                let error = io::Error::from(error);
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    Ok(true)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn clear_active_wave(&self, wave: u64) -> io::Result<()> {
+        self.verify()?;
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if active_wave(&name)? == Some(wave) {
+                let metadata = fs::symlink_metadata(entry.path())?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(invalid());
+                }
+                let retired_name = format!(
+                    "{RETIRED_PREFIX}{}",
+                    name.strip_prefix(ACTIVE_PREFIX).ok_or_else(invalid)?
+                );
+                let retired_path = self.path.join(retired_name);
+                fs::rename(entry.path(), &retired_path)?;
+                match fs::remove_file(retired_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        sync_directory(&self.directory)
+    }
+
+    fn retire_active_waves(&self) -> io::Result<()> {
+        for wave in self.active_waves()? {
+            self.clear_active_wave(wave)?;
+        }
+        Ok(())
     }
 
     fn write(&self, record: Record) -> io::Result<()> {
@@ -208,6 +483,7 @@ pub(crate) struct StartupAttempt {
     root: Arc<Root>,
     generation: u64,
     nonce: [u8; 16],
+    active: Arc<ActiveStart>,
     recovery: bool,
 }
 
@@ -219,19 +495,37 @@ pub(crate) fn begin(data_dir: &Path) -> io::Result<StartupAttempt> {
     let previous = root.read()?.unwrap_or(Record {
         generation: 0,
         nonce: [0; 16],
+        wave: 0,
         incomplete: 0,
+        successful: false,
     });
+    let live_waves = root.active_waves()?;
     let generation = previous.generation.checked_add(1).ok_or_else(invalid)?;
-    let current = fresh_record(
-        generation,
-        previous.incomplete.saturating_add(1).min(INCOMPLETE_LIMIT),
-    )?;
+    let wave = live_waves
+        .iter()
+        .copied()
+        .find(|wave| *wave == previous.wave)
+        .or_else(|| live_waves.first().copied())
+        .unwrap_or(generation);
+    let incomplete = if !live_waves.is_empty() {
+        previous.incomplete
+    } else if previous.successful {
+        1
+    } else {
+        previous.incomplete.saturating_add(1).min(INCOMPLETE_LIMIT)
+    };
+    let mut current = fresh_record(generation, wave, incomplete)?;
+    current.successful = !live_waves.is_empty() && previous.successful;
+    let active = Arc::new(root.create_active(wave, current.nonce)?);
     root.write(current)?;
     Ok(StartupAttempt {
         root,
         generation,
         nonce: current.nonce,
-        recovery: previous.incomplete >= INCOMPLETE_LIMIT,
+        active,
+        recovery: live_waves.is_empty()
+            && !previous.successful
+            && previous.incomplete >= INCOMPLETE_LIMIT,
     })
 }
 
@@ -255,6 +549,13 @@ pub(crate) fn marker_recovery_available(data_dir: &Path, error: &io::Error) -> b
 /// Call only after the person explicitly chose preserved-session recovery.
 /// Keeps exact bounded damaged bytes without replacing any earlier evidence.
 pub(crate) fn recover_marker_after_choice(data_dir: &Path) -> io::Result<StartupAttempt> {
+    recover_marker_after_choice_with(data_dir, Root::replace_record)
+}
+
+fn recover_marker_after_choice_with(
+    data_dir: &Path,
+    publish_record: impl FnOnce(&Root, Record) -> io::Result<()>,
+) -> io::Result<StartupAttempt> {
     let root = Arc::new(Root::open(data_dir)?);
     let _lock = root.lock()?;
     let bytes = root
@@ -265,23 +566,25 @@ pub(crate) fn recover_marker_after_choice(data_dir: &Path) -> io::Result<Startup
     if root.read_bytes(MARKER, MAX_DAMAGED_MARKER_BYTES)? != Some(bytes) {
         return Err(invalid());
     }
-    let current = fresh_record(1, 1)?;
-    root.replace_record(current)?;
+    let wave = fresh_wave()?;
+    root.retire_active_waves()?;
+    let current = fresh_record(1, wave, 1)?;
+    let active = Arc::new(root.create_active(wave, current.nonce)?);
+    publish_record(&root, current)?;
     Ok(StartupAttempt {
         root,
         generation: current.generation,
         nonce: current.nonce,
+        active,
         recovery: false,
     })
 }
 
 fn damaged(bytes: &[u8]) -> bool {
-    <[u8; RECORD_BYTES]>::try_from(bytes)
-        .ok()
-        .is_none_or(|bytes| Record::decode(bytes).is_err())
+    Record::decode(bytes).is_err()
 }
 
-fn fresh_record(generation: u64, incomplete: u8) -> io::Result<Record> {
+fn fresh_record(generation: u64, wave: u64, incomplete: u8) -> io::Result<Record> {
     // A removed/recreated marker must not reuse an old callback's identity.
     let mut nonce = [0; 16];
     getrandom::fill(&mut nonce).map_err(|_| io::Error::other("startup identity unavailable"))?;
@@ -291,8 +594,21 @@ fn fresh_record(generation: u64, incomplete: u8) -> io::Result<Record> {
     Ok(Record {
         generation,
         nonce,
+        wave,
         incomplete,
+        successful: false,
     })
+}
+
+fn fresh_wave() -> io::Result<u64> {
+    loop {
+        let mut bytes = [0; 8];
+        getrandom::fill(&mut bytes).map_err(|_| io::Error::other("startup wave unavailable"))?;
+        let wave = u64::from_le_bytes(bytes);
+        if wave != 0 {
+            return Ok(wave);
+        }
+    }
 }
 
 impl StartupAttempt {
@@ -312,22 +628,50 @@ impl StartupAttempt {
     }
 
     fn clear(&self) -> io::Result<bool> {
-        let _lock = self.root.lock()?;
-        let Some(current) = self.root.read()? else {
+        let _lock = self.root.lock_for_report()?;
+        let Some(mut current) = self.root.read()? else {
             return Ok(false);
         };
-        if current.generation != self.generation || current.nonce != self.nonce {
+        if current.wave != self.active.wave {
             return Ok(false);
         }
-        if current.incomplete != 0 {
-            self.root.write(Record {
-                generation: self.generation,
-                nonce: self.nonce,
-                incomplete: 0,
-            })?;
+        current.incomplete = 0;
+        current.successful = true;
+        if (current.generation != self.generation || current.nonce != self.nonce)
+            && !self.root.has_active_start(&self.active)?
+        {
+            return Ok(false);
         }
+        if self.active.wave == 0 {
+            return Ok(false);
+        }
+        self.root.write(current)?;
+        self.root.clear_active_start(&self.active)?;
         Ok(true)
     }
+}
+
+fn active_name(wave: u64, nonce: [u8; 16]) -> String {
+    let mut name = format!("{ACTIVE_PREFIX}{wave}-");
+    for byte in nonce {
+        use std::fmt::Write as _;
+        let _ = write!(name, "{byte:02x}");
+    }
+    name
+}
+
+fn active_wave(name: &str) -> io::Result<Option<u64>> {
+    let Some(suffix) = name.strip_prefix(ACTIVE_PREFIX) else {
+        return Ok(None);
+    };
+    let Some((wave, nonce)) = suffix.split_once('-') else {
+        return Err(invalid());
+    };
+    let wave = wave.parse::<u64>().map_err(|_| invalid())?;
+    if wave == 0 || nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    Ok(Some(wave))
 }
 
 fn invalid() -> io::Error {
@@ -341,6 +685,38 @@ fn create_new(path: &Path) -> io::Result<File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn create_active(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(7);
+    }
+    options.open(path)
+}
+
+fn create_recovery_gate(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(7);
     }
     options.open(path)
 }
@@ -480,8 +856,32 @@ mod tests {
         Record {
             generation,
             nonce: [1; 16],
+            wave: generation,
             incomplete,
+            successful: false,
         }
+    }
+
+    #[test]
+    fn older_records_migrate_with_their_generation_as_the_wave() {
+        let mut bytes = [0; V1_RECORD_BYTES];
+        bytes[..4].copy_from_slice(MAGIC_V1);
+        bytes[4..12].copy_from_slice(&9u64.to_le_bytes());
+        bytes[12..28].copy_from_slice(&[7; 16]);
+        bytes[28] = 1;
+        let decoded = Record::decode(&bytes).unwrap();
+        assert_eq!(decoded.wave, 9);
+        assert_eq!(decoded.incomplete, 1);
+        assert!(!decoded.successful);
+        assert_eq!(&decoded.encode()[..4], MAGIC);
+
+        let mut version_two = record(9, 1).encode();
+        version_two[..4].copy_from_slice(MAGIC_V2);
+        version_two[36] = 1;
+        let decoded = Record::decode(&version_two).unwrap();
+        assert_eq!(decoded.wave, 9);
+        assert_eq!(decoded.incomplete, 1);
+        assert!(!decoded.successful);
     }
 
     #[test]
@@ -489,14 +889,48 @@ mod tests {
         let root = tempdir();
         let first = begin(root.path()).unwrap();
         assert!(!first.requires_recovery());
+        drop(first);
         let second = begin(root.path()).unwrap();
         assert!(!second.requires_recovery());
+        drop(second);
         let third = begin(root.path()).unwrap();
         assert!(third.requires_recovery());
+        drop(third);
         for _ in 0..4 {
-            assert!(begin(root.path()).unwrap().requires_recovery());
+            let attempt = begin(root.path()).unwrap();
+            assert!(attempt.requires_recovery());
+            drop(attempt);
         }
-        assert_eq!(third.root.read().unwrap().unwrap().incomplete, 2);
+        assert_eq!(
+            begin(root.path())
+                .unwrap()
+                .root
+                .read()
+                .unwrap()
+                .unwrap()
+                .incomplete,
+            2
+        );
+    }
+
+    #[test]
+    fn joining_startup_waits_until_recovery_gate_is_released() {
+        let root = tempdir();
+        let gate = acquire_recovery_gate(root.path()).unwrap();
+        let path = root.path().to_path_buf();
+        let (sent, received) = std::sync::mpsc::channel();
+        let joiner = std::thread::spawn(move || {
+            wait_for_recovery(&path).unwrap();
+            sent.send(()).unwrap();
+        });
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(gate);
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        joiner.join().unwrap();
     }
 
     #[test]
@@ -509,8 +943,12 @@ mod tests {
         assert!(healthy.generation > early.generation);
         assert!(healthy.mark_healthy().unwrap());
         assert!(healthy.mark_healthy().unwrap());
-        assert!(!begin(root.path()).unwrap().requires_recovery());
-        drop(begin(root.path()).unwrap());
+        let first_incomplete = begin(root.path()).unwrap();
+        assert!(!first_incomplete.requires_recovery());
+        drop(first_incomplete);
+        let second_incomplete = begin(root.path()).unwrap();
+        assert!(!second_incomplete.requires_recovery());
+        drop(second_incomplete);
         let recovery = begin(root.path()).unwrap();
         assert!(recovery.requires_recovery());
         assert!(recovery.mark_healthy().unwrap());
@@ -518,15 +956,89 @@ mod tests {
     }
 
     #[test]
-    fn delayed_healthy_and_clean_callbacks_cannot_clear_a_successor() {
+    fn overlapping_healthy_attempt_clears_its_wave() {
         let root = tempdir();
         let old = begin(root.path()).unwrap();
         let delayed = old.clone();
         let current = begin(root.path()).unwrap();
-        assert!(!old.mark_healthy().unwrap());
+        assert!(old.mark_healthy().unwrap());
         assert!(!delayed.mark_clean().unwrap());
-        assert_eq!(current.root.read().unwrap().unwrap().incomplete, 2);
-        assert!(begin(root.path()).unwrap().requires_recovery());
+        assert_eq!(current.root.read().unwrap().unwrap().incomplete, 0);
+        drop(old);
+        drop(delayed);
+        drop(current);
+        let next = begin(root.path()).unwrap();
+        assert!(!next.requires_recovery());
+    }
+
+    #[test]
+    fn overlapping_starts_do_not_consume_the_failure_budget() {
+        let root = tempdir();
+        let mut attempts = Vec::new();
+        for _ in 0..16 {
+            let attempt = begin(root.path()).unwrap();
+            assert!(!attempt.requires_recovery());
+            attempts.push(attempt);
+        }
+        assert_eq!(attempts[0].root.read().unwrap().unwrap().incomplete, 1);
+        drop(attempts);
+        let after_failed_wave = begin(root.path()).unwrap();
+        assert!(!after_failed_wave.requires_recovery());
+        assert_eq!(
+            after_failed_wave.root.read().unwrap().unwrap().incomplete,
+            2
+        );
+        drop(after_failed_wave);
+        let recovery_owner = begin(root.path()).unwrap();
+        assert!(recovery_owner.requires_recovery());
+        let recovery_joiner = begin(root.path()).unwrap();
+        assert!(!recovery_joiner.requires_recovery());
+    }
+
+    #[test]
+    fn healthy_start_keeps_overlapping_start_leases_visible() {
+        let root = tempdir();
+        let first = begin(root.path()).unwrap();
+        let second = begin(root.path()).unwrap();
+        let second_path = second.active.path.clone();
+        assert!(first.mark_healthy().unwrap());
+        assert!(second_path.exists());
+        let later = begin(root.path()).unwrap();
+        assert!(!later.requires_recovery());
+        assert_eq!(later.active.wave, second.active.wave);
+        assert_eq!(later.root.read().unwrap().unwrap().incomplete, 0);
+        drop(second);
+        drop(later);
+        let after_successful_wave = begin(root.path()).unwrap();
+        assert!(!after_successful_wave.requires_recovery());
+        assert_eq!(
+            after_successful_wave
+                .root
+                .read()
+                .unwrap()
+                .unwrap()
+                .incomplete,
+            1
+        );
+    }
+
+    #[test]
+    fn health_report_waits_for_a_marker_transaction() {
+        let root = tempdir();
+        let attempt = begin(root.path()).unwrap();
+        let blocker = Root::open(root.path()).unwrap();
+        let lock = blocker.lock().unwrap();
+        let report = attempt.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            report.mark_healthy()
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(!thread.is_finished());
+        drop(lock);
+        assert!(thread.join().unwrap().unwrap());
     }
 
     #[test]
@@ -545,7 +1057,7 @@ mod tests {
         let attempt = begin(root.path()).unwrap();
         let path = root.path().join(MARKER);
         let mut invalid_count = record(3, 2).encode();
-        invalid_count[28] = 3;
+        invalid_count[36] = 3;
         for bytes in [
             vec![],
             vec![0; RECORD_BYTES],
@@ -573,14 +1085,13 @@ mod tests {
     }
 
     #[test]
-    fn an_occupied_lock_refuses_instead_of_racing_generation_updates() {
+    fn an_occupied_lock_refuses_admission_and_recovery_marker_updates() {
         let root = tempdir();
         let attempt = begin(root.path()).unwrap();
         let _held = attempt.root.lock().unwrap();
         let error = begin(root.path()).err().unwrap();
         assert!(!marker_recovery_available(root.path(), &error));
         assert!(recover_marker_after_choice(root.path()).is_err());
-        assert!(attempt.mark_healthy().is_err());
         assert_eq!(attempt.root.read().unwrap().unwrap().incomplete, 1);
     }
 
@@ -591,8 +1102,8 @@ mod tests {
         fs::remove_file(root.path().join(MARKER)).unwrap();
         let successor = begin(root.path()).unwrap();
         assert_eq!(old.generation, successor.generation);
-        assert!(!old.mark_clean().unwrap());
-        assert_eq!(successor.root.read().unwrap().unwrap().incomplete, 1);
+        assert!(old.mark_clean().unwrap());
+        assert_eq!(successor.root.read().unwrap().unwrap().incomplete, 0);
     }
 
     #[test]
@@ -611,9 +1122,42 @@ mod tests {
             bytes
         );
         assert!(!old.mark_clean().unwrap());
+        let joined = begin(root.path()).unwrap();
+        assert!(!joined.requires_recovery());
         assert_eq!(recovered.root.read().unwrap().unwrap().incomplete, 1);
         assert!(!marker_recovery_available(root.path(), &error));
         assert!(recover_marker_after_choice(root.path()).is_err());
+    }
+
+    #[test]
+    fn failed_marker_repair_keeps_recovery_available() {
+        let root = tempdir();
+        let previous = begin(root.path()).unwrap();
+        let damaged_bytes = b"damaged startup marker";
+        fs::write(root.path().join(MARKER), damaged_bytes).unwrap();
+        let error = begin(root.path()).err().unwrap();
+        let result = recover_marker_after_choice_with(root.path(), |_, _| {
+            Err(io::Error::other("injected marker publication failure"))
+        });
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "injected marker publication failure"
+        );
+        assert_eq!(fs::read(root.path().join(MARKER)).unwrap(), damaged_bytes);
+        assert!(fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".startup-recovery-preserved-")
+                && fs::read(entry.path()).is_ok_and(|bytes| bytes == damaged_bytes)));
+        assert!(marker_recovery_available(root.path(), &error));
+        let recovered = recover_marker_after_choice(root.path()).unwrap();
+        assert!(!recovered.requires_recovery());
+        let joined = begin(root.path()).unwrap();
+        assert!(!joined.requires_recovery());
+        assert!(!previous.mark_clean().unwrap());
     }
 
     #[test]

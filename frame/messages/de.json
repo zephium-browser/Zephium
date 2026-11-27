@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Tasten drücken…",
   "launcher_shortcut_reset": "Zurücksetzen",
   "launcher_shortcut_ready": "Funktioniert in jeder App.",
+  "launcher_shortcut_owner_unavailable": "Nur eine Zephium-Instanz kann die Launcher-Tastenkombination gleichzeitig ändern.",
   "launcher_shortcut_unregistered": "Nicht aktiv: Möglicherweise nutzt eine andere App sie. Nimm eine andere auf.",
   "launcher_shortcut_invalid": "Diese Taste kann nicht für eine Tastenkombination verwendet werden.",
   "launcher_shortcut_needs_modifier": "Halte ⌘, ⌃ oder ⌥ zusammen mit der Taste, damit nichts getippt wird.",

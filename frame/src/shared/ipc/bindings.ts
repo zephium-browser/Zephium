@@ -499,6 +499,7 @@ export const commands = {
 	/**  The shortcut is registered and will open the launcher. */
 	registered: boolean,
 	editable: boolean,
+	ownership_available: boolean,
 	double_tap: DoubleTap,
 	double_tap_supported: boolean,
 	/**
@@ -516,6 +517,7 @@ export const commands = {
 	/**  The shortcut is registered and will open the launcher. */
 	registered: boolean,
 	editable: boolean,
+	ownership_available: boolean,
 	double_tap: DoubleTap,
 	double_tap_supported: boolean,
 	/**
@@ -1804,6 +1806,7 @@ export type LauncherTrigger = {
 	/**  The shortcut is registered and will open the launcher. */
 	registered: boolean,
 	editable: boolean,
+	ownership_available: boolean,
 	double_tap: DoubleTap,
 	double_tap_supported: boolean,
 	/**

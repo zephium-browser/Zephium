@@ -335,6 +335,7 @@ static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 )]
 pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
+    #[cfg(target_os = "windows")] private_runtime: crate::RuntimeGeneration,
     data_root: PathBuf,
     main_dispatch: crate::MainThreadDispatch,
     initial_user_content_generation: UserContentGeneration,
@@ -367,13 +368,6 @@ pub(crate) fn install(
     let private_scriptlet_root =
         crate::erasure::canonical_owned_root(&data_root.join("private-scriptlets"))
             .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
-    #[cfg(target_os = "windows")]
-    let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
-        &data_root.join("private-runtime"),
-        zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
-        &crate::platform::imp::WindowsLeftoverProcesses,
-    )
-    .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
     #[cfg(target_os = "windows")]
     for line in crate::platform::imp::generation_report_lines("private", private_runtime.report()) {
         eprintln!("{line}");
@@ -601,6 +595,13 @@ pub(crate) fn install(
         Ok::<(), String>(())
     })?;
     Ok(cleanup_advisory)
+}
+
+#[cfg(all(target_os = "windows", test))]
+fn private_runtime_root(data_root: &std::path::Path) -> PathBuf {
+    data_root
+        .join("private-runtime")
+        .join(std::process::id().to_string())
 }
 
 // WebView2 construction pumps the Windows message loop. A nested main-thread
@@ -1837,6 +1838,18 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn private_runtime_root_is_scoped_to_the_process_id() {
+        let root = private_runtime_root(std::path::Path::new("data"));
+        assert_eq!(
+            root,
+            std::path::Path::new("data")
+                .join("private-runtime")
+                .join(std::process::id().to_string())
+        );
+    }
+
     #[test]
     fn failed_windows_browser_exit_cleans_up_without_authorizing_clean_shutdown() {
         let native = include_str!("../platform/windows/mod.rs");
@@ -1958,11 +1971,23 @@ mod tests {
         let parent = RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(
             std::num::NonZeroIsize::new(1).unwrap(),
         ));
+        #[cfg(target_os = "windows")]
+        let private_runtime = crate::RuntimeGeneration::prepare(
+            &root
+                .path()
+                .join("private-runtime")
+                .join(std::process::id().to_string()),
+            crate::RuntimeGenerationKind::RawPrivate,
+            &crate::platform::imp::WindowsLeftoverProcesses,
+        )
+        .unwrap();
         let dispatch: crate::MainThreadDispatch = Arc::new(|_| panic!("no native dispatch"));
         let failure: Arc<dyn Fn(&'static str) + Send + Sync> =
             Arc::new(|reason| panic!("unexpected terminal failure: {reason}"));
         install(
             parent,
+            #[cfg(target_os = "windows")]
+            private_runtime,
             root.path().to_owned(),
             dispatch.clone(),
             UserContentGeneration::new(1).unwrap(),
