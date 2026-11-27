@@ -160,7 +160,13 @@
           <button
             type="button"
             role="radio"
-            tabindex={icon?.kind === "symbol" && icon.index === index ? 0 : -1}
+            tabindex={icon?.kind === "symbol"
+              ? icon.index === index
+                ? 0
+                : -1
+              : index === 0
+                ? 0
+                : -1}
             aria-checked={icon?.kind === "symbol" && icon.index === index}
             aria-label={`Icon ${index + 1}`}
             onclick={() => (icon = { kind: "symbol", index })}
