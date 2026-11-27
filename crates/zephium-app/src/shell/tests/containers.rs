@@ -75,3 +75,34 @@ fn container_recreation_uses_pending_navigation() {
         "https://first-load.example/"
     );
 }
+
+#[test]
+fn a_new_navigation_cancels_the_pending_container_recreation() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
+    let tab = active_id(&screen);
+    let created = shell.handle_operation(Command::Container(Box::new(ContainerCommand::Create {
+        name: "Pending".into(),
+        look: SpaceLook::default(),
+        spaces: SpaceAccess::Selected(vec![space]),
+    })));
+    assert_eq!(created.outcome, OperationOutcome::Applied);
+    let container = shell.containers.for_profile(profile).next().unwrap().id;
+    let _ = shell.items.navigate(tab, "https://first-load.example/");
+    let assigned =
+        shell.handle_operation(Command::Container(Box::new(ContainerCommand::AssignTab {
+            tab,
+            container: Some(container),
+        })));
+    assert_ne!(assigned.outcome, OperationOutcome::Rejected);
+    assert!(shell.container_recreates.contains_key(&tab));
+
+    let navigated = shell.handle_operation(Command::Navigate {
+        id: tab,
+        input: "https://new-target.example/".into(),
+    });
+    assert_ne!(navigated.outcome, OperationOutcome::Rejected);
+    assert!(!shell.container_recreates.contains_key(&tab));
+}

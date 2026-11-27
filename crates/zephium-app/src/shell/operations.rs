@@ -713,6 +713,7 @@ impl Shell {
             );
         }
         self.cancel_discard_probe(id);
+        self.container_recreates.remove(&id);
         let effects = self.items.navigate(id, &input);
         if effects.is_empty() {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
