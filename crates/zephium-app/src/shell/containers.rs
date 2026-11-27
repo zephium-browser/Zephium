@@ -103,10 +103,38 @@ impl Shell {
                 updated.name = name;
                 updated.look = look;
                 updated.spaces = self.canonical_access(spaces);
+                let revoked = self
+                    .items
+                    .container_assignments()
+                    .into_iter()
+                    .filter_map(|(tab, assigned, placement)| {
+                        if assigned != id {
+                            return None;
+                        }
+                        let space = match placement {
+                            zephium_core::item::Placement::Favorites { space }
+                            | zephium_core::item::Placement::Space { space, .. } => space,
+                            zephium_core::item::Placement::Mini { .. } => return None,
+                        };
+                        (!updated.available_in(space)).then_some(tab)
+                    })
+                    .collect::<Vec<_>>();
                 if !self.containers.replace(updated) {
                     return rejected(OperationReason::InvalidInput);
                 }
-                self.containers_changed(previous)
+                if !self.persist_containers() {
+                    self.containers = previous;
+                    return rejected(OperationReason::StoreAdmissionRejected);
+                }
+                let mut effects = Vec::new();
+                for tab in revoked {
+                    effects.extend(self.items.set_container(tab, None));
+                    self.schedule_container_recreate(tab, None);
+                }
+                let native = self.commit(effects);
+                self.schedule_persist();
+                self.project_items();
+                mutation_result(native)
             }
             ContainerCommand::RemoveFromSpace(id) => {
                 let Some(existing) = self.containers.get(id) else {

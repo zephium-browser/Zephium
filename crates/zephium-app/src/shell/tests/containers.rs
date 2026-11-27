@@ -49,6 +49,43 @@ fn assigning_a_container_is_denied_when_its_space_scope_excludes_the_tab() {
 }
 
 #[test]
+fn revoked_space_access_detaches_the_container_and_recreates_its_tabs() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "https://revoke.example/");
+    let created = shell.handle_operation(Command::Container(Box::new(ContainerCommand::Create {
+        name: "Temporary".into(),
+        look: SpaceLook::default(),
+        spaces: SpaceAccess::All,
+    })));
+    assert_eq!(created.outcome, OperationOutcome::Applied);
+    let container = shell.containers.for_profile(profile).next().unwrap().id;
+    let assigned =
+        shell.handle_operation(Command::Container(Box::new(ContainerCommand::AssignTab {
+            tab,
+            container: Some(container),
+        })));
+    assert_ne!(assigned.outcome, OperationOutcome::Rejected);
+
+    let updated = shell.handle_operation(Command::Container(Box::new(ContainerCommand::Update {
+        id: container,
+        name: "Temporary".into(),
+        look: SpaceLook::default(),
+        spaces: SpaceAccess::Selected(Vec::new()),
+    })));
+
+    assert_ne!(updated.outcome, OperationOutcome::Rejected);
+    assert!(!shell.containers.get(container).unwrap().available_in(space));
+    assert_eq!(shell.items.tab(tab).unwrap().container, None);
+    assert!(
+        shell.items.tab(tab).unwrap().has_view() || shell.container_recreates.contains_key(&tab)
+    );
+}
+
+#[test]
 fn container_recreation_uses_pending_navigation() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
