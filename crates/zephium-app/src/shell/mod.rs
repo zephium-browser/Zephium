@@ -251,6 +251,8 @@ pub struct Shell {
     #[cfg(feature = "work-execution")]
     retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
     profiles: Profiles,
+    startup_profile: Option<String>,
+    startup_profile_failed: bool,
     spaces: Spaces,
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
@@ -321,6 +323,7 @@ pub struct Shell {
     browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
+    browser_after_return_followups: std::collections::VecDeque<Command>,
     browser_return_ready: bool,
     /// Set while the window lays out for a return that a queued command is about to change.
     browser_return_hidden: bool,
@@ -529,6 +532,8 @@ impl Shell {
         } = ports;
         Self {
             profiles: Profiles::default(),
+            startup_profile: None,
+            startup_profile_failed: false,
             spaces: Spaces::default(),
             items: Items::default(),
             recently_closed: Vec::new(),
@@ -588,6 +593,7 @@ impl Shell {
             browser_page_projected: None,
             browser_return_revision: 0,
             browser_after_return: None,
+            browser_after_return_followups: std::collections::VecDeque::new(),
             browser_return_ready: false,
             browser_return_hidden: false,
             chrome_modal: false,
@@ -872,11 +878,39 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::OpenProfileAndExternal { name, urls } = &command {
+                    let mut completion = self.operation_open_profile_by_name(name);
+                    if matches!(
+                        completion.outcome,
+                        OperationOutcome::Rejected | OperationOutcome::NativeAdmissionFailed
+                    ) {
+                        (self.emit)(Projection::UiCommand("profile.open-failed".into()));
+                    } else {
+                        self.open_external(urls.clone());
+                    }
+                    completion.operation_id = operation_id;
+                    (self.emit)(Projection::OperationProcessed(completion));
+                    return;
+                }
+                let opens_profile = matches!(&command, Command::OpenProfileByName(_));
                 let mut completion = self.handle_operation(command);
+                if opens_profile
+                    && matches!(
+                        completion.outcome,
+                        OperationOutcome::Rejected | OperationOutcome::NativeAdmissionFailed
+                    )
+                {
+                    (self.emit)(Projection::UiCommand("profile.open-failed".into()));
+                }
                 completion.operation_id = operation_id;
                 (self.emit)(Projection::OperationProcessed(completion));
             }
             Command::Bootstrap => self.bootstrap(),
+            Command::SelectStartupProfile(name) => {
+                if !self.bootstrapped {
+                    self.startup_profile = zephium_core::profiles::profile_name(&name);
+                }
+            }
             Command::SetWebExtensions {
                 profile,
                 extensions,
@@ -944,6 +978,20 @@ impl Shell {
             }
             Command::SwitchProfile(profile) => {
                 let _ = self.operation_switch_profile(profile);
+            }
+            Command::OpenProfileByName(name) => {
+                let _ = self.operation_open_profile_by_name(&name);
+            }
+            Command::OpenProfileAndExternal { name, urls } => {
+                let disposition = self.operation_open_profile_by_name(&name);
+                if matches!(
+                    disposition.outcome,
+                    OperationOutcome::Rejected | OperationOutcome::NativeAdmissionFailed
+                ) {
+                    (self.emit)(Projection::UiCommand("profile.open-failed".into()));
+                } else {
+                    self.open_external(urls);
+                }
             }
             Command::RenameProfile { profile, name } => {
                 let _ = self.operation_rename_profile(profile, &name);

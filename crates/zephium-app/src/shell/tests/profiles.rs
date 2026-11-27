@@ -142,6 +142,22 @@ fn switching_shows_the_other_profile_and_returns_to_where_it_left() {
 }
 
 #[test]
+fn a_second_launch_selects_or_creates_the_requested_profile() {
+    let (mut shell, _, _, _) = browsed();
+    let default = window_profile(&shell);
+
+    let created = shell.handle_operation(Command::OpenProfileByName("Work".into()));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    let work = window_profile(&shell);
+    assert_ne!(work, default);
+    assert_eq!(shell.profiles.get(work).unwrap().name, "Work");
+
+    let selected = shell.handle_operation(Command::OpenProfileByName("Personal".into()));
+    assert_ne!(selected.outcome, OperationOutcome::Rejected);
+    assert_eq!(window_profile(&shell), default);
+}
+
+#[test]
 fn a_profile_tombstone_clears_only_that_profiles_destination_entries() {
     let destination = "https://start.example/";
     let (mut shell, _, screen, _) = browsed();
@@ -337,6 +353,109 @@ fn profile_steps_accumulate_while_browser_return_is_pending() {
     assert_eq!(window_profile(&shell), third);
     assert_eq!(shell.active_browser_page(), None);
     assert!(shell.browser_after_return.is_none());
+}
+
+#[test]
+fn second_launch_profile_and_url_survive_browser_page_return() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let personal = window_profile(&shell);
+    let work = create(&mut shell, "Work");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+
+    shell.handle(Command::Operation {
+        operation_id: "second-launch".into(),
+        command: Box::new(Command::OpenProfileAndExternal {
+            name: "Work".into(),
+            urls: vec!["https://example.com/".into()],
+        }),
+    });
+
+    assert_eq!(window_profile(&shell), personal);
+    assert!(matches!(
+        shell.browser_after_return.as_deref(),
+        Some(Command::SwitchProfile(profile)) if *profile == work
+    ));
+    assert!(matches!(
+        shell.browser_after_return_followups.front(),
+        Some(Command::OpenExternal(urls)) if urls == &["https://example.com/"]
+    ));
+
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_eq!(window_profile(&shell), work);
+    assert!(shell.browser_after_return.is_none());
+    assert!(shell.browser_after_return_followups.is_empty());
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://example.com/")));
+    assert_eq!(shell.profile_of_item(active_id(&screen)), Some(work));
+}
+
+#[test]
+fn rejected_profile_switch_drops_external_followups() {
+    let (mut shell, engine, chrome, _screen, ui_commands) =
+        setup_with_async_chrome_and_ui_commands();
+    shell.handle(Command::Bootstrap);
+    let personal = window_profile(&shell);
+    let work = create(&mut shell, "Work");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle(Command::Operation {
+        operation_id: "second-launch-rejected".into(),
+        command: Box::new(Command::OpenProfileAndExternal {
+            name: "Work".into(),
+            urls: vec!["https://example.com/".into()],
+        }),
+    });
+    shell.profiles.remove(work).unwrap();
+
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_eq!(window_profile(&shell), personal);
+    assert!(shell.browser_after_return_followups.is_empty());
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://example.com/")));
+    assert!(ui_commands
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| command == "profile.open-failed"));
+}
+
+#[test]
+fn replacing_pending_profile_switch_drops_external_followups() {
+    let (mut shell, engine, chrome, _screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::CreateProfile {
+        name: "Work".into(),
+        avatar: symbol(2, 5),
+        photo: None,
+        switch: false,
+    });
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle(Command::Operation {
+        operation_id: "second-launch-replaced".into(),
+        command: Box::new(Command::OpenProfileAndExternal {
+            name: "Work".into(),
+            urls: vec!["https://example.com/".into()],
+        }),
+    });
+    assert!(!shell.browser_after_return_followups.is_empty());
+
+    shell.handle_operation(Command::Open);
+    assert!(shell.browser_after_return_followups.is_empty());
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://example.com/")));
 }
 
 #[test]

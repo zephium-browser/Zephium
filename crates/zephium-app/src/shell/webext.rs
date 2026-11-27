@@ -322,10 +322,12 @@ impl Shell {
         };
         if self.active_browser_page().is_some() && !self.browser_return_ready {
             if self.browser_after_return.is_none() {
-                self.browser_after_return = Some(Box::new(Command::OpenWebExtensionOptions {
-                    profile,
-                    extension_id,
-                }));
+                self.replace_browser_after_return(Some(Box::new(
+                    Command::OpenWebExtensionOptions {
+                        profile,
+                        extension_id,
+                    },
+                )));
                 let _ = self.operation_show_browser_page(None);
             }
             return;

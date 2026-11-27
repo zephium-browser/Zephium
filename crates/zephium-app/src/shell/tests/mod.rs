@@ -2499,6 +2499,47 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
     (shell, engine, chrome, screen)
 }
 
+type AsyncChromeUiCommandsSetup = (
+    Shell,
+    Arc<FakeEngine>,
+    Arc<AsyncChrome>,
+    Screen,
+    Arc<Mutex<Vec<String>>>,
+);
+
+fn setup_with_async_chrome_and_ui_commands() -> AsyncChromeUiCommandsSetup {
+    let engine = Arc::new(FakeEngine::default());
+    let chrome = Arc::new(AsyncChrome::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let ui_commands = Arc::new(Mutex::new(Vec::new()));
+    let sink = screen.clone();
+    let commands = ui_commands.clone();
+    let mut shell = Shell::new(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        chrome.clone(),
+        Box::new(move |projection| {
+            if let Projection::UiCommand(command) = &projection {
+                commands.lock().unwrap().push(command.clone());
+            }
+            apply_projection(&mut sink.lock().unwrap(), projection);
+        }),
+    );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    shell.disable_native_notification_source_for_test();
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    (shell, engine, chrome, screen, ui_commands)
+}
+
 type OperationLog = Arc<Mutex<Vec<OperationDisposition>>>;
 
 fn setup_with_operation_log(

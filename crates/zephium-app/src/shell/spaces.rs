@@ -272,9 +272,9 @@ impl Shell {
         match self.active_browser_page() {
             Some(crate::BrowserPage::Work) => {}
             Some(_) if !self.browser_return_ready => {
-                self.browser_after_return = Some(Box::new(Command::Space(Box::new(
+                self.replace_browser_after_return(Some(Box::new(Command::Space(Box::new(
                     SpaceCommand::Switch(space),
-                ))));
+                )))));
                 return self.operation_show_browser_page(None);
             }
             _ => {}

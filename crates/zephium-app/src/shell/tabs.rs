@@ -329,9 +329,9 @@ impl Shell {
         // WebKit takes the video back only once its page is on screen, so a
         // browser page, Work included, steps back to browsing first.
         let disposition = if self.active_browser_page().is_some() && !self.browser_return_ready {
-            self.browser_after_return = Some(Box::new(Command::Engine(
+            self.replace_browser_after_return(Some(Box::new(Command::Engine(
                 EngineEvent::MediaReturnRequested { id },
-            )));
+            ))));
             self.operation_show_browser_page(None)
         } else {
             self.show_media_tab(id)

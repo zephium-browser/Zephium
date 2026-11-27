@@ -146,10 +146,10 @@ impl Shell {
             .is_some_and(|page| page != crate::BrowserPage::Work)
             && !self.browser_return_ready
         {
-            self.browser_after_return = Some(Box::new(Command::MediaPlayer {
+            self.replace_browser_after_return(Some(Box::new(Command::MediaPlayer {
                 id,
                 action: MediaPlayerAction::Show,
-            }));
+            })));
             return self.operation_show_browser_page(None);
         }
         let (effects, blank) = self.show_space_at(space, id);

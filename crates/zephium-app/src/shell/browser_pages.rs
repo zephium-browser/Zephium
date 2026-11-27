@@ -40,6 +40,11 @@ fn restored_tab_matches_snapshot(old: &TabView, tab: &TabState) -> bool {
 }
 
 impl Shell {
+    pub(super) fn replace_browser_after_return(&mut self, command: Option<Box<Command>>) {
+        self.browser_after_return_followups.clear();
+        self.browser_after_return = command;
+    }
+
     pub(super) fn active_browser_page(&self) -> Option<crate::BrowserPage> {
         let window = self.windows.focused()?.id;
         self.browser_page
@@ -137,7 +142,7 @@ impl Shell {
         };
         self.browser_page = None;
         self.browser_return = None;
-        self.browser_after_return = None;
+        self.replace_browser_after_return(None);
         let effects = self.focus_tab(id);
         let native = self.commit(effects);
         if native.rejected {
@@ -236,14 +241,15 @@ impl Shell {
                         })
                     });
                 if self.browser_after_return.is_none() {
-                    self.browser_after_return =
-                        Some(Box::new(fallback.map_or(Command::Open, Command::Activate)));
+                    self.replace_browser_after_return(Some(Box::new(
+                        fallback.map_or(Command::Open, Command::Activate),
+                    )));
                 }
             }
             return self.request_browser_return();
         }
         self.browser_return = None;
-        self.browser_after_return = None;
+        self.replace_browser_after_return(None);
         let previous = self.browser_page;
         self.browser_page = page.map(|page| (window, page));
         self.cancel_page_permission_if_not_foreground();
@@ -356,7 +362,7 @@ impl Shell {
             crate::diagnostic!(
                 "browser: return to Browse refused (chrome applied={applied}, snapshot exact={exact})"
             );
-            self.browser_after_return = None;
+            self.replace_browser_after_return(None);
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
             return;
@@ -376,12 +382,36 @@ impl Shell {
         self.browser_return_hidden = false;
         if !scheduled {
             self.browser_page = previous;
+            self.browser_after_return_followups.clear();
             let _ = self.relayout();
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
         } else if let Some(next) = next {
             self.browser_return_ready = true;
-            self.handle(*next);
+            let (profile_switch, outcome) = match *next {
+                Command::SwitchProfile(profile) => (
+                    true,
+                    self.handle_operation(Command::SwitchProfile(profile))
+                        .outcome,
+                ),
+                command => {
+                    self.handle(command);
+                    (false, OperationOutcome::Applied)
+                }
+            };
+            if profile_switch
+                && matches!(
+                    outcome,
+                    OperationOutcome::Rejected | OperationOutcome::NativeAdmissionFailed
+                )
+            {
+                self.browser_after_return_followups.clear();
+                (self.emit)(Projection::UiCommand("profile.open-failed".into()));
+            } else {
+                while let Some(followup) = self.browser_after_return_followups.pop_front() {
+                    self.handle(followup);
+                }
+            }
             self.browser_return_ready = false;
             let _ = self.relayout();
             self.project_browser_page_if_changed();

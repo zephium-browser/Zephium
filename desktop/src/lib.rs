@@ -7749,6 +7749,9 @@ fn finish_browser_setup(
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FIND, &result)
         }
         Projection::UiCommand(id) => {
+            if id == "profile.open-failed" {
+                external_links::cancel_forward();
+            }
             if id.starts_with("preference.search.") {
                 search_providers::cancel_all();
             }
@@ -7917,21 +7920,27 @@ fn finish_browser_setup(
             failure,
             zephium_app::ShellTerminalFailure::SessionUnavailable
                 | zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                | zephium_app::ShellTerminalFailure::StartupProfileUnavailable
         ) {
             let app = terminal_failure_app.clone();
             let shutdown = terminal_failure_shutdown.clone();
             let explained = terminal_failure_app.run_on_main_thread(move || {
                 #[cfg(not(target_os = "linux"))]
                 startup_alert::show_blocking(
-                    if matches!(
-                        failure,
-                        zephium_app::ShellTerminalFailure::SessionFromNewerVersion
-                    ) {
-                        startup_alert::StartupProblem::NewerProfile
-                    } else {
-                        startup_alert::StartupProblem::DamagedProfile
+                    match failure {
+                        zephium_app::ShellTerminalFailure::SessionFromNewerVersion => {
+                            startup_alert::StartupProblem::NewerProfile
+                        }
+                        zephium_app::ShellTerminalFailure::StartupProfileUnavailable => {
+                            startup_alert::StartupProblem::StartupProfileUnavailable
+                        }
+                        _ => startup_alert::StartupProblem::DamagedProfile,
                     },
-                    "the saved tabs and settings could not be opened",
+                    if failure == zephium_app::ShellTerminalFailure::StartupProfileUnavailable {
+                        "the requested profile could not be created or opened"
+                    } else {
+                        "the saved tabs and settings could not be opened"
+                    },
                 );
                 request_shell_terminal_failure(&app, &shutdown, failure);
             });
@@ -8017,6 +8026,11 @@ fn finish_browser_setup(
         );
         return Err(error.into());
     }
+    select_startup_profile(
+        app.try_state::<LaunchProfile>()
+            .and_then(|profile| profile.0.clone()),
+        |profile| shell.dispatch(Command::SelectStartupProfile(profile)),
+    )?;
     #[cfg(feature = "work-product")]
     let public_routes = {
         let routes =
@@ -8532,8 +8546,29 @@ fn finish_browser_setup(
     Ok(())
 }
 
+fn select_startup_profile(
+    profile: Option<String>,
+    dispatch: impl FnOnce(String) -> bool,
+) -> Result<(), std::io::Error> {
+    if let Some(profile) = profile {
+        if !dispatch(profile) {
+            return Err(std::io::Error::other(
+                "shell refused startup profile selection",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_with_profile(None);
+}
+
+#[derive(Clone, Default)]
+struct LaunchProfile(Option<String>);
+
+pub fn run_with_profile(profile: Option<String>) {
     if cfg!(all(unix, not(target_os = "macos"))) {
         diagnostic!(
             "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
@@ -8606,6 +8641,7 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let setup_privileged_environments = attempted_privileged_environments.clone();
     let builder = tauri::Builder::default()
+        .manage(LaunchProfile(profile))
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
@@ -8619,7 +8655,8 @@ pub fn run() {
         // focuses the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
+            let arguments: Vec<_> = argv.into_iter().skip(1).collect();
+            external_links::hand_off(app, arguments, true);
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
@@ -8936,6 +8973,36 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_profile_selection_dispatches_and_reports_refusal() {
+        use super::select_startup_profile;
+
+        let mut dispatched = None;
+        select_startup_profile(Some("Work".into()), |command| {
+            dispatched = Some(command);
+            true
+        })
+        .unwrap();
+        assert_eq!(dispatched.as_deref(), Some("Work"));
+
+        let error = select_startup_profile(Some("Work".into()), |_| false).unwrap_err();
+        assert_eq!(error.to_string(), "shell refused startup profile selection");
+    }
+
+    #[test]
+    fn startup_profile_selection_without_a_flag_does_not_dispatch() {
+        use super::select_startup_profile;
+        use std::cell::Cell;
+
+        let dispatched = Cell::new(false);
+        select_startup_profile(None, |_| {
+            dispatched.set(true);
+            false
+        })
+        .unwrap();
+        assert!(!dispatched.get());
+    }
+
     fn composed_setup_source(production: &str) -> String {
         let initial = production
             .split(".setup(move |app| {")

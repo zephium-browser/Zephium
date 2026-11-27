@@ -31,6 +31,7 @@ impl Shell {
                 switch,
             } => self.operation_create_profile(&name, avatar, photo, switch),
             Command::SwitchProfile(profile) => self.operation_switch_profile(profile),
+            Command::OpenProfileByName(name) => self.operation_open_profile_by_name(&name),
             Command::RenameProfile { profile, name } => {
                 self.operation_rename_profile(profile, &name)
             }
@@ -329,7 +330,7 @@ impl Shell {
 
     pub(super) fn operation_open(&mut self) -> OperationDisposition {
         if self.active_browser_page().is_some() && !self.browser_return_ready {
-            self.browser_after_return = Some(Box::new(Command::Open));
+            self.replace_browser_after_return(Some(Box::new(Command::Open)));
             return self.operation_show_browser_page(None);
         }
 
@@ -365,7 +366,7 @@ impl Shell {
             || (new_tab && self.active_browser_page().is_some()))
             && !self.browser_return_ready
         {
-            self.browser_after_return = Some(Box::new(Command::OpenUrl { input, new_tab }));
+            self.replace_browser_after_return(Some(Box::new(Command::OpenUrl { input, new_tab })));
             return self.operation_show_browser_page(None);
         }
         let Some(active) = self.windows.focused().map(|window| window.active) else {
@@ -475,7 +476,15 @@ impl Shell {
         }
         // A browser page in front hands the whole batch to Browse at once.
         if self.active_browser_page().is_some() && !self.browser_return_ready {
-            self.browser_after_return = Some(Box::new(Command::OpenExternal(urls)));
+            if matches!(
+                self.browser_after_return.as_deref(),
+                Some(Command::SwitchProfile(_))
+            ) {
+                self.browser_after_return_followups
+                    .push_back(Command::OpenExternal(urls));
+            } else {
+                self.replace_browser_after_return(Some(Box::new(Command::OpenExternal(urls))));
+            }
             let _ = self.operation_show_browser_page(None);
             return;
         }
@@ -581,7 +590,7 @@ impl Shell {
                 !matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
             })
         {
-            self.browser_after_return = Some(Box::new(Command::Activate(id)));
+            self.replace_browser_after_return(Some(Box::new(Command::Activate(id))));
             return self.operation_show_browser_page(None);
         }
         if self.items.tab(id).is_some_and(|tab| {
@@ -627,7 +636,7 @@ impl Shell {
                 .tab(id)
                 .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
         {
-            self.browser_after_return = Some(Box::new(Command::Close(id)));
+            self.replace_browser_after_return(Some(Box::new(Command::Close(id))));
             return self.request_browser_return();
         }
         let discard_closing = matches!(
@@ -650,7 +659,7 @@ impl Shell {
             && !self.browser_return_ready
             && !self.work_pane_shows(id)
         {
-            self.browser_after_return = Some(Box::new(
+            self.replace_browser_after_return(Some(Box::new(
                 if self.items.tab(id).is_some_and(|tab| {
                     matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
                 }) {
@@ -661,7 +670,7 @@ impl Shell {
                 } else {
                     Command::Navigate { id, input }
                 },
-            ));
+            )));
             return self.operation_show_browser_page(None);
         }
 
@@ -1189,7 +1198,7 @@ impl Shell {
         if self.active_browser_page().is_some() {
             let command =
                 named.map_or_else(|| "tab.reopen".into(), |id| format!("tab.reopen={id}"));
-            self.browser_after_return = Some(Box::new(Command::Run(command)));
+            self.replace_browser_after_return(Some(Box::new(Command::Run(command))));
             return self.operation_show_browser_page(None);
         }
         let Some(profile) = self.windows.focused().map(|window| window.profile) else {

@@ -14,6 +14,7 @@ controls product intent.
 
 ## Browser features
 
+- [Launch with a profile](launch-profile.md): open or create a named profile from the command line.
 - [Interface design](frontend.md#native-surfaces-and-presentation): why the browser chrome is shaped the way it is.
 - [Interface system](frontend.md#interface-rules): tokens, shared components and how to inspect them.
 - [Settings](frontend.md#ownership-ipc-and-lifetimes): settings structure, search and navigation.

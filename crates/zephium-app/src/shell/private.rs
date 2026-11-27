@@ -87,7 +87,7 @@ impl Shell {
         if self.active_browser_page().is_none() || self.browser_return_ready {
             return None;
         }
-        self.browser_after_return = Some(Box::new(Command::Run(id.into())));
+        self.replace_browser_after_return(Some(Box::new(Command::Run(id.into()))));
         Some(self.operation_show_browser_page(None))
     }
 
