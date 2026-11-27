@@ -117,7 +117,8 @@ pub(crate) async fn mini_apps_install(
     {
         return Err("This address cannot be installed.".into());
     }
-    let mini_app = discover_and_parse(&url).await?;
+    let discovered = discover_and_parse(&url).await?;
+    let mini_app = discovered.app;
     let mut view = MiniAppView::from(&mini_app);
     let _guard = REGISTRY_LOCK
         .lock()
@@ -137,13 +138,15 @@ pub(crate) async fn mini_apps_install(
         return Err("The app could not be saved.".into());
     }
     #[cfg(target_os = "windows")]
-    persist_windows_app_icon(&app_handle, &mini_app);
+    if let Some(icon) = discovered.native_icon.as_ref() {
+        persist_windows_app_icon(&app_handle, &mini_app, icon);
+    }
     #[cfg(target_os = "windows")]
     for destination in ["start_menu", "desktop"] {
         create_windows_shortcut(&app_handle, &mini_app, destination)?;
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = app_handle;
+    let _ = (app_handle, discovered.native_icon);
     Ok(view)
 }
 
@@ -800,7 +803,12 @@ fn installation_error(error: &MiniAppError) -> String {
     }
 }
 
-async fn discover_and_parse(raw_url: &str) -> Result<MiniApp, String> {
+struct DiscoveredMiniApp {
+    app: MiniApp,
+    native_icon: Option<image::RgbaImage>,
+}
+
+async fn discover_and_parse(raw_url: &str) -> Result<DiscoveredMiniApp, String> {
     let url = Url::parse(raw_url).map_err(|_| "Enter a full HTTPS address.".to_owned())?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return Err("Enter a public HTTPS address.".into());
@@ -812,10 +820,12 @@ async fn discover_and_parse(raw_url: &str) -> Result<MiniApp, String> {
     if looks_like_manifest(&body, &content_type) {
         let mut app =
             parse_manifest(&body, &effective, now()).map_err(|error| installation_error(&error))?;
-        if let Some(icon) = app.icon.clone() {
-            app.icon = fetch_app_icon(vec![icon]).await;
-        }
-        return Ok(app);
+        let (icon, native_icon) = match app.icon.clone() {
+            Some(icon) => fetch_app_icon(vec![icon]).await,
+            None => (None, None),
+        };
+        app.icon = icon;
+        return Ok(DiscoveredMiniApp { app, native_icon });
     }
     let html = String::from_utf8_lossy(&body);
     let metadata = site_metadata(&html, &effective);
@@ -852,8 +862,9 @@ async fn discover_and_parse(raw_url: &str) -> Result<MiniApp, String> {
             icon_candidates.push(favicon.to_string());
         }
     }
-    app.icon = fetch_app_icon(icon_candidates).await;
-    Ok(app)
+    let (icon, native_icon) = fetch_app_icon(icon_candidates).await;
+    app.icon = icon;
+    Ok(DiscoveredMiniApp { app, native_icon })
 }
 
 fn site_app(page_url: &Url, page_name: Option<&str>) -> MiniApp {
@@ -882,7 +893,7 @@ fn site_app(page_url: &Url, page_name: Option<&str>) -> MiniApp {
     }
 }
 
-async fn fetch_app_icon(candidates: Vec<String>) -> Option<String> {
+async fn fetch_app_icon(candidates: Vec<String>) -> (Option<String>, Option<image::RgbaImage>) {
     for candidate in candidates.into_iter().take(5) {
         let Ok(url) = Url::parse(&candidate) else {
             continue;
@@ -893,52 +904,49 @@ async fn fetch_app_icon(candidates: Vec<String>) -> Option<String> {
         let Some(rgba) = crate::favicon_probe::rasterize(&bytes) else {
             continue;
         };
+        let native_icon = crate::miniapp_icons::rasterize(&bytes);
         use base64::Engine as _;
-        return Some(format!(
-            "rgba32:{}",
-            base64::engine::general_purpose::STANDARD.encode(rgba)
-        ));
+        return (
+            Some(format!(
+                "rgba32:{}",
+                base64::engine::general_purpose::STANDARD.encode(rgba)
+            )),
+            native_icon,
+        );
     }
-    None
+    (None, None)
 }
 
 #[cfg(target_os = "windows")]
-fn persist_windows_app_icon(app: &tauri::AppHandle, mini_app: &MiniApp) {
-    let Some(encoded) = mini_app
-        .icon
-        .as_deref()
-        .and_then(|icon| icon.strip_prefix("rgba32:"))
-    else {
-        return;
-    };
-    use base64::Engine as _;
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-        return;
-    };
+fn persist_windows_app_icon(app: &tauri::AppHandle, mini_app: &MiniApp, icon: &image::RgbaImage) {
     let Ok(directory) = app_storage_path(app, &mini_app.id) else {
         return;
     };
     if fs::create_dir_all(&directory).is_err() {
         return;
     }
-    if bytes.len() != 32 * 32 * 4 {
-        return;
-    }
-    let Some(decoded) = image::RgbaImage::from_raw(32, 32, bytes.clone()) else {
+    let Some(ico) = encode_windows_icon(icon) else {
         return;
     };
-    let decoded = image::DynamicImage::ImageRgba8(decoded);
-    let mut png = std::io::Cursor::new(Vec::with_capacity(bytes.len()));
-    if decoded.write_to(&mut png, image::ImageFormat::Png).is_err() {
-        return;
-    }
-    let png = png.into_inner();
-    let mut ico = std::io::Cursor::new(Vec::with_capacity(png.len()));
-    if decoded.write_to(&mut ico, image::ImageFormat::Ico).is_err() {
-        return;
-    }
-    let _ = fs::write(directory.join("icon.png"), png);
-    let _ = fs::write(directory.join("icon.ico"), ico.into_inner());
+    let _ = fs::write(directory.join("icon.ico"), ico);
+}
+
+#[cfg(target_os = "windows")]
+fn encode_windows_icon(icon: &image::RgbaImage) -> Option<Vec<u8>> {
+    use image::codecs::ico::{IcoEncoder, IcoFrame};
+    use image::ExtendedColorType;
+
+    let frames = [16, 24, 32, 48, 64, 128, 256]
+        .into_iter()
+        .map(|side| {
+            let raster =
+                image::imageops::resize(icon, side, side, image::imageops::FilterType::Lanczos3);
+            IcoFrame::as_png(raster.as_raw(), side, side, ExtendedColorType::Rgba8).ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut output = std::io::Cursor::new(Vec::new());
+    IcoEncoder::new(&mut output).encode_images(&frames).ok()?;
+    Some(output.into_inner())
 }
 
 fn looks_like_manifest(body: &[u8], content_type: &str) -> bool {

@@ -1,10 +1,9 @@
 use crate::model::DisplayMode;
 use serde::{Deserialize, Serialize};
 
-/// The durable identity of one installed mini app. Icon bytes are never kept
-/// here: the engine fetches the icon through its ordinary, protected network
-/// path, which keeps the registry small and removes an image decoder from the
-/// installation boundary.
+/// The durable identity of one installed mini app. The optional icon is a
+/// bounded 32x32 RGBA raster for the settings UI. Windows taskbar icon files
+/// are derived separately from the fetched source and kept outside the registry.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MiniApp {
     pub id: String,

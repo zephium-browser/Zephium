@@ -103,6 +103,7 @@ mod media;
 mod memory_pressure;
 mod menu_text;
 mod mini;
+mod miniapp_icons;
 mod miniapps;
 mod notes;
 #[cfg(target_os = "windows")]
