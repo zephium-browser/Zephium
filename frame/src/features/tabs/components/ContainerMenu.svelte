@@ -20,6 +20,7 @@
   let icon = $state<SpaceIconView | null>({ kind: "symbol", index: 1 });
   let selectedSpaces = $state<string[]>([]);
   let busy = $state(false);
+  let editorSession = 0;
   let operationError = $state(false);
   let removeRetry = $state<ContainerView | null>(null);
   let error = $state(false);
@@ -59,6 +60,7 @@
   });
 
   function beginEdit(container?: ContainerView) {
+    editorSession += 1;
     error = false;
     editing = container?.id ?? "new";
     name = container?.name ?? "";
@@ -68,6 +70,8 @@
   }
   async function save() {
     if (busy || !name.trim()) return;
+    const session = editorSession;
+    const target = editing;
     busy = true;
     error = false;
     try {
@@ -82,10 +86,12 @@
         if (container)
           result = await tabDomain.updateContainer(container, name.trim(), icon, color, scope);
       }
-      if (result?.outcome === "applied" || result?.outcome === "deferred") editing = null;
-      else error = true;
+      if (session === editorSession && editing === target) {
+        if (result?.outcome === "applied" || result?.outcome === "deferred") editing = null;
+        else error = true;
+      }
     } catch {
-      error = true;
+      if (session === editorSession && editing === target) error = true;
     } finally {
       busy = false;
     }
