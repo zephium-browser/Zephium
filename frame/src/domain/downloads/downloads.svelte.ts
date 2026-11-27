@@ -10,6 +10,7 @@ import type {
 import { events } from "$shared/ipc/native-events";
 
 const TERMINAL = new Set(["completed", "cancelled", "interrupted", "failed"]);
+const MAX_HISTORY_ENTRIES = 2000;
 
 /** Whether a download has stopped for good, so it may be forgotten. */
 export function finished(entry: DownloadView): boolean {
@@ -40,6 +41,10 @@ export class DownloadSession {
 
   constructor(profile: string) {
     this.profile = profile;
+  }
+
+  get canLoadMore() {
+    return Boolean(this.next) && this.entries.length < MAX_HISTORY_ENTRIES;
   }
 
   async start(initial = true) {
@@ -115,7 +120,7 @@ export class DownloadSession {
         }
         this.entries = [...records.values()]
           .sort((a, b) => b.id.localeCompare(a.id))
-          .slice(0, 2000);
+          .slice(0, MAX_HISTORY_ENTRIES);
       } else if (response.kind === "error") {
         this.error = response.error;
       }
@@ -137,7 +142,7 @@ export class DownloadSession {
       this.refreshAgain = true;
       return;
     }
-    if (more && (!this.next || this.entries.length >= 2000)) return;
+    if (more && !this.canLoadMore) return;
     const generation = this.generation;
     this.loading = true;
     try {
@@ -156,7 +161,7 @@ export class DownloadSession {
             const current = this.entries.find((old) => old.id === entry.id);
             return current && current.revision > entry.revision ? current : entry;
           });
-        this.entries = more
+        const merged = more
           ? [
               ...this.entries.map(
                 (current) => entries.find((entry) => entry.id === current.id) ?? current,
@@ -171,10 +176,17 @@ export class DownloadSession {
                   !this.removedDuringLoad.has(entry.id) &&
                   !entries.some((old) => old.id === entry.id),
               ),
-            ]
-              .sort((a, b) => b.id.localeCompare(a.id))
-              .slice(0, 2000);
+            ];
+        merged.sort((a, b) => b.id.localeCompare(a.id));
+        this.entries = merged.slice(0, MAX_HISTORY_ENTRIES);
         this.next = response.next;
+        if (merged.length > MAX_HISTORY_ENTRIES) {
+          const oldestRetained = this.entries.at(-1)?.id;
+          // The native cursor is exclusive. Resume before the retained boundary if the page was trimmed.
+          if (oldestRetained && (!this.next || oldestRetained.localeCompare(this.next) > 0)) {
+            this.next = oldestRetained;
+          }
+        }
         this.error = null;
       } else if (response.kind === "error") {
         this.error = response.error;
