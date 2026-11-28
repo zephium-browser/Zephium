@@ -20,6 +20,8 @@ const harness = vi.hoisted(() => {
     tabsBootstrap: vi.fn(async () => {
       order.push("bootstrap");
     }),
+    tabMenuPopup: vi.fn(),
+    tabsSetTabIcon: vi.fn(async () => ({ accepted: true, operation_id: null })),
   };
 });
 
@@ -42,7 +44,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     sidebarSetWidth: vi.fn(),
     tabDragOver: vi.fn(),
     tabDrop: vi.fn(),
-    tabMenuPopup: vi.fn(),
+    tabMenuPopup: harness.tabMenuPopup,
+    tabsSetTabIcon: harness.tabsSetTabIcon,
   });
 });
 vi.mock("$shared/ipc/native-events", () => ({
@@ -106,6 +109,8 @@ describe("Svelte tab state lifecycle", () => {
     delete harness.listeners.presentation;
     harness.flushSync.mockClear();
     harness.tabsBootstrap.mockClear();
+    harness.tabMenuPopup.mockClear();
+    harness.tabsSetTabIcon.mockClear();
     for (const stop of harness.stops) stop.mockClear();
   });
 
@@ -169,6 +174,67 @@ describe("Svelte tab state lifecycle", () => {
 
     expect(state.takeMenuTargetUrl()).toBe("https://b.example/");
     expect(state.takeMenuTargetUrl()).toBeNull();
+    expect(state.takeIconTarget()).toBe("b");
+    expect(state.takeIconTarget()).toBeNull();
+    state.dispose();
+  });
+
+  it("tells native when an Essential carries a mark, and sends the chosen mark back", async () => {
+    const state = await import("../tabs.svelte");
+    await state.init();
+    harness.listeners.items?.({
+      payload: {
+        projection_revision: revision(3),
+        profile: { id: "profile-a", name: "Personal", kind: "default" },
+        spaces: [spaceFixture("space-a", "Main")],
+        active_space_id: "space-a",
+        nodes: [
+          {
+            id: "n1",
+            parent_id: null,
+            section: "favorites",
+            kind: { type: "tab", tab_id: "a" },
+          },
+          {
+            id: "n2",
+            parent_id: null,
+            section: "today",
+            kind: { type: "tab", tab_id: "b" },
+          },
+        ],
+        tabs: [{ ...tab("a", 3), custom_icon: { kind: "emoji", text: "🚀" } }, tab("b", 3)],
+        active: "a",
+        split_group: null,
+      },
+    });
+    state.openTabMenu("a", 10, 20);
+    expect(harness.tabMenuPopup).toHaveBeenLastCalledWith("a", 10, 20, {
+      page: true,
+      can_split: false,
+      essential: true,
+      custom_icon: true,
+      others: true,
+      below: false,
+      muted: false,
+      capture: null,
+      media_only: false,
+    });
+    harness.tabMenuPopup.mockClear();
+    state.openTabMenu("b", 10, 20);
+    expect(harness.tabMenuPopup).toHaveBeenLastCalledWith(
+      "b",
+      10,
+      20,
+      expect.objectContaining({ essential: false, custom_icon: false }),
+    );
+
+    await state.setCustomIcon("a", { kind: "symbol", index: 3 });
+    expect(harness.tabsSetTabIcon).toHaveBeenCalledExactlyOnceWith("a", {
+      kind: "symbol",
+      index: 3,
+    });
+    await state.setCustomIcon("a", null);
+    expect(harness.tabsSetTabIcon).toHaveBeenLastCalledWith("a", null);
     state.dispose();
   });
 

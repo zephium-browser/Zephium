@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import "./space-hue.css";
+  import "$shared/ui/space-hue.css";
   import * as m from "$shared/i18n/messages";
   import { Add01Icon, Layers01Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
   import type { SpaceView } from "$shared/ipc/bindings";

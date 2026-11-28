@@ -4,6 +4,7 @@
 use url::Url;
 
 use crate::ids::{ItemId, ProfileId, SpaceId};
+use crate::spaces::SpaceIcon;
 
 pub const MAX_PAGE_TITLE_CHARS: usize = 512;
 
@@ -138,6 +139,9 @@ pub struct TabState {
     /// When the person last had this tab in front, in Unix milliseconds.
     /// Persisted, so archiving idle tabs holds across a relaunch.
     pub last_active_ms: Option<u64>,
+    /// A mark the person chose for an Essential, in place of its favicon.
+    /// Persisted with the tab and cleared when it leaves Essentials.
+    pub custom_icon: Option<SpaceIcon>,
     /// The last navigation the person asked for that did not load. Runtime
     /// only: never persisted, and cleared by the next attempt or commit.
     pub failure: Option<Box<NavigationFailure>>,
@@ -206,6 +210,7 @@ impl TabState {
             zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
             last_active_ms: None,
+            custom_icon: None,
             failure: None,
             capture: None,
             audio: crate::audio::TabAudio::default(),

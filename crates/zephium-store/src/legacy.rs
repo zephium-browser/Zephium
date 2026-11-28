@@ -1,116 +1,4 @@
-//! One-time import of the pre-split single-file store (`default.sqlite` with a
-//! session JSON blob). Understands both blob generations: v1 flat tabs and v2
-//! item-tree. Read-only; the hub writes the result into the new layout.
-
-use std::collections::HashMap;
-use std::path::Path;
-
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde::Deserialize;
-
-use zephium_core::ids::{ItemId, ProfileId, SpaceId};
-use zephium_core::item::{sanitize_page_title, Placement, SpaceSection};
-use zephium_core::navigation;
-use zephium_core::profiles::ProfileKind;
-use zephium_core::session::{
-    self, PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
-    MAX_SESSION_ITEMS, MAX_SESSION_PROFILES, MAX_SESSION_SPACES,
-};
-
-use crate::bounded_json;
-use crate::essentials;
-use crate::hub::{MAX_NAME_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES};
-use crate::pane::{self, StoredPane};
-
-const MAX_LEGACY_SESSION_BYTES: i64 = 16 * 1024 * 1024;
-
-pub struct LegacyData {
-    pub session: SessionState,
-    pub visits: Vec<(String, String, i64)>,
-}
-
-pub fn read(path: &Path) -> Option<LegacyData> {
-    let parent = std::fs::canonicalize(path.parent()?).ok()?;
-    let path = parent.join(path.file_name()?);
-    if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
-        return None;
-    }
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .ok()?;
-    let json: Option<String> = conn
-        .query_row(
-            "SELECT CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data END
-             FROM session WHERE id = 1",
-            [MAX_LEGACY_SESSION_BYTES],
-            |r| r.get(0),
-        )
-        .optional()
-        .ok()?;
-    let session = json.and_then(|j| decode(&j))?;
-    let visits = read_visits(&conn);
-    Some(LegacyData { session, visits })
-}
-
-fn read_visits(conn: &Connection) -> Vec<(String, String, i64)> {
-    read_visits_with_budget(conn, crate::hub::MAX_HISTORY_BYTES as usize)
-}
-
-fn read_visits_with_budget(conn: &Connection, maximum_bytes: usize) -> Vec<(String, String, i64)> {
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT url, title, visited_at FROM history
-         WHERE length(CAST(url AS BLOB)) <= 8192
-           AND length(CAST(title AS BLOB)) <= 4096
-         ORDER BY visited_at DESC, id DESC
-         LIMIT 50000",
-    ) else {
-        return Vec::new();
-    };
-    let Ok(rows) = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    }) else {
-        return Vec::new();
-    };
-    let mut retained_bytes = 0_usize;
-    let mut visits = Vec::new();
-    for row in rows {
-        let Ok((url, title, at)) = row else {
-            continue;
-        };
-        if !navigation::is_allowed_str(&url) {
-            continue;
-        }
-        let title = sanitize_page_title(&title);
-        let row_bytes = url.len().saturating_add(title.len());
-        if retained_bytes.saturating_add(row_bytes) > maximum_bytes {
-            // Rows are newest-first. Keep a deterministic bounded recent
-            // prefix instead of retaining up to ~600 MiB of legacy strings
-            // before the normal history quota gets a chance to run.
-            break;
-        }
-        retained_bytes += row_bytes;
-        visits.push((url, title, at));
-    }
-    visits.reverse();
-    visits
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredSession {
-    v: u32,
-    #[serde(deserialize_with = "deserialize_stored_profiles")]
-    profiles: Vec<StoredProfile>,
-    #[serde(deserialize_with = "deserialize_stored_spaces")]
-    spaces: Vec<StoredSpace>,
-    #[serde(deserialize_with = "deserialize_stored_items")]
-    items: Vec<StoredItem>,
+redItem>,
     active_space: Option<String>,
     active_item: Option<String>,
     splits: Option<StoredPane>,
@@ -341,6 +229,7 @@ fn decode_item(
             title: item.title.unwrap_or_default(),
             zoom: 1.0,
             last_active_ms: None,
+            custom_icon: None,
         },
         _ => return None,
     };
@@ -383,6 +272,7 @@ fn decode_v1(v1: V1Session) -> Option<SessionState> {
                 title: t.title,
                 zoom: 1.0,
                 last_active_ms: None,
+                custom_icon: None,
             },
         })
         .collect();

@@ -99,6 +99,38 @@ test("a tile reads closed, open or in front, and the dot is only for a page", as
   expect(await state(tabFixture(), true)).toEqual({ open: "true", active: "true", dot: true });
 });
 
+test("a chosen mark replaces the favicon but the tile still names the page", async () => {
+  const tab = tabFixture({
+    id: "mail",
+    title: "Work mail",
+    icon: null,
+    custom_icon: { kind: "emoji", text: "🚀" },
+  });
+  const view = await tile(tab).screen;
+  const button = view.getByRole("button", { name: "Work mail", exact: true }).element();
+  const mark = button.querySelector<HTMLElement>("[data-custom-icon]")!;
+  expect(mark).not.toBeNull();
+  expect(mark.textContent).toContain("🚀");
+  expect(button.querySelector("[data-favicon]")).toBeNull();
+  expect(button.getAttribute("title")).toBe("Work mail");
+  expect(button.querySelector("[data-zephium-tab-label]")?.textContent).toBe("Work mail");
+
+  const props = {
+    tab: { ...tab, custom_icon: null },
+    active: false,
+    splitCandidate: false,
+    onSelect: vi.fn(),
+    onContextMenu: vi.fn(),
+    onPointerDown: vi.fn(),
+    onPointerMove: vi.fn(),
+    onPointerUp: vi.fn(),
+    onPointerCancel: vi.fn(),
+  };
+  const plain = await render(EssentialTile, props);
+  expect(plain.container.querySelector("[data-custom-icon]")).toBeNull();
+  expect(plain.container.querySelector("[data-favicon]")).not.toBeNull();
+});
+
 test("the close adds nothing to what native reads from the row", async () => {
   const tab = tabFixture({ id: "mail", title: "Mail" });
   const view = await tile(tab).screen;

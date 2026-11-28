@@ -5,6 +5,7 @@
   import FavIcon from "$shared/ui/FavIcon";
   import Icon from "$shared/ui/Icon";
   import { favicons } from "$domain/favicons";
+  import IconMark from "$shared/ui/IconMark";
   import CaptureControl from "$shared/ui/CaptureControl";
   import AudioControl from "$shared/ui/AudioControl";
   import { tabs } from "$domain/tabs";
@@ -80,15 +81,17 @@
     onpointercancel={onPointerCancel}
     onclick={() => onSelect(tab.id)}
   >
-    <FavIcon
-      image={favicons.image(tab.icon)}
-      tone={favicons.tone(tab.icon)}
-      loading={tab.loading}
-      size={18}
-      lit
-      fallback={Globe02Icon}
-      notched={!!tab.audio}
-    />
+    {#if tab.custom_icon}<span class="essential-mark" data-custom-icon
+        ><IconMark icon={tab.custom_icon} color={0} size={18} /></span
+      >{:else}<FavIcon
+        image={favicons.image(tab.icon)}
+        tone={favicons.tone(tab.icon)}
+        loading={tab.loading}
+        size={18}
+        lit
+        fallback={Globe02Icon}
+        notched={!!tab.audio}
+      />{/if}
     <span data-zephium-tab-label class="sr-only">{tab.title}</span>
   </button>
   {#if tab.audio}
@@ -124,6 +127,11 @@
   .essential {
     position: relative;
     min-width: 0;
+  }
+
+  .essential-mark {
+    display: grid;
+    place-items: center;
   }
 
   .capture-badge {

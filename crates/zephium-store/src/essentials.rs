@@ -139,6 +139,7 @@ mod tests {
                 title: url.into(),
                 zoom: 1.0,
                 last_active_ms: None,
+                custom_icon: None,
             },
         }
     }

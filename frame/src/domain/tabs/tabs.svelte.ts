@@ -1,7 +1,13 @@
 import { listenAll } from "$shared/lib/lifecycle";
 import { forgetDrafts } from "$shared/lib/drafts";
 import { flushSync } from "svelte";
-import type { ItemsState, SpaceLookInputV1, TabMenuContext, TabView } from "$shared/ipc/bindings";
+import type {
+  ItemsState,
+  SpaceIconView,
+  SpaceLookInputV1,
+  TabMenuContext,
+  TabView,
+} from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -157,10 +163,27 @@ export const canSplitActive = () => state.tabs.length > 1 && (activeTab()?.url ?
 // Native holds the authoritative menu target; this mirror exists only so the
 // clipboard action can resolve a URL privileged chrome already projects.
 let menuTarget: string | null = null;
+// The menu's Change Icon action is delivered as a UI command, so the frame
+// keeps its own arm of the same tab to know which Essential to mark.
+let iconTarget: string | null = null;
+
+/** The Essential whose icon menu the person opened, taken once by the picker. */
+export function takeIconTarget(): string | null {
+  const id = iconTarget;
+  iconTarget = null;
+  return id;
+}
+
+/** Sets or clears an Essential's mark. Native rejects anything not kept. */
+export const setCustomIcon = (id: string, icon: SpaceIconView | null) =>
+  settle(commands.tabsSetTabIcon(id, icon));
 
 /** What the tab menu can offer for one tab; native checks each action again. */
 function tabMenuContext(id: string, mediaOnly = false): TabMenuContext {
   const tab = state.tabs.find((candidate) => candidate.id === id);
+  const essential = state.nodes.some(
+    (node) => node.kind.type === "tab" && node.kind.tab_id === id && node.section === "favorites",
+  );
   const tabOf = (node: ItemsState["nodes"][number]) =>
     node.kind.type === "tab" ? node.kind.tab_id : null;
   const open = state.nodes
@@ -171,7 +194,8 @@ function tabMenuContext(id: string, mediaOnly = false): TabMenuContext {
   return {
     page: (tab?.content ?? "web") === "web" && (tab?.url ?? null) !== null,
     can_split: canSplitWith(id),
-    essential: state.nodes.some((node) => tabOf(node) === id && node.section === "favorites"),
+    essential,
+    custom_icon: !!tab?.custom_icon,
     others: open.some((candidate) => candidate !== id),
     below: at >= 0 && at < open.length - 1,
     muted: tab?.audio?.muted ?? false,
@@ -182,6 +206,7 @@ function tabMenuContext(id: string, mediaOnly = false): TabMenuContext {
 
 export function openTabMenu(id: string, x: number, y: number) {
   menuTarget = id;
+  iconTarget = id;
   void commands.tabMenuPopup(id, x, y, tabMenuContext(id));
 }
 
@@ -189,6 +214,7 @@ export function openTabMenu(id: string, x: number, y: number) {
  *  its in-use indicator. */
 export function openMediaMenu(id: string, x: number, y: number) {
   menuTarget = id;
+  iconTarget = id;
   void commands.tabMenuPopup(id, x, y, tabMenuContext(id, true));
 }
 
