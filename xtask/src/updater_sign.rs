@@ -1,4 +1,73 @@
-_or("invalid release tag")?;
+//! Release asset verification and Windows updater signing. Secrets are accepted
+//! through the existing Tauri environment contract, never on a command line.
+
+use base64::Engine as _;
+use minisign::{PublicKeyBox, SecretKeyBox};
+use semver::Version;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+
+const TARGET: &str = "windows-x86_64-nsis";
+const ARM_TARGET: &str = "windows-aarch64-nsis";
+
+pub(crate) fn check_release_assets(arguments: &[String]) -> Result<(), &'static str> {
+    let [directory, tag, repository] = arguments else {
+        return Err("usage: cargo xtask check-release-assets <directory> <tag> <owner/repo>");
+    };
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/tauri.conf.json"))
+            .map_err(|_| "cannot read the embedded updater public key")?,
+    )
+    .map_err(|_| "invalid application configuration")?;
+    let public = config
+        .pointer("/plugins/updater/pubkey")
+        .and_then(|key| key.as_str())
+        .ok_or("the embedded updater public key is missing")?;
+    check_assets(Path::new(directory), tag, repository, public)
+}
+
+fn check_assets(
+    directory: &Path,
+    tag: &str,
+    repository: &str,
+    public: &str,
+) -> Result<(), &'static str> {
+    const MAC: &str = "Zephium-macOS-arm64.app.tar.gz";
+    const WINDOWS: &str = "Zephium-Windows-x64-setup.exe";
+    const WINDOWS_ARM: &str = "Zephium-Windows-arm64-setup.exe";
+    let expected = std::collections::BTreeSet::from([
+        "SHA256SUMS".to_owned(),
+        "latest.json".to_owned(),
+        "Zephium-macOS-arm64.dmg".to_owned(),
+        MAC.to_owned(),
+        format!("{MAC}.sig"),
+        WINDOWS.to_owned(),
+        format!("{WINDOWS}.sig"),
+        WINDOWS_ARM.to_owned(),
+        format!("{WINDOWS_ARM}.sig"),
+    ]);
+    let mut actual = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(directory).map_err(|_| "cannot read release assets")? {
+        let entry = entry.map_err(|_| "cannot read release asset")?;
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return Err("release assets must be regular files");
+        }
+        actual.insert(
+            entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "invalid asset name")?,
+        );
+    }
+    if actual != expected {
+        return Err("incomplete or unexpected release asset set");
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(directory.join("latest.json")).map_err(|_| "cannot read latest.json")?,
+    )
+    .map_err(|_| "invalid latest.json")?;
+    let version = tag.strip_prefix('v').ok_or("invalid release tag")?;
     if manifest.get("version").and_then(|value| value.as_str()) != Some(version) {
         return Err("latest.json version does not match the tag");
     }

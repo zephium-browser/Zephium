@@ -1,4 +1,392 @@
-tion-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to rebuild, for example v1.0.0-beta.1
+        required: true
+        type: string
+      emergency:
+        description: Emergency release only — skip component tests and disclose this in release notes
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+  # Updater artifacts need the signing key, and the notices are generated per
+  # build, so neither belongs in the base configuration.
+  RELEASE_CONFIG: '{"bundle":{"createUpdaterArtifacts":true,"resources":{"../target/THIRD_PARTY_NOTICES.txt":"licenses/THIRD_PARTY_NOTICES.txt"}}}'
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      pubkey: ${{ steps.version.outputs.pubkey }}
+      signpath: ${{ steps.signpath.outputs.enabled }}
+    steps:
+      - name: Require release secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH \
+            TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name}" ]] || missing+=("${name}")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error title=Missing release secrets::Add ${missing[*]} as repository Actions secrets (see .github/RELEASE.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - name: Bind release provenance to the workflow tag
+        run: bash scripts/release/check_tag_ref.sh
+      - name: Assess Windows publisher signing configuration
+        id: signpath
+        env:
+          SIGNPATH_RELEASE_MODE: ${{ vars.SIGNPATH_RELEASE_MODE }}
+          SIGNPATH_RELEASE_CERT_THUMBPRINT: ${{ vars.SIGNPATH_RELEASE_CERT_THUMBPRINT }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
+        run: bash scripts/release/signpath_config.sh
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - run: rustup toolchain install --profile minimal
+
+      - name: Match the tag to the app version
+        id: version
+        run: |
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${TAG}" =~ ${semver} ]]; then
+            echo "::error title=Invalid tag::${TAG} is not vMAJOR.MINOR.PATCH[-PRERELEASE]."
+            exit 1
+          fi
+          version="$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -er '.packages[] | select(.name == "zephium-desktop") | .version')"
+          if [[ "${TAG}" != "v${version}" ]]; then
+            echo "::error title=Tag does not match the app version::${TAG} was pushed, but desktop/Cargo.toml is at ${version}."
+            exit 1
+          fi
+          if jq -e 'has("version")' desktop/tauri.conf.json >/dev/null; then
+            echo "::error title=Duplicate version::Remove version from desktop/tauri.conf.json; desktop/Cargo.toml is the only source."
+            exit 1
+          fi
+          if ! pubkey="$(jq -er '.plugins.updater.pubkey' desktop/tauri.conf.json)"; then
+            echo "::error title=Missing updater key::desktop/tauri.conf.json has no plugins.updater.pubkey."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "pubkey=${pubkey}" >> "${GITHUB_OUTPUT}"
+
+      # Strict engine and advisory reviews, blocker seed freshness, and
+      # outstanding vendor fixes.
+      - name: Release security gate
+        run: cargo xtask check-release-engine-security
+
+  # Pushing the tag starts this workflow alongside the main CI run for the same
+  # commit, which takes ~20 minutes, so the wait is its own job: the builds and
+  # the component suite run meanwhile, and nothing is drafted until it passes.
+  ci:
+    name: Main CI for the release commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require successful CI for this exact release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          for _ in $(seq 1 270); do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${candidate}&event=push&per_page=100")"
+            # $sha is a jq variable, bound by --arg below, not a shell one.
+            # shellcheck disable=SC2016
+            main='[.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push")]'
+            if jq -e --arg sha "${candidate}" "${main} | any(.conclusion == \"success\")" <<< "${runs}" >/dev/null; then
+              exit 0
+            fi
+            # Every run for this commit finished and none passed: waiting
+            # cannot help. Re-run CI for the commit, then this workflow.
+            if jq -e --arg sha "${candidate}" "${main} | length > 0 and all(.status == \"completed\")" <<< "${runs}" >/dev/null; then
+              echo "::error::Main CI for release commit ${candidate} finished without success. Re-run it, then re-run this release."
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::No successful main CI run exists for release commit ${candidate}."
+          exit 1
+
+  # Components gate drafts unless an explicit emergency dispatch skips them.
+  # Builds run concurrently; a failed component shard always blocks publication.
+  components:
+    if: ${{ !inputs.emergency }}
+    needs: gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/components.yml
+
+  macos:
+    name: macOS (Apple Silicon)
+    needs: gate
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: rustup toolchain install --profile minimal --target aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-macos
+      - run: pnpm install --frozen-lockfile
+
+      - name: Write the App Store Connect API key
+        env:
+          KEY_CONTENT: ${{ secrets.APPLE_API_KEY_PATH }}
+        run: (umask 077 && printf '%s' "${KEY_CONTENT}" > "${RUNNER_TEMP}/AuthKey.p8")
+
+      - name: Write third-party notices
+        shell: bash
+        run: |
+          python3 scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt \
+            || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
+
+      - name: Build, sign and notarize
+        working-directory: desktop
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # dsymutil runs before the profile's symbol strip, so the shipped
+          # binary stays stripped and the line tables land in a dSYM.
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+          CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
+          # On CI Tauri skips the Finder pass that lays out the disk image
+          # (background, icon positions) unless told not to; without it the
+          # DMG opens as a plain folder window.
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+        run: >-
+          pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
+          --config "${RELEASE_CONFIG}"
+
+      - name: Check macOS WebKit imports
+        run: >-
+          cargo run --locked -p xtask -- check-macos-imports
+          target/aarch64-apple-darwin/release/bundle/macos/Zephium.app/Contents/MacOS/zephium-desktop
+
+      - name: Locate the bundles
+        run: |
+          bundle=target/aarch64-apple-darwin/release/bundle
+          {
+            echo "APP=${bundle}/macos/Zephium.app"
+            echo "UPDATER=${bundle}/macos/Zephium.app.tar.gz"
+            echo "DMG=${bundle}/dmg/Zephium_${VERSION}_aarch64.dmg"
+          } >> "${GITHUB_ENV}"
+
+      # Tauri notarizes and staples the app, but only signs the DMG.
+      - name: Notarize and staple the DMG
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: |
+          auth=(--key "${APPLE_API_KEY_PATH}" --key-id "${APPLE_API_KEY}" --issuer "${APPLE_API_ISSUER}")
+          result="$(xcrun notarytool submit "${DMG}" "${auth[@]}" --wait --timeout 30m --output-format json)" || true
+          echo "${result}"
+          if [[ "$(jq -r '.status // empty' <<<"${result}")" != Accepted ]]; then
+            id="$(jq -r '.id // empty' <<<"${result}")"
+            [[ -z "${id}" ]] || xcrun notarytool log "${id}" "${auth[@]}" || true
+            echo "::error title=DMG notarization failed::Apple did not accept ${DMG}."
+            exit 1
+          fi
+          xcrun stapler staple "${DMG}"
+
+      - name: Verify signing, notarization and entitlements
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "${APP}"
+          codesign --verify --strict --verbose=2 "${DMG}"
+          team="$(codesign -dv "${APP}" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          if [[ "${team}" != "${APPLE_TEAM_ID}" ]]; then
+            echo "::error title=Wrong signing team::The app is signed by team '${team}', not APPLE_TEAM_ID."
+            exit 1
+          fi
+          spctl -a -vv -t exec "${APP}"
+          xcrun stapler validate "${APP}"
+          xcrun stapler validate "${DMG}"
+
+          entitlements() {
+            codesign -d --entitlements - --xml "$1" 2>/dev/null | python3 -c '
+          import plistlib, sys
+          data = sys.stdin.buffer.read()
+          items = plistlib.loads(data).items() if data.strip() else []
+          print(" ".join(sorted(f"{key}={value}" for key, value in items)))'
+          }
+          main="${APP}/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP}/Contents/Info.plist")"
+          allowed="com.apple.security.device.audio-input=True com.apple.security.device.camera=True com.apple.security.personal-information.location=True"
+          failed=0
+          while IFS= read -r -d '' file; do
+            [[ "$(file -b "${file}")" == Mach-O* ]] || continue
+            expected=""
+            [[ "${file}" == "${main}" ]] && expected="${allowed}"
+            actual="$(entitlements "${file}")"
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "::error title=Unexpected entitlements::${file#"${APP}/"} has [${actual}], expected [${expected}]."
+              failed=1
+            fi
+          done < <(find "${APP}" -type f -print0)
+          [[ "$(entitlements "${main}")" == "${allowed}" ]] || failed=1
+          exit "${failed}"
+
+      - name: Require the updater signature
+        run: test -s "${UPDATER}.sig"
+
+      # minisign signs the bytes. The build-time file name in the signature's
+      # trusted comment is informational and the updater does not compare it,
+      # so renaming keeps Tauri's signature valid and nothing is re-signed.
+      - name: Stage release assets
+        run: |
+          mkdir dist
+          cp "${DMG}" dist/Zephium-macOS-arm64.dmg
+          cp "${UPDATER}" dist/Zephium-macOS-arm64.app.tar.gz
+          cp "${UPDATER}.sig" dist/Zephium-macOS-arm64.app.tar.gz.sig
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-macos
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: symbols-macos-${{ env.VERSION }}
+          path: target/aarch64-apple-darwin/release/*.dSYM
+          if-no-files-found: error
+          retention-days: 90
+
+  windows:
+    name: Windows (x64)
+    needs: gate
+    runs-on: windows-latest
+    # 75 minutes build + 75 minutes signing + 30 minutes setup/verification.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-windows
+      - run: pnpm install --frozen-lockfile
+
+      - name: Write third-party notices
+        shell: bash
+        run: |
+          python3 scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt \
+            || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
+
+      - name: Build
+        timeout-minutes: 75
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # The release profile strips symbols, which on MSVC also drops the
+          # PDB. MSVC keeps debug info in the PDB, never in the .exe.
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+          CARGO_PROFILE_RELEASE_STRIP: none
+        run: pnpm tauri build --bundles nsis --config "${RELEASE_CONFIG}"
+
+      - name: Upload the unsigned setup for SignPath
+        if: needs.gate.outputs.signpath == 'true'
+        id: signpath-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signpath-unsigned-windows-x64
+          path: target/release/bundle/nsis/Zephium_${{ env.VERSION }}_x64-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the Windows setup
+        timeout-minutes: 75
+        if: needs.gate.outputs.signpath == 'true'
+        uses: signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b # v3.1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
           project-slug: zephium
           signing-policy-slug: release-signing
           artifact-configuration-slug: windows-nsis
