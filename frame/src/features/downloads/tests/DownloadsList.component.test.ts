@@ -75,6 +75,54 @@ vi.mock("$shared/ipc/native-events", () => ({
   },
 }));
 
+test("retrying a live download error leaves loaded history visible", async () => {
+  const profile = "00000000000000000000000001";
+  const cleanup = { running: false, error: null };
+  const history: DownloadView = {
+    id: "00000000000000000000000002",
+    revision: "00000001",
+    created_at: "1",
+    filename: "older.zip",
+    source: "https://example.com",
+    source_is_context: false,
+    state: "completed",
+    received: "100",
+    total: "100",
+    error: null,
+    insecure: false,
+  };
+  const latest = { ...history, id: "00000000000000000000000003", filename: "latest.zip" };
+  let failUpdates = true;
+  native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
+    if (call.kind === "list") {
+      return {
+        kind: "page",
+        entries: call.before ? [history] : [latest],
+        next: call.before ? null : latest.id,
+        supported: true,
+        cleanup,
+      };
+    }
+    if (failUpdates) throw new Error("native call failed");
+    return { kind: "updates", entries: [], removed: [], cleanup };
+  });
+  const screen = await render(DownloadsList, { profile });
+  await screen.getByRole("button", { name: "Load more", exact: true }).click();
+  await expect.element(screen.getByText(history.filename, { exact: true })).toBeVisible();
+
+  native.listener?.({ payload: { profile } });
+  await expect
+    .element(screen.getByRole("alert"))
+    .toHaveTextContent("Downloads are temporarily unavailable.");
+  failUpdates = false;
+  await screen.getByRole("button", { name: "Try again", exact: true }).click();
+
+  expect(native.call).toHaveBeenLastCalledWith(profile, { kind: "updates" });
+  await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
+  await expect.element(screen.getByText(history.filename, { exact: true })).toBeVisible();
+  await screen.unmount();
+});
+
 test("native completion replaces cancellation with ID-scoped open and reveal actions", async () => {
   const profile = "00000000000000000000000001";
   let entry: DownloadView = {
