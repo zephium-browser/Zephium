@@ -77,7 +77,7 @@
             type="button"
             class="settings-nav-item"
             onclick={() => void browser.open("extensions")}
-          ><Icon icon={extensionLink.icon} size={16} /><span>{extensionLink.title()}</span></button
+            ><Icon icon={extensionLink.icon} size={16} /><span>{extensionLink.title()}</span></button
           >{/if}
       </div>{/each}
   </div>

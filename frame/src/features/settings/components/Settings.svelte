@@ -132,7 +132,9 @@
                     }}
                     ><span
                       ><span class="settings-result-section"
-                        >{offered.find((section) => section.id === result.section)?.title()}</span
+                        >{result.section === "browser"
+                          ? m.settings_browser()
+                          : offered.find((section) => section.id === result.section)?.title()}</span
                       ><strong>{result.label()}</strong><small>{result.description()}</small></span
                     ><Icon icon={ArrowRight01Icon} size={16} /></button
                   >{/each}
