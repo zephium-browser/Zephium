@@ -1,4 +1,17 @@
-ock, fraction } from "../lib/time";
+<script lang="ts">
+  import {
+    Cancel01Icon,
+    PictureInPictureOnIcon,
+    VolumeHighIcon,
+    VolumeOffIcon,
+  } from "@hugeicons/core-free-icons";
+  import * as m from "$shared/i18n/messages";
+  import Icon from "$shared/ui/Icon";
+  import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
+  import { mediaPlayer } from "$domain/media-player";
+  import { tabs } from "$domain/tabs";
+  import { clock, fraction } from "../lib/time";
   import { everyWhileVisible } from "$shared/lib/visible-interval";
 
   let { compact = false }: { compact?: boolean } = $props();
