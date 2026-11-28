@@ -184,7 +184,7 @@
       {:else}
         <Button
           variant="primary"
-          size="compact"
+          size="large"
           shape="capsule"
           disabled={!available || offered.length === 0 || source.running}
           pending={browserImport.busy()}

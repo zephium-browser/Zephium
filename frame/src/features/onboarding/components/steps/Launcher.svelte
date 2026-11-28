@@ -10,6 +10,7 @@
 
   let trigger = $state<LauncherTrigger | null>(null);
   let location = $state<string | null>(null);
+  let ask = $state<string | null>(null);
   let held = $state<Held>(NOTHING_HELD);
   /** The drawn launcher has opened and is typing. */
   let typing = $state(false);
@@ -19,6 +20,8 @@
   let down = $derived(trigger ? heldParts(trigger.shortcut, held, IS_MAC) : []);
   let locationKeys = $derived(location ? acceleratorKeys(location, IS_MAC) : []);
   let locationDown = $derived(location ? heldParts(location, held, IS_MAC) : []);
+  let askKeys = $derived(ask ? acceleratorKeys(ask, IS_MAC) : []);
+  let askDown = $derived(ask ? heldParts(ask, held, IS_MAC) : []);
 
   onMount(() => {
     let live = true;
@@ -30,7 +33,9 @@
     );
     void commands.keymapEntries().then(
       (entries) => {
-        if (live) location = entries.find((entry) => entry.id === "url.focus")?.accelerator ?? null;
+        if (!live) return;
+        location = entries.find((entry) => entry.id === "url.focus")?.accelerator ?? null;
+        ask = entries.find((entry) => entry.id === "tool.ai")?.accelerator ?? null;
       },
       () => {},
     );
@@ -80,6 +85,18 @@
           {/each}
         </div>
         <p>{m.onb_launcher_browser_try()}</p>
+      </div>
+    {/if}
+    {#if ask}
+      <div class="shortcut">
+        <div class="keys" aria-label={askKeys.join(" ")}>
+          {#each askKeys as key, index (index)}
+            <kbd data-down={askDown[index] ?? false} data-lit={real} data-wide={key.length > 2}
+              >{key}</kbd
+            >
+          {/each}
+        </div>
+        <p>{m.onb_launcher_ask()}</p>
       </div>
     {/if}
   </div>
