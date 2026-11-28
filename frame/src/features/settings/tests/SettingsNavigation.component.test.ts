@@ -6,7 +6,10 @@ import * as settings from "../lib/settings-state.svelte";
 import "$styles/global.css";
 import SettingsNavigation from "../components/SettingsNavigation.svelte";
 
-const native = vi.hoisted(() => ({ available: true }));
+const native = vi.hoisted(() => ({
+  available: true,
+  runCommand: vi.fn(async () => ({ accepted: true, operation_id: null })),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const { accountFixture } = await import("$shared/testing/account");
@@ -16,6 +19,7 @@ vi.mock("$shared/ipc/bindings", async () => {
       fault: null,
       retry_after: null,
     }),
+    runCommand: native.runCommand,
   });
 });
 
@@ -62,5 +66,16 @@ test("the identity card is gone where accounts are unavailable", async () => {
   const screen = await render(SettingsNavigation);
   await expect.poll(() => screen.container.querySelector(".identity-slot")).toBeNull();
   native.available = true;
+  await screen.unmount();
+});
+
+test("Extensions opens the extension manager instead of a settings section", async () => {
+  await page.viewport(400, 900);
+  const screen = await render(SettingsNavigation);
+  const button = screen.getByRole("button", { name: "Extensions" });
+  await expect.element(button).toBeVisible();
+  await button.click();
+  expect(native.runCommand).toHaveBeenCalledExactlyOnceWith("browser.extensions");
+  expect(screen.container.querySelector('[aria-current="page"]')).not.toBe(button.element());
   await screen.unmount();
 });

@@ -3,7 +3,9 @@
   import { tick, onMount } from "svelte";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
+  import { surface as browser } from "$domain/surface";
   import {
+    EXTENSIONS_TARGET,
     sections,
     searchSettings,
     shownSections,
@@ -124,7 +126,10 @@
             {:else}<div class="settings-results">
                 {#each results as result (result.id)}<button
                     type="button"
-                    onclick={() => state.select(result.section as SettingsSection, result.target)}
+                    onclick={() => {
+                      if (result.target === EXTENSIONS_TARGET) void browser.open("extensions");
+                      else state.select(result.section as SettingsSection, result.target);
+                    }}
                     ><span
                       ><span class="settings-result-section"
                         >{offered.find((section) => section.id === result.section)?.title()}</span

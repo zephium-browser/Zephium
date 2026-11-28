@@ -22,6 +22,7 @@ import {
   Brain01Icon,
   Plug01Icon,
   DashboardSquare02Icon,
+  PuzzleIcon,
 } from "@hugeicons/core-free-icons";
 /** Navigation order: groups in `groups` order, sections within a group as
  *  listed here. Ids are deep-link targets, so a rename changes titles only. */
@@ -187,6 +188,17 @@ export const groups = [
   { id: "work", label: m.section_work },
   { id: "app", label: m.settings_application },
 ] as const;
+
+/** The extension manager is a browser page, not a Settings section: its link
+ *  opens that page from the navigation and from Settings search. */
+export const EXTENSIONS_TARGET = "browser:extensions";
+export const extensionLink = {
+  id: "extensions",
+  title: m.section_extensions,
+  description: m.section_extensions_description,
+  icon: PuzzleIcon,
+} as const;
+
 export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
@@ -219,7 +231,18 @@ export function searchSettings(query: string) {
       description: section.description,
       target: null as string | null,
     }));
-  return [...destinations, ...preferences];
+  const links = matches(extensionLink.title() + " " + extensionLink.description())
+    ? [
+        {
+          id: `link:${extensionLink.id}`,
+          section: "browser" as const,
+          label: extensionLink.title,
+          description: extensionLink.description,
+          target: EXTENSIONS_TARGET as string | null,
+        },
+      ]
+    : [];
+  return [...destinations, ...links, ...preferences];
 }
 export function searchSections(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);

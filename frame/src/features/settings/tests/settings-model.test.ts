@@ -31,6 +31,14 @@ it("finds the agent destinations without exposing unimplemented controls", async
   );
 });
 
+it("finds the extension manager in search", async () => {
+  const { EXTENSIONS_TARGET, searchSettings } = await import("../lib/settings-model");
+  for (const query of ["extensions", "favorite tools"]) {
+    expect(searchSettings(query).some((result) => result.target === EXTENSIONS_TARGET)).toBe(true);
+  }
+  expect(searchSettings("unfindablephrase")).toEqual([]);
+});
+
 it("offers Account through the identity card and search, outside the groups", async () => {
   const { groups, sections, searchSettings } = await import("../lib/settings-model");
   const account = sections.find((section) => String(section.id) === "account");
