@@ -310,6 +310,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         Keys::same("CmdOrCtrl+L"),
         Group::View,
     ),
+    alternate(
+        "url.focus.alt",
+        "Open Location (Alternate)",
+        other_only("Alt+D"),
+        "url.focus",
+    ),
     command("zoom.in", "Zoom In", Keys::same("CmdOrCtrl+="), Group::View),
     command(
         "zoom.out",
@@ -976,6 +982,7 @@ mod tests {
             ("Alt+Left", "nav.back.alt"),
             ("Alt+Right", "nav.forward.alt"),
             ("Alt+Home", "nav.home"),
+            ("Alt+D", "url.focus.alt"),
             ("Ctrl+PageUp", "tab.previous"),
             ("Ctrl+PageDown", "tab.next"),
             ("Ctrl+Shift+Delete", "settings.clearData"),
@@ -1010,6 +1017,7 @@ mod tests {
             "page.devtools.alt",
             "nav.back.alt",
             "nav.forward.alt",
+            "url.focus.alt",
         ] {
             assert_eq!(get(id).expect(id).keys.mac, None, "{id}");
         }

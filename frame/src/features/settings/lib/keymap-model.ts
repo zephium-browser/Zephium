@@ -42,6 +42,7 @@ const TITLES: Record<string, () => string> = {
   "settings.clearData": m.command_settings_clear_data,
   "nav.stop": m.command_nav_stop,
   "url.focus": m.command_url_focus,
+  "url.focus.alt": m.command_url_focus_alternate,
   "zoom.in": m.command_zoom_in,
   "zoom.out": m.command_zoom_out,
   "zoom.reset": m.command_zoom_reset,
@@ -86,7 +87,7 @@ export type KeymapSection = { id: string; title: string; entries: KeymapEntry[] 
 const tabCommand = (entry: KeymapEntry) => entry.id.startsWith("tab.");
 const viewKey = (entry: KeymapEntry) =>
   entry.group === "keys" &&
-  /^(nav\.(reload|hardReload)|page\.devtools|window\.fullscreen)/u.test(entry.id);
+  /^(nav\.(reload|hardReload)|page\.devtools|window\.fullscreen|url\.focus)/u.test(entry.id);
 const historyKey = (entry: KeymapEntry) => /^nav\.(back|forward)\.alt$/u.test(entry.id);
 
 /** A second key, or a window key, the platform has no default for is not offered. */

@@ -76,6 +76,8 @@ describe("keymap model", () => {
       keyed("nav.reload", "view", "Ctrl+R"),
       keyed("nav.reload.alt", "keys", "F5"),
       keyed("nav.hardReload", "view", "Ctrl+Shift+R"),
+      keyed("url.focus", "view", "Ctrl+L"),
+      keyed("url.focus.alt", "keys", "Alt+D"),
       keyed("window.fullscreen", "keys", "F11"),
       keyed("nav.back", "history", "Ctrl+["),
       keyed("nav.back.alt", "keys", "Alt+Left"),
@@ -87,6 +89,8 @@ describe("keymap model", () => {
       "nav.reload",
       "nav.reload.alt",
       "nav.hardReload",
+      "url.focus",
+      "url.focus.alt",
       "window.fullscreen",
     ]);
     expect(ids("history")).toEqual(["nav.back", "nav.back.alt"]);
@@ -94,10 +98,14 @@ describe("keymap model", () => {
     expect(commandTitle(sections.find((s) => s.id === "view")!.entries[1]!)).toBe(
       "Reload page (alternate)",
     );
+    expect(commandTitle(sections.find((s) => s.id === "view")!.entries[4]!)).toBe(
+      "Open location (alternate)",
+    );
 
     const mac = keymapSections([
       entry("nav.reload.alt", "keys"),
       entry("window.fullscreen", "keys"),
+      entry("url.focus.alt", "keys"),
     ]);
     expect(mac).toEqual([]);
   });
