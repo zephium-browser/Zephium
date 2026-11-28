@@ -95,11 +95,22 @@
   let pressing = false;
   const mode = $derived(engaged ? "focus" : "rest");
 
+  const FIELD_MIN = 34;
+  const FIELD_MAX = 132;
   function grow() {
     const element = textarea;
     if (!element) return;
-    element.style.blockSize = "auto";
-    element.style.blockSize = `${Math.min(element.scrollHeight, 132)}px`;
+    // Measure with the scrollbar and the old height out of the way. Letting
+    // either follow the draft makes the text's width change with its height:
+    // a scrollbar appears, the text rewraps, the height changes back, and the
+    // field shakes on every keystroke. Keeping the measurement at one width
+    // breaks that loop; nothing paints between these two writes.
+    const overflow = element.style.overflowY;
+    element.style.overflowY = "hidden";
+    element.style.blockSize = `${FIELD_MIN}px`;
+    const measured = Math.min(Math.max(element.scrollHeight, FIELD_MIN), FIELD_MAX);
+    element.style.blockSize = `${measured}px`;
+    element.style.overflowY = overflow;
   }
   $effect(() => {
     // Let the engine size the focused field without collapsing it on each key.
@@ -464,6 +475,10 @@
     box-sizing: border-box;
     min-block-size: 34px;
     max-block-size: 132px;
+    overflow-y: auto;
+    /* The gutter is reserved even before the words overflow, so a scrollbar
+       arriving cannot narrow the text and reflow it under the caret. */
+    scrollbar-gutter: stable;
     padding: 7px 4px;
     border: 0;
     background: transparent;

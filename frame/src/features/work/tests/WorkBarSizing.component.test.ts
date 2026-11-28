@@ -24,6 +24,18 @@ async function open() {
   return { screen, field, input, bar, onsubmit };
 }
 
+/** Everything a person could see move when a letter is typed. */
+function geometry(input: HTMLTextAreaElement) {
+  const rect = input.getBoundingClientRect();
+  return {
+    height: rect.height,
+    width: rect.width,
+    top: rect.top,
+    bottom: rect.bottom,
+    clientWidth: input.clientWidth,
+  };
+}
+
 test("wrapped text follows the bar's width without another keystroke", async () => {
   const { field, input, bar } = await open();
   await field.fill("A line of text. ".repeat(10));
@@ -31,13 +43,12 @@ test("wrapped text follows the bar's width without another keystroke", async () 
   const wideHeight = input.clientHeight;
   bar.style.inlineSize = "320px";
   await expect.poll(() => input.clientHeight).toBeGreaterThan(wideHeight);
-  expect(input.clientHeight).toBe(input.scrollHeight);
   bar.style.inlineSize = "600px";
   await expect.poll(() => input.clientHeight).toBe(wideHeight);
 });
 
 test.each([false, true])(
-  "typing and programmatic drafts grow, cap and shrink (measured fallback: %s)",
+  "typing never moves the field, at one line or at the cap (measured fallback: %s)",
   async (fallback) => {
     if (fallback) {
       const supports = CSS.supports.bind(CSS);
@@ -49,24 +60,31 @@ test.each([false, true])(
     if (fallback) input.style.setProperty("field-sizing", "fixed");
     await field.fill("Short");
     await expect.poll(() => input.clientHeight).toBe(34);
-    await field.fill("A line of text. ".repeat(10));
-    await expect.poll(() => input.clientHeight).toBeGreaterThan(34);
-    expect(input.clientHeight).toBe(input.scrollHeight);
-    // Use short lines so the next keystroke leaves the scroll geometry unchanged.
+    const rest = geometry(input);
+
+    // Words that stay on the first line cannot shift the field at all.
+    await userEvent.keyboard(" words that stay here");
+    expect(input.value).toBe("Short words that stay here");
+    expect(geometry(input)).toEqual(rest);
+
+    // Nor can letters added to a draft already tall enough to scroll.
     const draft = "A short line\n".repeat(12) + "Last line";
     await screen.rerender({ value: draft });
     await expect.poll(() => input.clientHeight).toBe(132);
     await userEvent.keyboard(IS_MAC ? "{Meta>}{ArrowDown}{/Meta}" : "{Control>}{End}{/Control}");
     expect(input.selectionStart).toBe(draft.length);
-    const height = input.scrollHeight;
-    input.scrollTop = height;
-    const top = input.scrollTop;
+    input.scrollTop = input.scrollHeight;
+    const tall = geometry(input);
+    const scrollTop = input.scrollTop;
     await userEvent.keyboard("x");
     await new Promise((resolve) => requestAnimationFrame(resolve));
     expect(input.value).toBe(`${draft}x`);
-    expect(input.clientHeight).toBe(132);
-    expect(input.scrollHeight).toBe(height);
-    expect(input.scrollTop).toBe(top);
+    expect(geometry(input)).toEqual(tall);
+    expect(input.scrollTop).toBe(scrollTop);
+
+    // The scrollbar's gutter is reserved in both states, so crossing the cap
+    // cannot narrow the text and reflow it under the caret.
+    expect(input.clientWidth).toBe(rest.clientWidth);
     await screen.rerender({ value: "Short" });
     await expect.poll(() => input.clientHeight).toBe(34);
     await userEvent.keyboard("{Enter}");
