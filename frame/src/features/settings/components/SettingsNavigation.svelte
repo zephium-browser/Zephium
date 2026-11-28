@@ -2,7 +2,7 @@
   import * as m from "$shared/i18n/messages";
   import { surface as browser } from "$domain/surface";
   import * as settings from "../lib/settings-state.svelte";
-  import { groups, shownSections } from "../lib/settings-model";
+  import { extensionLink, groups, shownSections } from "../lib/settings-model";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
@@ -73,6 +73,12 @@
             onclick={() => settings.select(item.id)}
             ><Icon icon={item.icon} size={16} /><span>{item.title()}</span></button
           >{/each}
+        {#if group.id === "browser"}<button
+            type="button"
+            class="settings-nav-item"
+            onclick={() => void browser.open("extensions")}
+            ><Icon icon={extensionLink.icon} size={16} /><span>{extensionLink.title()}</span></button
+          >{/if}
       </div>{/each}
   </div>
 </nav>
