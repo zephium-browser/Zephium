@@ -175,6 +175,27 @@ impl ICoreWebView2Controller_Impl for Controller_Impl {
 }
 
 #[test]
+fn a_bare_escape_never_leaves_fullscreen_from_the_accelerator_hook() {
+    const VK_ESCAPE: u32 = 0x1B;
+    const VK_F11: u32 = 0x7A;
+    // Escape is not a caption key, so it reaches the page and shortcut
+    // matching instead of being taken by the window.
+    assert_eq!(
+        crate::caption_keys::classify(VK_ESCAPE, false, false, false),
+        None
+    );
+    for (key, ctrl, shift, alt) in [
+        (VK_ESCAPE, false, false, false),
+        (VK_ESCAPE, true, false, false),
+        (VK_F11, false, false, false),
+    ] {
+        assert!(!crate::caption_keys::accelerator_exits_fullscreen(
+            key, ctrl, shift, alt
+        ));
+    }
+}
+
+#[test]
 fn hides_return_focus_after_settlement_including_a_revision_redrive() {
     for redrive in [false, true] {
         for deny in [
