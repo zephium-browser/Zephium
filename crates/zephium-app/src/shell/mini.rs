@@ -182,6 +182,7 @@ impl Shell {
             NativeOpener {
                 source,
                 activate_when_presentable: foreground,
+                glance: false,
             },
         );
     }
@@ -214,6 +215,7 @@ impl Shell {
             NativeOpener {
                 source,
                 activate_when_presentable: false,
+                glance: false,
             },
         );
         self.commit(Vec::new());

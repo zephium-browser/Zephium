@@ -906,6 +906,8 @@ fn past_the_window_limit_a_popup_a_mini_page_opened_is_kept_as_a_background_tab(
             id: page,
             child,
             foreground: true,
+            url: "https://example.com/".into(),
+            modifiers: Default::default(),
             adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |ok| {
                 send.send(ok).unwrap()
             }),

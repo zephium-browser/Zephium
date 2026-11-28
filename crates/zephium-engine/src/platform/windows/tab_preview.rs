@@ -7,7 +7,7 @@ use wry::WebViewExtWindows;
 
 type Completion = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
 
-pub(crate) fn capture(view: &wry::WebView, done: Completion) {
+pub(crate) fn capture(view: &wry::WebView, full: bool, done: Completion) {
     let mut bounds = windows::Win32::Foundation::RECT::default();
     let valid = unsafe { view.controller().Bounds(&mut bounds) }.is_ok();
     let dimensions = (
@@ -57,7 +57,11 @@ pub(crate) fn capture(view: &wry::WebView, done: Completion) {
                     .ok();
                 }
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    preview_image::thumbnail(bytes, (width, height))
+                    if full {
+                        preview_image::backdrop(bytes, (width, height))
+                    } else {
+                        preview_image::thumbnail(bytes, (width, height))
+                    }
                 }))
                 .ok()
                 .flatten();

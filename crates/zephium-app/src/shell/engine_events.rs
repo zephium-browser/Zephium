@@ -408,8 +408,10 @@ impl Shell {
                 id,
                 child,
                 foreground,
+                url,
+                modifiers,
                 adoption,
-            } => self.adopt_linked_native_tab(id, child, foreground, adoption),
+            } => self.adopt_linked_native_tab(id, child, foreground, &url, modifiers, adoption),
             EngineEvent::NativeTabCloseRequested { id } => self.close_owned_native_tab(id),
             EngineEvent::MediaReturnRequested { id } => self.return_to_media(id),
             EngineEvent::PageOpenBlocked { id, url } => {
