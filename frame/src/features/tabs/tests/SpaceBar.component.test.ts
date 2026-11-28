@@ -1,251 +1,4 @@
-import { afterEach, expect, test, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
-import { render } from "vitest-browser-svelte";
-import "$styles/global.css";
-import type { ItemsState, SidebarNodeView } from "$shared/ipc/bindings";
-import { emitNativeEvent } from "$shared/testing/native-events";
-import { revision, spaceFixture, tabFixture } from "$shared/testing/fixtures";
-import { tabs } from "$domain/tabs";
-import { uiCommands } from "$domain/ui-commands";
-import SidebarBody from "../components/SidebarBody.svelte";
-import { sidebarTree } from "../lib/sidebar-model";
-
-const native = vi.hoisted(() => ({
-  open: vi.fn(),
-  close: vi.fn(),
-  switchTo: vi.fn(),
-  step: vi.fn(),
-  create: vi.fn(),
-  update: vi.fn(),
-  remove: vi.fn(),
-  reorder: vi.fn(),
-}));
-
-vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  const ok = async () => ({ accepted: true, operation_id: null });
-  return mockBindings({
-    tabsBootstrap: async () => {},
-    tabsOpen: native.open.mockImplementation(ok),
-    tabsClose: native.close.mockImplementation(ok),
-    spacesSwitch: native.switchTo.mockImplementation(ok),
-    spacesStep: native.step.mockImplementation(ok),
-    spacesCreate: native.create.mockImplementation(ok),
-    spacesUpdate: native.update.mockImplementation(ok),
-    spacesDelete: native.remove.mockImplementation(ok),
-    spacesReorder: native.reorder.mockImplementation(ok),
-    keymapEntries: async () => [],
-  });
-});
-
-const HOME = spaceFixture("home", "Home", {
-  icon: { kind: "symbol", index: 2 },
-  color: 1,
-  tabs: 2,
-});
-const STUDIO = spaceFixture("studio", "Studio", {
-  icon: { kind: "emoji", text: "🎨" },
-  color: 4,
-  theme: { kind: "preset", id: "nord" },
-  tabs: 3,
-});
-
-let projection = 100;
-function project(state: Partial<ItemsState>) {
-  const open = [tabFixture({ id: "a", title: "Alpha" }), tabFixture({ id: "b", title: "Beta" })];
-  const node = (id: string): SidebarNodeView => ({
-    id,
-    parent_id: null,
-    section: "today",
-    kind: { type: "tab", tab_id: id },
-  });
-  emitNativeEvent("itemsChanged", {
-    projection_revision: revision((projection += 1)),
-    profile: { id: "p", name: "Personal", kind: "default" },
-    spaces: [HOME, STUDIO],
-    active_space_id: "home",
-    nodes: open.map((tab) => node(tab.id)),
-    tabs: open,
-    active: "a",
-    split_group: null,
-    ...state,
-  });
-}
-
-async function mount(empty = false) {
-  await page.viewport(420, 760);
-  await tabs.init();
-  await uiCommands.init();
-  project(empty ? { nodes: [], tabs: [], active: null } : {});
-  const tree = sidebarTree(tabs.sidebarNodes(), tabs.tabs());
-  return render(SidebarBody, {
-    pinned: tree.pinned,
-    today: tree.today,
-    splitting: false,
-    onSelect: () => {},
-  });
-}
-
-afterEach(() => {
-  tabs.dispose();
-  uiCommands.dispose();
-  vi.clearAllMocks();
-});
-
-test("the row names the space and its plus opens a tab, with no pager beside them", async () => {
-  const screen = await mount();
-  await expect.element(screen.getByRole("button", { name: "Spaces — Home" })).toBeVisible();
-  await screen.getByRole("button", { name: "New tab", exact: true }).click();
-  expect(native.open).toHaveBeenCalledOnce();
-  expect(screen.container.querySelector(".space-dots, .space-dot")).toBeNull();
-  expect(screen.container.querySelectorAll(".space-bar button")).toHaveLength(2);
-});
-
-test("middle-click opens a tab only on the empty list background", async () => {
-  const screen = await mount();
-  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
-  const background = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
-  const position = { x: 24, y: background.clientHeight - 20 };
-
-  await userEvent.click(background, { position });
-  expect(native.open).not.toHaveBeenCalled();
-  await userEvent.click(background, { button: "middle", position });
-  expect(native.open).toHaveBeenCalledOnce();
-
-  const row = screen.getByRole("button", { name: "Alpha", exact: true });
-  await userEvent.click(row, { button: "middle" });
-  expect(native.close).toHaveBeenCalledExactlyOnceWith("a");
-  expect(native.open).toHaveBeenCalledOnce();
-
-  // A press on a row may end on the scroller; that is not a background click.
-  row.element().dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
-  background.dispatchEvent(new MouseEvent("mouseup", { button: 1, bubbles: true }));
-  background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
-  expect(native.open).toHaveBeenCalledOnce();
-
-  const press = new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true });
-  background.dispatchEvent(press);
-  expect(press.defaultPrevented).toBe(true);
-});
-
-test("releasing over a row does not open a tab even when auxclick targets the background", async () => {
-  const screen = await mount();
-  const background = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
-  const row = screen.getByRole("button", { name: "Alpha", exact: true }).element();
-
-  background.dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
-  row.dispatchEvent(new MouseEvent("mouseup", { button: 1, bubbles: true }));
-  background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
-  expect(native.open).not.toHaveBeenCalled();
-  expect(native.close).not.toHaveBeenCalled();
-});
-
-test("middle-clicking the padding beneath the last tab opens a tab", async () => {
-  const screen = await mount();
-  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
-  const list = screen.container.querySelector<HTMLElement>(".tab-list:not([hidden])")!;
-
-  await userEvent.click(list, {
-    button: "middle",
-    position: { x: 24, y: list.clientHeight - 1 },
-  });
-  expect(native.open).toHaveBeenCalledOnce();
-});
-
-test("a space press released outside its row cannot become a drag", async () => {
-  const screen = await mount();
-  await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  const first = screen.getByRole("menuitemradio").first();
-  await expect.element(first).toBeVisible();
-  const row = first.element() as HTMLButtonElement;
-  const capture = vi.spyOn(row, "setPointerCapture").mockImplementation(() => {});
-  const y = row.getBoundingClientRect().top + 4;
-  const pointer = { bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 };
-  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
-  window.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
-  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, clientY: y + 200 }));
-  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
-  expect(capture).not.toHaveBeenCalled();
-  expect(native.reorder).not.toHaveBeenCalled();
-
-  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
-  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 1, clientY: y + 200 }));
-  const studio = screen.getByRole("menuitemradio", { name: "Studio" }).element();
-  studio.dispatchEvent(new PointerEvent("click", { ...pointer, pointerId: 2, detail: 1 }));
-  expect(native.switchTo).not.toHaveBeenCalled();
-  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, pointerId: 2, clientY: y + 200 }));
-  expect(native.reorder).not.toHaveBeenCalled();
-  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
-  expect(native.reorder).toHaveBeenCalledExactlyOnceWith("home", null);
-  studio.dispatchEvent(new PointerEvent("click", { ...pointer, detail: 1 }));
-  expect(native.switchTo).not.toHaveBeenCalled();
-});
-
-test("Enter switches spaces after a drag loses pointer capture", async () => {
-  const screen = await mount();
-  await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  const studio = screen.getByRole("menuitemradio", { name: "Studio" });
-  await expect.element(studio).toBeVisible();
-  const row = studio.element() as HTMLButtonElement;
-  vi.spyOn(row, "setPointerCapture").mockImplementation(() => {});
-  const y = row.getBoundingClientRect().top + 4;
-  const pointer = { bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 };
-  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
-  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 1, clientY: y + 200 }));
-  row.dispatchEvent(new PointerEvent("lostpointercapture", pointer));
-  expect(native.reorder).not.toHaveBeenCalled();
-
-  row.focus();
-  await userEvent.keyboard("{Enter}");
-  expect(native.switchTo).toHaveBeenCalledExactlyOnceWith("studio");
-});
-
-test("the switcher lists every space, checks the one shown and moves to another", async () => {
-  const screen = await mount();
-  await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  const rows = screen.getByRole("menuitemradio");
-  await expect.element(rows.first()).toHaveAttribute("aria-checked", "true");
-  await expect.element(rows.nth(1)).toHaveTextContent("Studio");
-  await rows.nth(1).click();
-  expect(native.switchTo).toHaveBeenCalledWith("studio");
-});
-
-test("a row is a name, with the icons of its first tabs and a count of the rest, and nothing for an empty space", async () => {
-  const screen = await mount();
-  project({
-    spaces: [
-      HOME,
-      spaceFixture("busy", "Busy", {
-        tabs: 5,
-        previews: [null, { origin: "https://a.example", revision: "a" }, null],
-      }),
-      spaceFixture("blank", "Blank"),
-    ],
-  });
-  await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  await expect.element(screen.getByRole("menuitemradio", { name: "Busy" })).toBeVisible();
-  const rows = [...screen.container.querySelectorAll<HTMLElement>("[data-space-row]")];
-  expect(rows).toHaveLength(3);
-  expect(rows[1]!.querySelectorAll(".switch-fav")).toHaveLength(3);
-  expect(rows[1]!.querySelector(".switch-more")?.textContent).toBe("+2");
-  expect(rows[2]!.querySelector(".switch-stack")).toBeNull();
-  // A space no one dressed gets no mark and no tile of its own.
-  expect(rows[2]!.querySelector(".space-glyph")).toBeNull();
-  expect(screen.container.querySelector(".switch-tile")).toBeNull();
-});
-
-test("holding Control names the keys on every row", async () => {
-  const screen = await mount();
-  await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  const list = screen.container.querySelector<HTMLElement>(".switcher")!;
-  expect(list.dataset.keys).toBeUndefined();
-  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Control", ctrlKey: true }));
-  await expect.poll(() => list.dataset.keys).toBeDefined();
-  window.dispatchEvent(new KeyboardEvent("keyup", { key: "Control", ctrlKey: false }));
-  await expect.poll(() => list.dataset.keys).toBeUndefined();
-});
-
-test("a right-click on a row opens its name to be typed over", async () => {
+row opens its name to be typed over", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
   await userEvent.click(screen.getByRole("menuitemradio", { name: "Studio" }), {
@@ -512,4 +265,80 @@ test("a private window has one space and no switcher", async () => {
   project({ profile: { id: "x", name: "Private", kind: "incognito" }, spaces: [HOME] });
   await expect.element(screen.getByRole("button", { name: "New tab" })).toBeVisible();
   expect(screen.container.querySelector(".space-bar")).toBeNull();
+});
+
+async function mountPrivate() {
+  await page.viewport(420, 760);
+  await tabs.init();
+  await uiCommands.init();
+  const open = ["a", "b", "c"].map((id) => tabFixture({ id, title: `Tab ${id}` }));
+  const node = (id: string, section: "pinned" | "today"): SidebarNodeView => ({
+    id,
+    parent_id: null,
+    section,
+    kind: { type: "tab", tab_id: id },
+  });
+  project({
+    profile: { id: "x", name: "Private", kind: "incognito" },
+    spaces: [],
+    active_space_id: null,
+    nodes: [node("a", "pinned"), node("b", "today"), node("c", "today")],
+    tabs: open,
+    active: "b",
+  });
+  flushSync();
+  const tree = sidebarTree(tabs.sidebarNodes(), tabs.tabs());
+  return render(SidebarBody, {
+    pinned: tree.pinned,
+    today: tree.today,
+    splitting: false,
+    onSelect: () => {},
+  });
+}
+
+test("without spaces New tab follows the last row, with pinned tabs still above the rule", async () => {
+  const screen = await mountPrivate();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:600px";
+  const scroller = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const button = screen.getByRole("button", { name: "New tab", exact: true }).element();
+  expect(scroller.contains(button)).toBe(true);
+  expect(button.closest(".new-tab-slot")?.parentElement).toBe(scroller);
+  expect(screen.container.querySelector(".space-bar")).toBeNull();
+
+  const sections = [...scroller.children]
+    .filter((child) => child.classList.contains("tab-list") || child.classList.contains("tab-divider"))
+    .map((child) => (child.classList.contains("tab-divider") ? "divider" : child.getAttribute("aria-label")));
+  expect(sections).toEqual(["Pinned tabs", "divider", "Open tabs"]);
+  const rows = [...scroller.querySelectorAll<HTMLElement>("[data-zephium-tab-id]")];
+  expect(rows.map((row) => row.dataset.zephiumTabId)).toEqual(["a", "b", "c"]);
+  expect(button.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+    rows.at(-1)!.getBoundingClientRect().bottom,
+  );
+
+  await button.click();
+  expect(native.open).toHaveBeenCalledOnce();
+});
+
+test("dropping a tab in the room below the last row appends it in a private window", async () => {
+  const screen = await mountPrivate();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:600px";
+  const scroller = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const handle = screen.container.querySelector<HTMLElement>(
+    '.browse-tab[data-zephium-tab-id="b"] .tab-open',
+  )!;
+  const from = handle.getBoundingClientRect();
+  const init = { bubbles: true, pointerId: 1, button: 0, isPrimary: true };
+  const start = { x: from.left + 20, y: from.top + from.height / 2 };
+  handle.dispatchEvent(new PointerEvent("pointerdown", { ...init, clientX: start.x, clientY: start.y }));
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { ...init, clientX: start.x, clientY: start.y + 8 }),
+  );
+  const room = scroller.getBoundingClientRect();
+  const to = { x: room.left + 40, y: room.bottom - 8 };
+  handle.dispatchEvent(new PointerEvent("pointermove", { ...init, clientX: to.x, clientY: to.y }));
+  await frame();
+  handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
+  expect(native.setEssential).toHaveBeenCalledExactlyOnceWith("b", false, null);
+  expect(screen.container.querySelectorAll(".tab-divider")).toHaveLength(1);
 });

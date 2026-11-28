@@ -87,18 +87,10 @@
   "these stay" without spending a row on a word, and the rows themselves carry
   the difference by having no close control.
 -->
-<!-- Opening a tab never scrolls away with the tabs it adds to. -->
-{#if spaced}<SpaceBar {extras} onOpenChange={(open) => (spacePanelOpen = open)} />{:else}<div
-    class="new-tab-slot"
-    data-cascade
-    style:--cascade={0}
-  >
-    <button type="button" class="new-tab" onclick={tabs.open}>
-      <Icon icon={Add01Icon} size={16} />
-      <span>{m.new_tab()}</span>
-    </button>
-    {@render extras?.()}
-  </div>{/if}
+<!-- Opening a tab never scrolls away with the tabs it adds to. In a spaced
+     sidebar the plus sits at the end of the rail (see SpaceBar); without
+     spaces new tabs join the bottom of the list, so the plus follows them. -->
+{#if spaced}<SpaceBar {extras} onOpenChange={(open) => (spacePanelOpen = open)} />{/if}
 
 <div
   bind:this={stage}
@@ -145,6 +137,18 @@
         {splitting}
         {onSelect}
       />
+
+      {#if !spaced}
+        <!-- Below the last row, inside the drop region: the room under it
+             stays the end of the list, so a tab dropped here joins the end. -->
+        <div class="new-tab-slot" data-cascade style:--cascade={0}>
+          <button type="button" class="new-tab" onclick={tabs.open}>
+            <Icon icon={Add01Icon} size={16} />
+            <span>{m.new_tab()}</span>
+          </button>
+          {@render extras?.()}
+        </div>
+      {/if}
     </div>
     <TabSelectionBar {selection} />
     {#if peeking && after}<SpacePeek space={after} side="next" />{/if}
