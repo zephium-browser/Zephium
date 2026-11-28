@@ -1,17 +1,20 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
+import { tick } from "svelte";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { preferences } from "$domain/preferences";
 import { uiCommands } from "$domain/ui-commands";
+import * as attention from "$session/attention.svelte";
 import AddressFieldHost from "./AddressFieldHost.svelte";
 
 const native = vi.hoisted(() => ({
   defaultZoom: "100",
   page: null as string | null,
   edit: vi.fn(async () => true),
+  run: vi.fn(async (_id: string) => ({ accepted: true, operation_id: null })),
   answer: vi.fn(async () => ({ accepted: true, operation_id: null })),
 }));
 
@@ -43,7 +46,7 @@ vi.mock("$shared/ipc/bindings", async () => {
       },
     ],
     tabsBootstrap: async () => {},
-    runCommand: async () => ({ accepted: true, operation_id: null }),
+    runCommand: native.run,
     launcherEdit: native.edit,
     tabsAnswerPageRequest: native.answer as never,
     settingGet: async (key: string) => (key === "zoom.default" ? native.defaultZoom : null),
@@ -58,13 +61,16 @@ const stamp = () => revision((clock += 1));
 afterEach(() => {
   tabs.dispose();
   preferences.dispose();
+  emitNativeEvent("uiCommand", "");
+  uiCommands.dispose();
   native.defaultZoom = "100";
   native.page = null;
   native.edit.mockClear();
+  native.run.mockClear();
 });
 
 async function field(
-  props: { compact?: boolean } = {},
+  props: { compact?: boolean; sidebarVisible?: boolean } = {},
   overrides: Partial<Parameters<typeof tabFixture>[0]> = {},
 ) {
   await tabs.init();
@@ -145,7 +151,31 @@ test("the location shortcut on a refused page edits the refused address", async 
   emitNativeEvent("uiCommand", "url.focus");
   await expect.poll(() => native.edit.mock.calls.length).toBe(1);
   expect(native.edit).toHaveBeenCalledWith(tabs.activeId(), "https://blocked-badware.test/win");
-  uiCommands.dispose();
+});
+
+test.each([false, true])(
+  "the location shortcut waits for the expanded sidebar, with blur %s",
+  async (blur) => {
+    await uiCommands.init();
+    const { screen, input } = await field({ sidebarVisible: false }, { url: null });
+    emitNativeEvent("uiCommand", "url.focus");
+    await expect.poll(attention.wanted).toBe(true);
+    expect(document.activeElement).not.toBe(input);
+    if (blur) window.dispatchEvent(new Event("blur"));
+    await screen.rerender({ sidebarVisible: true });
+    await tick();
+    expect(document.activeElement === input).toBe(!blur);
+    expect(attention.wanted()).toBe(false);
+  },
+);
+
+test("the location shortcut on a page-less compact sidebar opens the launcher", async () => {
+  await uiCommands.init();
+  const { input } = await field({ compact: true, sidebarVisible: false }, { url: null });
+  emitNativeEvent("uiCommand", "url.focus");
+  await expect.poll(() => native.run.mock.calls.length).toBe(1);
+  expect(native.run).toHaveBeenCalledWith("launcher.toggle");
+  expect(document.activeElement).not.toBe(input);
 });
 
 test("editing shows the whole address and rests on the host", async () => {

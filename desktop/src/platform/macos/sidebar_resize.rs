@@ -1,4 +1,5 @@
-//! Native pointer feedback for the Svelte sidebar. Hidden cards follow capture live.
+//! Native pointer feedback for the Svelte sidebar. Cards and expanded columns
+//! follow the pointer, while a guide shows where a column will land.
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ptr::NonNull;
@@ -22,7 +23,15 @@ use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
 use zephium_core::layout::{HIDDEN_CARD_INSET, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
-type Commit = Rc<dyn Fn(f64, u64, Option<bool>)>;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Resize {
+    CardProgress { width: f64, active: bool },
+    ColumnProgress { width: f64, active: bool },
+    Land { width: f64, travel: bool },
+    Hide { width: f64 },
+}
+
+type Commit = Rc<dyn Fn(Resize, u64) -> bool>;
 static REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn publish_revision(revision: u64) -> bool {
     revision >= REVISION.fetch_max(revision, Ordering::AcqRel)
@@ -49,6 +58,52 @@ struct Capture {
     original: f64,
     pending: f64,
     revision: u64,
+    kind: CaptureKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CaptureKind {
+    Card,
+    Column,
+    Guide,
+}
+
+impl CaptureKind {
+    fn new(width: f64, hidden_card: bool) -> Self {
+        if hidden_card {
+            Self::Card
+        } else if width >= MIN_EXPANDED {
+            Self::Column
+        } else {
+            Self::Guide
+        }
+    }
+
+    fn progress(self, width: f64, active: bool) -> Option<Resize> {
+        match self {
+            Self::Card => Some(Resize::CardProgress { width, active }),
+            Self::Column => Some(Resize::ColumnProgress { width, active }),
+            Self::Guide => None,
+        }
+    }
+}
+
+impl Capture {
+    fn release(self, requested: f64) -> Resize {
+        if self.kind == CaptureKind::Column && requested < SNAP {
+            return Resize::Hide {
+                width: self.original,
+            };
+        }
+        Resize::Land {
+            width: if self.kind == CaptureKind::Card {
+                expanded_width(requested)
+            } else {
+                resolved_width(requested)
+            },
+            travel: self.kind == CaptureKind::Guide,
+        }
+    }
 }
 
 struct Observers {
@@ -160,10 +215,17 @@ define_class!(
             if !self.ivars().enabled.get() || !revision_current(self.ivars().revision.get()) { return; }
             let Some(window) = self.window() else { return };
             let original = self.ivars().width.get();
-            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get() }));
+            let kind = CaptureKind::new(original, self.ivars().hidden_card.get());
+            let revision = self.ivars().revision.get();
+            let generation = self.ivars().generation.get();
+            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision, kind }));
             if !self.install_observers(window) { self.cancel(false); return; }
-            if self.ivars().hidden_card.get() { (self.ivars().commit)(original, self.ivars().revision.get(), Some(true)); }
-            else { self.feedback(original, true); }
+            if kind != CaptureKind::Card { self.feedback(original, true); }
+            if self.ivars().generation.get() == generation {
+                if let Some(progress) = kind.progress(original, true) {
+                    (self.ivars().commit)(progress, revision);
+                }
+            }
         }
         #[unsafe(method(mouseDragged:))]
         fn dragged(&self, event: &NSEvent) {
@@ -177,14 +239,15 @@ define_class!(
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
             self.ivars().capture.set(Some(capture));
-            if self.ivars().hidden_card.get() {
-                let width = card_width(capture.pending);
-                if width != self.ivars().width.get() {
+            if capture.kind != CaptureKind::Card { self.feedback(resolved_width(capture.pending), true); }
+            let width = expanded_width(capture.pending);
+            if self.ivars().generation.get() == generation && width != self.ivars().width.get() {
+                if let Some(progress) = capture.kind.progress(width, true) {
                     self.ivars().width.set(width);
                     self.place();
-                    (self.ivars().commit)(width, capture.revision, Some(true));
+                    if self.ivars().generation.get() == generation { (self.ivars().commit)(progress, capture.revision); }
                 }
-            } else { self.feedback(resolved_width(capture.pending), true); }
+            }
         }
         #[unsafe(method(mouseUp:))]
         fn up(&self, event: &NSEvent) {
@@ -193,14 +256,20 @@ define_class!(
             if !revision_current(capture.revision) { self.cancel(false); return; }
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
             let requested = if requested.is_finite() { requested } else { capture.pending };
-            let width = if self.ivars().hidden_card.get() { card_width(requested) } else { resolved_width(requested) };
             let generation = self.ivars().generation.get();
-            if !self.ivars().hidden_card.get() { self.feedback(width, true); }
+            if capture.kind != CaptureKind::Card { self.feedback(resolved_width(requested), true); }
             if self.ivars().generation.get() != generation { return; }
             self.ivars().capture.set(None);
             self.cancel(true);
             if self.ivars().generation.get() != generation.wrapping_add(1) || !self.ivars().enabled.get() { return; }
-            if revision_current(capture.revision) { (self.ivars().commit)(width, capture.revision, None); }
+            if revision_current(capture.revision) {
+                let release = capture.release(requested);
+                if !(self.ivars().commit)(release, capture.revision) {
+                    self.restore(capture);
+                } else if let Resize::Land { width, travel: false } | Resize::Hide { width } = release {
+                    self.ivars().width.set(width);
+                }
+            }
         }
     }
 );
@@ -372,12 +441,14 @@ impl Control {
                     .is_some_and(|current| std::ptr::eq(current, view))
             })
     }
+    fn restore(&self, capture: Capture) {
+        if let Some(progress) = capture.kind.progress(capture.original, false) {
+            self.ivars().width.set(capture.original);
+            (self.ivars().commit)(progress, capture.revision);
+        }
+    }
     fn cancel(&self, fade: bool) {
         let capture = self.ivars().capture.take();
-        if let Some(capture) = capture.filter(|_| self.ivars().hidden_card.get()) {
-            self.ivars().width.set(capture.original);
-            (self.ivars().commit)(capture.original, capture.revision, Some(false));
-        }
         self.ivars()
             .generation
             .set(self.ivars().generation.get().wrapping_add(1));
@@ -393,6 +464,9 @@ impl Control {
             .try_borrow_mut()
             .ok()
             .and_then(|mut observers| observers.take());
+        if let Some(capture) = capture {
+            self.restore(capture);
+        }
         drop(observers);
         if let Some(guide) = guide {
             if !fade || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
@@ -595,11 +669,12 @@ pub(super) fn configure(
     };
     let hidden_card =
         super::HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(crate::MAIN_LABEL));
-    let live = hidden_card
-        && control.ivars().hidden_card.get()
-        && control.ivars().revision.get() == revision;
-    if !live && (control.ivars().capture.get().is_some() || control.ivars().width.get() != width)
-        || !enabled
+    let kind = CaptureKind::new(width, hidden_card);
+    let following = control.ivars().capture.get().is_some_and(|capture| {
+        capture.kind != CaptureKind::Guide && capture.kind == kind && capture.revision == revision
+    });
+    if !following
+        && (control.ivars().capture.get().is_some() || control.ivars().width.get() != width)
     {
         control.cancel(false);
     }
@@ -729,7 +804,7 @@ fn resolved_width(width: f64) -> f64 {
     if !width.is_finite() || width < SNAP {
         MIN_SIDEBAR_WIDTH
     } else {
-        width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
+        expanded_width(width)
     }
 }
 
@@ -754,7 +829,7 @@ fn hot_start(edge: f64, hidden_card: bool) -> f64 {
     }
 }
 
-fn card_width(width: f64) -> f64 {
+fn expanded_width(width: f64) -> f64 {
     width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
 }
 
@@ -775,11 +850,75 @@ mod tests {
     }
 
     #[test]
+    fn the_expanded_hit_target_does_not_overlap_the_card_strip() {
+        let width = 240.0;
+        let column_end = hot_start(resize_edge(width, false), false) + HOT_WIDTH;
+        let card_start = hot_start(resize_edge(width, true), true);
+        assert!(column_end <= card_start);
+    }
+
+    #[test]
     fn hidden_card_clamps_without_snapping() {
-        assert_eq!(card_width(56.0), MIN_EXPANDED);
-        assert_eq!(card_width(139.0), MIN_EXPANDED);
-        assert_eq!(card_width(310.6), 311.0);
-        assert_eq!(card_width(900.0), MAX_SIDEBAR_WIDTH);
+        assert_eq!(expanded_width(56.0), MIN_EXPANDED);
+        assert_eq!(expanded_width(139.0), MIN_EXPANDED);
+        assert_eq!(expanded_width(310.6), 311.0);
+        assert_eq!(expanded_width(900.0), MAX_SIDEBAR_WIDTH);
         assert_eq!(resolved_width(139.0), MIN_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn an_expanded_column_lands_without_travel_or_hides_at_the_threshold() {
+        let capture = Capture {
+            start_x: 0.0,
+            original: 240.0,
+            pending: 180.0,
+            revision: 1,
+            kind: CaptureKind::Column,
+        };
+        assert_eq!(
+            capture.release(312.4),
+            Resize::Land {
+                width: 312.0,
+                travel: false,
+            }
+        );
+        assert_eq!(
+            capture.release(SNAP),
+            Resize::Land {
+                width: MIN_EXPANDED,
+                travel: false,
+            }
+        );
+        assert_eq!(capture.release(SNAP - 0.1), Resize::Hide { width: 240.0 });
+    }
+
+    #[test]
+    fn cards_and_guides_keep_their_release_behavior() {
+        let capture = Capture {
+            start_x: 0.0,
+            original: 240.0,
+            pending: 180.0,
+            revision: 1,
+            kind: CaptureKind::Card,
+        };
+        assert_eq!(
+            capture.release(SNAP - 1.0),
+            Resize::Land {
+                width: MIN_EXPANDED,
+                travel: false,
+            }
+        );
+        let rail = Capture {
+            kind: CaptureKind::Guide,
+            original: MIN_SIDEBAR_WIDTH,
+            ..capture
+        };
+        assert_eq!(
+            rail.release(300.0),
+            Resize::Land {
+                width: 300.0,
+                travel: true,
+            }
+        );
     }
 }

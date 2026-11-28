@@ -33,9 +33,11 @@
 
   let {
     compact = false,
+    sidebarVisible = true,
     trailing,
   }: {
     compact?: boolean;
+    sidebarVisible?: boolean;
     /** Controls that act on the page, at the far end of the field. Told which
      *  page it is, or null where there is no site to describe. */
     trailing?: Snippet<[SitePage | null]>;
@@ -162,12 +164,44 @@
     return true;
   }
 
+  function focusAddress() {
+    input.focus();
+    input.select();
+  }
+
+  let pendingFocus = $state.raw<{ tab: string | null; cancel: () => void } | null>(null);
   $effect(() => {
     const command = ui.uiCommand();
     if (command.seq === 0 || command.id !== "url.focus" || input === undefined) return;
     if (untrack(editInLauncher)) return;
-    input.focus();
-    input.select();
+    if (untrack(() => compact)) {
+      void commands.runCommand("launcher.toggle");
+      return;
+    }
+    if (untrack(() => sidebarVisible)) {
+      focusAddress();
+      return;
+    }
+    const release = attention.hold();
+    const cancel = () => {
+      clearTimeout(timeout);
+      window.removeEventListener("blur", cancel);
+      pendingFocus = null;
+      release();
+    };
+    const timeout = setTimeout(cancel, 1500);
+    window.addEventListener("blur", cancel);
+    pendingFocus = { tab: untrack(tabs.activeId), cancel };
+    return cancel;
+  });
+  $effect(() => {
+    const request = pendingFocus;
+    if (!request) return;
+    if (request.tab !== tabs.activeId()) request.cancel();
+    else if (sidebarVisible) {
+      focusAddress();
+      request.cancel();
+    }
   });
 
   async function submit(event: SubmitEvent) {

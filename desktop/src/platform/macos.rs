@@ -773,21 +773,41 @@ pub async fn configure_sidebar_resize(
             else {
                 return false;
             };
-            let commit = std::rc::Rc::new(move |width, revision, active: Option<bool>| {
+            let commit = std::rc::Rc::new(move |resize, revision| {
                 if CHROME_GENERATION.load(Ordering::Acquire) != generation
                     || !sidebar_resize::publish_revision(revision)
                 {
-                    return;
+                    return false;
                 }
-                let hidden = HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(sender.label()));
-                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, !hidden && active.is_none())) {
-                    let event = if active.is_some() { "zephium:sidebar-resize-progress" } else { "zephium:sidebar-width-selected" };
-                    crate::emit_to_privileged(
+                let (width, travel, event, active) = match resize {
+                    sidebar_resize::Resize::CardProgress { width, active } => {
+                        (width, false, "zephium:sidebar-resize-progress", Some(active))
+                    }
+                    sidebar_resize::Resize::ColumnProgress { width, active } => {
+                        (width, false, "zephium:sidebar-width-following", Some(active))
+                    }
+                    sidebar_resize::Resize::Land { width, travel } => {
+                        (width, travel, "zephium:sidebar-width-selected", None)
+                    }
+                    sidebar_resize::Resize::Hide { width } => {
+                        return crate::try_emit_to_privileged(
+                            sender.app_handle(),
+                            crate::MAIN_LABEL,
+                            "zephium:sidebar-hide-selected",
+                            &serde_json::json!({"width": width, "revision": revision}),
+                        );
+                    }
+                };
+                let admitted = shell.dispatch(zephium_app::Command::SetSidebarWidth(width, travel));
+                if admitted || active == Some(false) {
+                    crate::try_emit_to_privileged(
                         sender.app_handle(),
                         crate::MAIN_LABEL,
                         event,
                         &serde_json::json!({"width": width, "revision": revision, "active": active}),
-                    );
+                    )
+                } else {
+                    false
                 }
             });
             sidebar_resize::configure(&view, generation, width, enabled, revision, commit)

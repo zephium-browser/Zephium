@@ -543,6 +543,21 @@ fn restart_discards_oversized_split_before_creating_views() {
 }
 
 #[test]
+fn bootstrap_uses_the_latest_sidebar_geometry_published_before_window_creation() {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::SetSidebarHidden(true));
+    shell.handle(Command::SetSidebarHidden(false));
+    shell.handle(Command::SetSidebarHidden(true));
+    shell.handle(Command::SetSidebarWidth(310.0, false));
+    shell.handle(Command::SetSidebarWidth(330.0, false));
+    shell.handle(Command::Bootstrap);
+
+    let metrics = shell.windows.focused().unwrap().metrics;
+    assert!(metrics.sidebar_hidden);
+    assert_eq!(metrics.sidebar_width, 330.0);
+}
+
+#[test]
 fn bootstrap_is_idempotent_across_chrome_reloads() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

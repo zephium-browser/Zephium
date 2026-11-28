@@ -271,6 +271,9 @@ impl Shell {
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
+        if let Some(win) = self.windows.get_mut(window) {
+            win.metrics = self.pending_metrics;
+        }
         // A new tab or startup list leaves restored tabs in place. A link
         // that launched the browser is its own new tab, and a stand-in left
         // in front can already serve as the new tab.

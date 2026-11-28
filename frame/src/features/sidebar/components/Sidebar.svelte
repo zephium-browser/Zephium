@@ -34,7 +34,7 @@
   }: {
     settingsNavigation: Snippet;
     toolPanel: Snippet<[tools.ToolKind]>;
-    browserBody: Snippet<[boolean]>;
+    browserBody: Snippet<[boolean, boolean]>;
     dock: Snippet<[boolean]>;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
@@ -311,10 +311,14 @@
     // Native stacks the chrome over the page before the card slides in, so
     // the slide is seen from its first frame.
     chromeRaised = true;
-    void commands.sidebarPeek(true, true, false).then(() =>
-      requestAnimationFrame(() => {
-        if (generation === peekGeneration && away) peeking = true;
-      }),
+    void commands.sidebarPeek(true, true, false).then(
+      () =>
+        requestAnimationFrame(() => {
+          if (generation === peekGeneration && away) peeking = true;
+        }),
+      () => {
+        if (generation === peekGeneration) endPeek();
+      },
     );
   }
   /** Something in the card still needs it: a field being typed in, an open
@@ -334,6 +338,10 @@
   };
   function release() {
     clearTimeout(linger);
+    if (!peeking) {
+      if (lowered === undefined && !pointerIn && !atEdge && !overCard && !needed()) endPeek();
+      return;
+    }
     const settling = Math.max(0, opened + SETTLE_MS - performance.now());
     linger = setTimeout(
       () => {
@@ -366,7 +374,7 @@
       overCard = event.detail.over === true;
       if (!away) return;
       if (atEdge) peek();
-      else if (peeking && !pointerIn && !overCard) release();
+      else if ((peeking || chromeRaised) && !pointerIn && !overCard) release();
     };
     window.addEventListener("zephium:sidebar-edge", edge);
     return () => window.removeEventListener("zephium:sidebar-edge", edge);
@@ -382,7 +390,7 @@
     untrack(() => {
       toolWaiting = open && !pointerIn;
       if (open) peek();
-      else if (peeking && !pointerIn && !atEdge) release();
+      else if ((peeking || chromeRaised) && !pointerIn && !atEdge) release();
     });
   });
   $effect(() => {
@@ -390,13 +398,13 @@
     if (!away) return;
     untrack(() => {
       if (wanted) peek();
-      else if (peeking && !pointerIn && !atEdge) release();
+      else if ((peeking || chromeRaised) && !pointerIn && !atEdge) release();
     });
   });
   $effect(() => {
     const resizing = sidebarResizeActive();
     untrack(() => {
-      if (!resizing && away && peeking && !pointerIn && !atEdge) release();
+      if (!resizing && away && (peeking || chromeRaised) && !pointerIn && !atEdge) release();
     });
   });
   $effect(() => {
@@ -419,7 +427,7 @@
   let morph: ReturnType<typeof shapeMorph.capture> = null;
   // While the shape changes, the column's width travels with the page
   // instead of jumping, and its contents hold their final width so only the
-  // space beside them moves. A resize guide commits its width immediately on release.
+  // space beside them moves. A drag moves the column as it goes and settles on release.
   let reshaping = $state(false);
   let resizeSettling = $state(false);
   let observedResizeSettlement = sidebarResizeSettlement();
@@ -513,7 +521,7 @@
       pointerIn = false;
       atEdge = false;
       overCard = false;
-      if (away && peeking) release();
+      if (away && (peeking || chromeRaised)) release();
     };
     document.documentElement.addEventListener("mouseleave", out);
     window.addEventListener("blur", out);
@@ -577,7 +585,7 @@
   }}
   onpointerleave={() => {
     pointerIn = false;
-    if (away && peeking) release();
+    if (away && (peeking || chromeRaised)) release();
   }}
   onfocusout={(event: FocusEvent) => {
     const next = event.relatedTarget;
@@ -614,7 +622,7 @@
           class="sidebar-browser-column"
           class:sidebar-tool-rail={tool !== null && !fullColumnShown()}
         >
-          {@render browserBody(compact)}
+          {@render browserBody(compact, (!hidden && !away) || (away && peeking))}
           {@render dock(compact)}
         </div>{/key}
       {#if tool !== null}{#key tool}<div

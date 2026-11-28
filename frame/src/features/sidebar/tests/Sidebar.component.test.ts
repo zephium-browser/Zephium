@@ -85,6 +85,31 @@ test("the card stays while native has the pointer over it, and goes when it leav
   expect(aside.dataset.peek).toBeUndefined();
 });
 
+test.skipIf(IS_WINDOWS).each(["pointer exit", "blur"])(
+  "%s cancels a card raise that has yet to complete",
+  async (interruption) => {
+    await sidebar.init();
+    await render(SidebarHost);
+    const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
+    let finishRaise!: () => void;
+    const pending = new Promise<void>((resolve) => (finishRaise = resolve));
+    const native = vi.spyOn(commands, "sidebarPeek").mockReturnValueOnce(pending);
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: true } }));
+    expect(native).toHaveBeenCalledExactlyOnceWith(true, true, false);
+
+    if (interruption === "blur") window.dispatchEvent(new Event("blur"));
+    else window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: false } }));
+    expect(native).toHaveBeenLastCalledWith(false, false, false);
+
+    finishRaise();
+    await pending;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await tick();
+    expect(aside.dataset.peek).toBeUndefined();
+    expect(native).toHaveBeenCalledTimes(2);
+  },
+);
+
 test("a tool on the card stays while the pointer is on it and leaves with it", async () => {
   const aside = await peek();
   tools.open("notes");

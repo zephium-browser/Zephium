@@ -462,7 +462,7 @@
 >
   {#if !newTabImage()}<SkyLight shown={skyShown} />{/if}
   <Sidebar
-    >{#snippet browserBody(compact)}
+    >{#snippet browserBody(compact, sidebarVisible)}
       {#if compact && (inWork || besideRail)}
         {#if !inWork && !(toolPage && !paneled)}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if paneled && IS_WINDOWS}
@@ -491,7 +491,7 @@
             whole column, field included; the tray rides the field itself,
             because everything in it acts on the page the field names.
           -->
-            <AddressField {compact}>
+            <AddressField {compact} {sidebarVisible}>
               {#snippet trailing(page)}
                 <UtilityTray
                   label={page === null

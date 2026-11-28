@@ -7,6 +7,7 @@
     beginSidebarResize,
     finishSidebarResize,
     cancelSidebarResize,
+    previewDragWidth,
     sidebarResizeActive,
     resolveDragWidth,
     COMPACT_WIDTH,
@@ -24,6 +25,7 @@
   let guide = $state<number | null>(null);
   let startX = 0;
   let startWidth = $state(0);
+  let liveColumn = $state(false);
   let frame = 0;
   let pending = 0;
   let generation = 0;
@@ -66,7 +68,7 @@
     const value = width;
     const enabled = !disabled;
     configuredRevision = sidebarResizeRevision();
-    if (sidebarResizeActive()) return;
+    if (enabled && sidebarResizeActive()) return;
     queueConfiguration({
       width: value,
       enabled,
@@ -92,13 +94,14 @@
     resizing = true;
     startX = event.clientX;
     startWidth = width;
+    liveColumn = IS_MAC && !isHidden() && width >= MIN_EXPANDED_WIDTH;
     pending = width;
     target.focus();
     target.setPointerCapture(event.pointerId);
     // Held for the whole drag, over tab rows and pages alike.
     previousCursor = document.body.style.cursor;
     document.body.style.cursor = "col-resize";
-    beginSidebarResize();
+    beginSidebarResize(liveColumn);
     updateGuide(width);
   }
   function updateGuide(value: number) {
@@ -115,6 +118,7 @@
       // Preview where release lands, including the snap to the rail.
       const landing = resolveDragWidth(pending);
       pending = landing.mode === "hidden" ? COMPACT_WIDTH : landing.expanded;
+      if (liveColumn) previewDragWidth(value);
     }
     guide = pending;
     if (frame !== 0) return;
@@ -139,9 +143,9 @@
     const target = event.currentTarget;
     if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId))
       target.releasePointerCapture(event.pointerId);
-    const landing = pending;
+    const requested = startWidth + event.clientX - startX;
+    const landing = liveColumn && Number.isFinite(requested) ? requested : pending;
     clearGuide();
-    // The guide showed where release lands, snap and bounds included.
     finishSidebarResize(landing);
   }
   function cancelPointerResize(event?: PointerEvent) {
@@ -178,7 +182,7 @@
   onDestroy(() => {
     generation++;
     clearGuide();
-    if (resizing) cancelSidebarResize();
+    if (resizing || configuredRevision === sidebarResizeRevision()) cancelSidebarResize();
     // The latest revision, not the one this handle last configured: opening a
     // tool advances it as the handle leaves, and native refuses a stale one,
     // which left the guide live at the old edge, inside the tool's panel.
@@ -186,7 +190,13 @@
   });
 </script>
 
-<svelte:window onblur={() => cancelPointerResize()} onresize={() => cancelPointerResize()} />
+<svelte:window
+  onblur={() => cancelPointerResize()}
+  onresize={() => {
+    // Following the column changes the chrome WebView's own viewport.
+    if (!liveColumn) cancelPointerResize();
+  }}
+/>
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div
   role="separator"
@@ -230,6 +240,6 @@
   <span
     aria-hidden="true"
     class="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-accent"
-    style:left={`${Math.min(startWidth - 2, guide - 2)}px`}
+    style:left={`${(liveColumn ? guide : Math.min(startWidth, guide)) - 2}px`}
   ></span>
 {/if}

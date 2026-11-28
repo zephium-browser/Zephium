@@ -259,6 +259,7 @@ pub struct Shell {
     tab_previews: tab_previews::TabPreviews,
     mini: mini::MiniState,
     pending_size: Size,
+    pending_metrics: layout::Metrics,
     favicons: FaviconState,
     history: history::HistoryState,
     bookmarks: bookmarks::BookmarkState,
@@ -535,6 +536,7 @@ impl Shell {
             windows: Windows::default(),
             mini: mini::MiniState::default(),
             pending_size: Size::default(),
+            pending_metrics: layout::Metrics::default(),
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
             bookmarks: bookmarks::BookmarkState::default(),
@@ -1073,9 +1075,12 @@ impl Shell {
                 let _ = self.operation_show_browser_page(page);
             }
             Command::SetSidebarWidth(width, animate) => {
-                if let Some(win) = self.windows.focused_mut() {
-                    win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
-                }
+                let width = layout::clamp_sidebar_width(width);
+                let Some(win) = self.windows.focused_mut() else {
+                    self.pending_metrics.sidebar_width = width;
+                    return;
+                };
+                win.metrics.sidebar_width = width;
                 self.refresh_sidebar_peek();
                 if animate {
                     if let Some(win) = self.windows.focused() {
@@ -1086,6 +1091,7 @@ impl Shell {
             }
             Command::SetSidebarHidden(hidden) => {
                 let Some(win) = self.windows.focused_mut() else {
+                    self.pending_metrics.sidebar_hidden = hidden;
                     return;
                 };
                 if win.metrics.sidebar_hidden == hidden {
