@@ -1,120 +1,4 @@
-//! Small, deterministic search policy shared by every browser entry point.
-use crate::navigation;
-use url::Url;
-
-mod shortcuts;
-pub use shortcuts::*;
-
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchEngine {
-    Google,
-    #[default]
-    DuckDuckGo,
-    Bing,
-    Brave,
-    Custom,
-}
-
-impl SearchEngine {
-    pub fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "google" => Some(Self::Google),
-            "duckduckgo" => Some(Self::DuckDuckGo),
-            "bing" => Some(Self::Bing),
-            "brave" => Some(Self::Brave),
-            "custom" => Some(Self::Custom),
-            _ => None,
-        }
-    }
-
-    /// The id the `search.engine` preference stores.
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Google => "google",
-            Self::DuckDuckGo => "duckduckgo",
-            Self::Bing => "bing",
-            Self::Brave => "brave",
-            Self::Custom => "custom",
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Google => "Google",
-            Self::DuckDuckGo => "DuckDuckGo",
-            Self::Bing => "Bing",
-            Self::Brave => "Brave Search",
-            Self::Custom => "Custom search",
-        }
-    }
-
-    pub fn search(self, query: &str) -> Option<Url> {
-        // Keep the navigation policy's sensitive-input and encoded-size guards.
-        navigation::search_query(query)?;
-        let base = match self {
-            Self::Google => "https://www.google.com/search",
-            Self::DuckDuckGo => "https://duckduckgo.com/",
-            Self::Bing => "https://www.bing.com/search",
-            Self::Brave => "https://search.brave.com/search",
-            Self::Custom => return None,
-        };
-        let mut url = Url::parse(base).ok()?;
-        url.query_pairs_mut().append_pair("q", query.trim());
-        navigation::is_allowed(&url).then_some(url)
-    }
-
-    /// The engine's own suggestion endpoint, which answers in the OpenSearch
-    /// JSON form browsers read (`["query", ["suggestion", ...]]`). A custom
-    /// engine names none.
-    pub fn suggestions(self, query: &str) -> Option<Url> {
-        let (base, key, extra): (&str, &str, &[(&str, &str)]) = match self {
-            Self::Google => (
-                "https://www.google.com/complete/search",
-                "q",
-                &[("client", "firefox"), ("ie", "utf-8"), ("oe", "utf-8")],
-            ),
-            Self::DuckDuckGo => ("https://duckduckgo.com/ac/", "q", &[("type", "list")]),
-            Self::Bing => ("https://www.bing.com/osjson.aspx", "query", &[]),
-            Self::Brave => ("https://search.brave.com/api/suggest", "q", &[]),
-            Self::Custom => return None,
-        };
-        let mut url = Url::parse(base).ok()?;
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.append_pair(key, query.trim());
-            for (name, value) in extra {
-                pairs.append_pair(name, value);
-            }
-        }
-        Some(url)
-    }
-
-    pub fn configured_search(self, query: &str, template: &str) -> Option<Url> {
-        if self != Self::Custom {
-            return self.search(query);
-        }
-        navigation::search_query(query)?;
-        if !valid_template(template) {
-            return None;
-        }
-        let encoded: String =
-            url::form_urlencoded::byte_serialize(query.trim().as_bytes()).collect();
-        let url = Url::parse(&template.replace("{searchTerms}", &encoded)).ok()?;
-        navigation::is_allowed(&url).then_some(url)
-    }
-
-    pub fn configured_classify(self, input: &str, template: &str) -> Option<Url> {
-        if navigation::is_query(input) {
-            self.configured_search(input, template)
-        } else {
-            navigation::classify(input)
-        }
-    }
-
-    pub fn classify(self, input: &str) -> Option<Url> {
+rl> {
         if navigation::is_query(input) {
             self.search(input)
         } else {
@@ -174,7 +58,10 @@ pub fn remote_query_allowed(input: &str) -> bool {
         && (2..=256).contains(&query.chars().count())
         && query.len() <= 1024
         && navigation::is_query(query)
-        && !query.contains(['@', '/', '\\', ':'])
+        // `is_query` has already checked every embedded target: a search
+        // phrase may name a web address, while paths, credentials and app
+        // links never become a search in the first place.
+        && !query.contains(['@', '\\'])
         && !query.chars().any(char::is_control)
 }
 
@@ -483,6 +370,13 @@ mod policy_tests {
             assert!(!remote_query_allowed(query), "{query}");
         }
         assert!(remote_query_allowed("rust language"));
+        assert!(remote_query_allowed(
+            "compare https://example.com/a?b=1 with docs"
+        ));
+        assert!(!remote_query_allowed(
+            "compare https://user:secret@example.com with docs"
+        ));
+        assert!(!remote_query_allowed("open steam://run/123 in docs"));
     }
     #[test]
     fn custom_templates_cannot_change_origin_or_escape_query_encoding() {
