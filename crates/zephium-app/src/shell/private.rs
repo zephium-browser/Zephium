@@ -99,8 +99,11 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
         match self.private.as_ref().map(|session| session.shown) {
-            // Already private: the shortcut opens another private tab.
-            Some(true) => self.operation_open(),
+            // The private window is a side of this window, not a replacement
+            // for it. Pressing the same shortcut again returns to the regular
+            // tabs, which were only set aside; another private tab is one
+            // ordinary New Tab away.
+            Some(true) => self.operation_show_regular(),
             Some(false) => {
                 let effects = self.swap_private_scope();
                 mutation_result(self.commit(effects))
