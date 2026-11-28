@@ -4195,8 +4195,12 @@ fn toggle_window_fullscreen(window: &WebviewWindow) {
     let _ = changed;
 }
 
+fn shell_command_id(id: &str) -> &str {
+    zephium_core::commands::runs_as(id)
+}
+
 fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAdmission {
-    let id = zephium_core::commands::runs_as(id);
+    let id = shell_command_id(id);
     execute_command_or(app, id, || {
         app.try_state::<Handle>()
             .map_or_else(rejected_operation, |shell| {
@@ -4780,7 +4784,7 @@ fn launcher_run(
             background,
         );
     };
-    let id = zephium_core::commands::runs_as(id);
+    let id = shell_command_id(id);
     let (admission, settlement) = route_launcher_command(
         |to_shell| execute_command_or(&app, id, to_shell),
         || {
@@ -11556,6 +11560,14 @@ mod tests {
         assert_eq!(super::appearance_code("light"), super::APPEARANCE_LIGHT);
         assert_eq!(super::appearance_code("dark"), super::APPEARANCE_DARK);
         assert_eq!(super::appearance_code("invalid"), super::APPEARANCE_SYSTEM);
+    }
+
+    #[test]
+    fn shell_command_ids_resolve_alternate_shortcuts() {
+        assert_eq!(super::shell_command_id("nav.reload.alt"), "nav.reload");
+        assert_eq!(super::shell_command_id("tab.next.alt"), "tab.next");
+        assert_eq!(super::shell_command_id("url.focus"), "url.focus");
+        assert_eq!(super::shell_command_id("nope"), "nope");
     }
 
     fn launcher_admitted() -> zephium_ipc::OperationAdmission {
