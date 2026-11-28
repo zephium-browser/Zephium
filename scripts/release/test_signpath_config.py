@@ -14,7 +14,7 @@ PRODUCTION_KEYS = (*KEYS[1:], 'SIGNPATH_RELEASE_CERT_THUMBPRINT')
 class SignPathConfigurationTests(unittest.TestCase):
     def test_windows_job_covers_build_and_signing_approval_budgets(self):
         workflow = (ROOT / '.github/workflows/release.yml').read_text()
-        windows = workflow.split('\n  windows:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        windows = workflow.split('\n  windows:\n', 1)[1].split('\n  windows_arm64:\n', 1)[0]
         job = int(re.search(r'^    timeout-minutes: (\d+)', windows, re.M).group(1))
         build = re.search(r'- name: Build\n        timeout-minutes: (\d+)', windows)
         signing = re.search(r'- name: Sign the Windows setup\n        timeout-minutes: (\d+)', windows)
@@ -32,7 +32,7 @@ class SignPathConfigurationTests(unittest.TestCase):
 
     def test_final_updater_signature_binds_version_and_target_after_signpath(self):
         workflow = (ROOT / '.github/workflows/release.yml').read_text()
-        windows = workflow.split('\n  windows:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        windows = workflow.split('\n  windows:\n', 1)[1].split('\n  windows_arm64:\n', 1)[0]
         signer = windows.split('      - name: Sign the final Windows bytes for the updater\n', 1)[1].split('\n      - name:', 1)[0]
         self.assertNotIn('        if:', signer)
         self.assertNotIn('working-directory:', signer)

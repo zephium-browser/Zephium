@@ -67,7 +67,7 @@ jobs:
       - name: Verify final asset provenance
         run: |
           set -euo pipefail
-          for asset in Zephium-macOS-arm64.dmg Zephium-macOS-arm64.app.tar.gz Zephium-Windows-x64-setup.exe; do
+          for asset in Zephium-macOS-arm64.dmg Zephium-macOS-arm64.app.tar.gz Zephium-Windows-x64-setup.exe Zephium-Windows-arm64-setup.exe; do
             gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
               --source-digest "${CANDIDATE}"
