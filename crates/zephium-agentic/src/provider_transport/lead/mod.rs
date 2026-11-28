@@ -1,3 +1,941 @@
+//! General-purpose tool-calling transports for the lead agent.
+//!
+//! One [`LeadClient`] speaks one wire (OpenAI Responses, Anthropic Messages,
+//! Gemini, OpenAI-compatible chat) to one endpoint, directly with the person's
+//! key or through Zephium Cloud with a bearer. Every failure leaves as a closed
+//! [`WorkModelError`]; provider text never crosses.
+
+mod anthropic;
+mod chat;
+mod cloud;
+mod gemini;
+pub(super) mod image_fence;
+pub use image_fence::ModelImageGate;
+pub mod keys;
+mod listing;
+pub mod models;
+mod openai;
+mod sse;
+mod transcribe;
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use futures_util::StreamExt as _;
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::{Client, StatusCode, Url};
+use serde_json::Value;
+use zephium_core::work::model::*;
+use zeroize::Zeroizing;
+
+use cloud::classify_cloud;
+pub use cloud::{LeadCloudAccounting, LeadCloudObserver, LeadCloudRecord};
+pub use listing::{
+    check_key, detect_local_servers, fetch_cloud_catalog, list_models, CloudCatalog, LeadKeyCheck,
+    LocalServer, LocalServerKind,
+};
+pub use transcribe::{transcribe, transcribe_observed, Transcript, TranscriptionTarget};
+
+const OPENAI_BASE: &str = "https://api.openai.com/v1";
+const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
+const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+const DEEPSEEK_BASE: &str = "https://api.deepseek.com";
+const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
+const XAI_BASE: &str = "https://api.x.ai/v1";
+const MISTRAL_BASE: &str = "https://api.mistral.ai/v1";
+const GROQ_BASE: &str = "https://api.groq.com/openai/v1";
+const CEREBRAS_BASE: &str = "https://api.cerebras.ai/v1";
+/// Zephium Cloud's production base; each wire appends its provider's own path.
+pub const ZEPHIUM_CLOUD_BASE: &str = "https://api.zephium.app";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const USER_AGENT: &str = "Zephium/1 (lead)";
+
+const MAX_RETRIES: u32 = 2;
+/// A longer Retry-After goes back to the caller instead of holding the call.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(20);
+/// How long past the server's own limits a Cloud call waits for its cut-off.
+const LIMIT_GRACE: Duration = Duration::from_secs(15);
+const MAX_PAUSE_CONTINUATIONS: u32 = 3;
+/// How long a finished Cloud stream is read on for its accounting trailer.
+const TRAILER_WAIT: Duration = Duration::from_secs(10);
+const MAX_ERROR_BODY_BYTES: usize = 16 * 1024;
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_SECRET_BYTES: usize = 4 * 1024;
+
+pub(crate) const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_TOOL_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_TOOL_CALLS: usize = 64;
+pub(crate) const MAX_SEARCHES: usize = 32;
+pub(crate) const MAX_HITS: usize = 20;
+
+/// An API key or bearer, zeroized on drop and never printed.
+pub struct LeadSecret(Zeroizing<String>);
+
+impl LeadSecret {
+    /// Accepts one visible-ASCII secret; surrounding whitespace is dropped.
+    pub fn new(secret: String) -> Result<Self, WorkModelError> {
+        let secret = Zeroizing::new(secret);
+        let trimmed = secret.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > MAX_SECRET_BYTES
+            || !trimmed.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
+        {
+            return Err(WorkModelError::BadRequest);
+        }
+        Ok(Self(Zeroizing::new(trimmed.to_owned())))
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+
+    fn header(&self, prefix: &str) -> Result<HeaderValue, WorkModelError> {
+        let value = Zeroizing::new(format!("{prefix}{}", self.expose()));
+        let mut header = HeaderValue::from_str(&value).map_err(|_| WorkModelError::Unauthorized)?;
+        header.set_sensitive(true);
+        Ok(header)
+    }
+}
+
+impl std::fmt::Debug for LeadSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LeadSecret([redacted])")
+    }
+}
+
+/// A future yielding the secret for one attempt.
+pub type LeadSecretFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Arc<LeadSecret>, WorkModelError>> + Send + 'a>>;
+
+/// Where a client's key or bearer comes from, read once per attempt.
+pub trait LeadCredential: Send + Sync {
+    /// The secret for the next attempt.
+    fn secret(&self) -> LeadSecretFuture<'_>;
+    /// The provider refused the secret; the next attempt reads it again.
+    fn rejected(&self) {}
+}
+
+/// A secret held in memory, for the Cloud session and tests.
+pub struct LeadStaticCredential(Arc<LeadSecret>);
+
+impl LeadStaticCredential {
+    /// Wraps an already validated secret.
+    pub fn new(secret: LeadSecret) -> Self {
+        Self(Arc::new(secret))
+    }
+}
+
+impl LeadCredential for LeadStaticCredential {
+    fn secret(&self) -> LeadSecretFuture<'_> {
+        let secret = self.0.clone();
+        Box::pin(async move { Ok(secret) })
+    }
+}
+
+/// The endpoint and wire of one client.
+#[derive(Clone, Debug)]
+pub struct LeadTarget {
+    wire: WorkModelWire,
+    /// The upstream provider; for Cloud, the provider whose path it proxies.
+    upstream: WorkModelProvider,
+    base: Url,
+    cloud: bool,
+    /// Native search calls one request may make, as Cloud's catalog row says.
+    search_calls: Option<u32>,
+    /// OpenCode Go's profile inside the Compatible provider. Only a base
+    /// ending in `/inference/go/openai/v1` opts into it.
+    go: bool,
+}
+
+impl LeadTarget {
+    /// The provider's own public endpoint.
+    pub fn direct(provider: WorkModelProvider) -> Result<Self, WorkModelError> {
+        let (wire, base) = match provider {
+            WorkModelProvider::OpenAi => (WorkModelWire::OpenAiResponses, OPENAI_BASE),
+            WorkModelProvider::Anthropic => (WorkModelWire::AnthropicMessages, ANTHROPIC_BASE),
+            WorkModelProvider::Google => (WorkModelWire::Gemini, GEMINI_BASE),
+            WorkModelProvider::DeepSeek => (WorkModelWire::ChatCompletions, DEEPSEEK_BASE),
+            WorkModelProvider::OpenRouter => (WorkModelWire::ChatCompletions, OPENROUTER_BASE),
+            WorkModelProvider::XAi => (WorkModelWire::OpenAiResponses, XAI_BASE),
+            WorkModelProvider::Mistral => (WorkModelWire::ChatCompletions, MISTRAL_BASE),
+            WorkModelProvider::Groq => (WorkModelWire::ChatCompletions, GROQ_BASE),
+            WorkModelProvider::Cerebras => (WorkModelWire::ChatCompletions, CEREBRAS_BASE),
+            WorkModelProvider::Compatible | WorkModelProvider::Cloud => {
+                return Err(WorkModelError::BadRequest)
+            }
+        };
+        Ok(Self {
+            wire,
+            upstream: provider,
+            base: Url::parse(base).map_err(|_| WorkModelError::BadRequest)?,
+            cloud: false,
+            search_calls: None,
+            go: false,
+        })
+    }
+
+    /// A person-configured OpenAI-compatible chat endpoint, such as
+    /// `https://host/v1`. Plain HTTP is accepted only on this Mac.
+    pub fn compatible(base: &str) -> Result<Self, WorkModelError> {
+        let base = compatible_base(base).ok_or(WorkModelError::BadRequest)?;
+        let go = is_go_base(&base);
+        Ok(Self {
+            wire: WorkModelWire::ChatCompletions,
+            upstream: WorkModelProvider::Compatible,
+            base,
+            cloud: false,
+            search_calls: None,
+            go,
+        })
+    }
+
+    /// Zephium Cloud proxying `upstream`'s native wire under `base`.
+    pub fn cloud(base: &str, upstream: WorkModelProvider) -> Result<Self, WorkModelError> {
+        let root = Url::parse(base).map_err(|_| WorkModelError::BadRequest)?;
+        if root.scheme() != "https" && !is_loopback(&root) {
+            return Err(WorkModelError::BadRequest);
+        }
+        let (wire, path) = match upstream {
+            WorkModelProvider::OpenAi => (WorkModelWire::OpenAiResponses, "openai/v1"),
+            WorkModelProvider::Anthropic => (WorkModelWire::AnthropicMessages, "anthropic/v1"),
+            WorkModelProvider::Google => (WorkModelWire::Gemini, "google/v1beta"),
+            WorkModelProvider::DeepSeek => (WorkModelWire::ChatCompletions, "deepseek/v1"),
+            WorkModelProvider::OpenRouter => (WorkModelWire::ChatCompletions, "openrouter/v1"),
+            WorkModelProvider::XAi
+            | WorkModelProvider::Mistral
+            | WorkModelProvider::Groq
+            | WorkModelProvider::Cerebras
+            | WorkModelProvider::Compatible
+            | WorkModelProvider::Cloud => return Err(WorkModelError::BadRequest),
+        };
+        Ok(Self {
+            wire,
+            upstream,
+            base: join(&root, path)?,
+            cloud: true,
+            search_calls: None,
+            go: false,
+        })
+    }
+
+    /// Whether the configured base is OpenCode Go's compatible endpoint.
+    pub(super) fn is_go(&self) -> bool {
+        self.go
+    }
+
+    /// The catalog for this endpoint. Go serves its models one directory
+    /// above the OpenAI-compatible chat base; every other compatible base
+    /// keeps the usual `/models` path.
+    pub(super) fn catalog_url(&self) -> Result<Url, WorkModelError> {
+        if !self.go {
+            return join(&self.base, "models");
+        }
+        let mut url = self.base.clone();
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|_| WorkModelError::BadRequest)?;
+            // Drop `v1` and `openai`; Go's catalog lives under `.../go/v1`.
+            path.pop_if_empty().pop().pop().push("v1").push("models");
+        }
+        Ok(url)
+    }
+
+    /// Go routes a call by a session hint derived from the conversation's
+    /// stable cache key. It carries no prompt text and is not a secret.
+    pub(super) fn go_session(&self, request: &WorkModelRequest) -> Option<HeaderValue> {
+        if !self.go {
+            return None;
+        }
+        let id = request.cache_key.as_deref()?.strip_prefix("zk_")?;
+        let valid = (1..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        valid
+            .then(|| HeaderValue::from_str(&format!("ses_{id}")).ok())
+            .flatten()
+    }
+
+    /// The wire this target speaks.
+    pub fn wire(&self) -> WorkModelWire {
+        self.wire
+    }
+
+    /// The upstream provider.
+    pub fn upstream(&self) -> WorkModelProvider {
+        self.upstream
+    }
+
+    /// Who produced a provider item: the upstream, and whether through Cloud,
+    /// whose account is not the person's own.
+    fn origin(&self) -> String {
+        let slug = models::provider_slug(self.upstream);
+        if self.cloud {
+            format!("{slug}@zephium")
+        } else {
+            slug.to_owned()
+        }
+    }
+
+    /// Whether this request carries the provider's own search tool. Cloud
+    /// admits it only as the row's call cap allows, and never for Google.
+    pub(super) fn native_search(&self, request: &WorkModelRequest) -> bool {
+        request.native_search
+            && !(self.cloud && self.upstream == WorkModelProvider::Google)
+            && self.search_calls != Some(0)
+    }
+
+    /// Whether this endpoint holds calls to tools marked strict to their
+    /// schema: DeepSeek does on its beta path, which takes the same requests.
+    pub(super) fn strict_tools(&self, request: &WorkModelRequest) -> bool {
+        self.upstream == WorkModelProvider::DeepSeek
+            && !self.cloud
+            && !request.tools.is_empty()
+            && request.tools.iter().all(|tool| tool.strict)
+    }
+
+    fn call_url(&self, model: &str, strict: bool) -> Result<Url, WorkModelError> {
+        match self.wire {
+            WorkModelWire::OpenAiResponses => join(&self.base, "responses"),
+            WorkModelWire::AnthropicMessages => join(&self.base, "messages"),
+            WorkModelWire::ChatCompletions if strict => join(&self.base, "beta/chat/completions"),
+            WorkModelWire::ChatCompletions => join(&self.base, "chat/completions"),
+            WorkModelWire::Gemini => {
+                if model.is_empty()
+                    || !model
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+                {
+                    return Err(WorkModelError::BadRequest);
+                }
+                let mut url = join(&self.base, &format!("models/{model}:streamGenerateContent"))?;
+                url.set_query(Some("alt=sse"));
+                Ok(url)
+            }
+        }
+    }
+
+    fn authorize(
+        &self,
+        headers: &mut HeaderMap,
+        secret: &LeadSecret,
+    ) -> Result<(), WorkModelError> {
+        if self.wire == WorkModelWire::AnthropicMessages {
+            headers.insert(
+                "anthropic-version",
+                HeaderValue::from_static(ANTHROPIC_VERSION),
+            );
+        }
+        if self.cloud {
+            headers.insert("authorization", secret.header("Bearer ")?);
+            return Ok(());
+        }
+        match self.upstream {
+            WorkModelProvider::Anthropic => {
+                headers.insert("x-api-key", secret.header("")?);
+            }
+            WorkModelProvider::Google => {
+                headers.insert("x-goog-api-key", secret.header("")?);
+            }
+            _ => {
+                headers.insert("authorization", secret.header("Bearer ")?);
+            }
+        }
+        if self.upstream == WorkModelProvider::OpenRouter {
+            headers.insert("x-title", HeaderValue::from_static("Zephium"));
+            headers.insert(
+                "http-referer",
+                HeaderValue::from_static("https://zephium.app"),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Only the exact Go Chat Completions suffix selects the Go profile. A
+/// trailing slash and the URL's query/fragment are already rejected or
+/// normalised by `compatible_base`.
+fn is_go_base(base: &Url) -> bool {
+    let segments: Vec<&str> = base
+        .path_segments()
+        .map(|path| path.filter(|part| !part.is_empty()).collect())
+        .unwrap_or_default();
+    segments.ends_with(&["inference", "go", "openai", "v1"])
+}
+
+fn join(base: &Url, path: &str) -> Result<Url, WorkModelError> {
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .map_err(|_| WorkModelError::BadRequest)?
+        .pop_if_empty()
+        .extend(path.split('/'));
+    // `extend` percent-encodes ':'; Gemini's method suffix must stay literal.
+    let path = url.path().replace("%3A", ":");
+    url.set_path(&path);
+    Ok(url)
+}
+
+fn is_loopback(url: &Url) -> bool {
+    matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
+pub(crate) fn compatible_base(base: &str) -> Option<Url> {
+    let url = Url::parse(base.trim()).ok()?;
+    let allowed = url.scheme() == "https" || (url.scheme() == "http" && is_loopback(&url));
+    (allowed
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.host_str().is_some())
+    .then_some(url)
+}
+
+fn http(local: bool) -> Result<&'static Client, WorkModelError> {
+    static SECURE: OnceLock<Option<Client>> = OnceLock::new();
+    static LOCAL: OnceLock<Option<Client>> = OnceLock::new();
+    let slot = if local { &LOCAL } else { &SECURE };
+    slot.get_or_init(|| {
+        let builder = Client::builder()
+            .user_agent(USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none())
+            .referer(false)
+            .retry(reqwest::retry::never())
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(180))
+            .timeout(Duration::from_secs(20 * 60))
+            .pool_idle_timeout(Duration::from_secs(60))
+            .https_only(!local);
+        let builder = if local { builder.no_proxy() } else { builder };
+        builder.build().ok()
+    })
+    .as_ref()
+    .ok_or(WorkModelError::Network)
+}
+
+/// One model on one endpoint. Cheap to share; holds no socket at rest.
+pub struct LeadClient {
+    target: LeadTarget,
+    credential: Arc<dyn LeadCredential>,
+    price: Option<WorkModelPrice>,
+    search_fee_micros: u64,
+    cloud_observer: Option<LeadCloudObserver>,
+    max_request_bytes: Option<u64>,
+    idle_timeout: Option<Duration>,
+    call_timeout: Option<Duration>,
+    #[cfg(test)]
+    backoff: Duration,
+}
+
+impl LeadClient {
+    /// A client for `target`, priced from the catalog when it knows the model.
+    pub fn new(
+        target: LeadTarget,
+        credential: Arc<dyn LeadCredential>,
+        price: Option<WorkModelPrice>,
+    ) -> Self {
+        Self {
+            search_fee_micros: models::search_fee_micros(target.upstream),
+            target,
+            credential,
+            price,
+            cloud_observer: None,
+            max_request_bytes: None,
+            idle_timeout: None,
+            call_timeout: None,
+            #[cfg(test)]
+            backoff: Duration::from_millis(1),
+        }
+    }
+
+    /// Reports every Cloud call's accounting record when the call ends.
+    pub fn with_cloud_observer(mut self, observer: LeadCloudObserver) -> Self {
+        self.cloud_observer = Some(observer);
+        self
+    }
+
+    /// Gives up on a silent stream, or a call that runs on, a little after
+    /// the server would: its own cut-off arrives first, with the accounting.
+    pub fn with_call_limits(mut self, idle_ms: Option<u64>, max_ms: Option<u64>) -> Self {
+        let grace = |ms: u64| Duration::from_millis(ms).saturating_add(LIMIT_GRACE);
+        self.idle_timeout = idle_ms.map(grace);
+        self.call_timeout = max_ms.map(grace);
+        self
+    }
+
+    /// Holds searches to the Cloud row's call cap.
+    pub fn with_search_limit(mut self, calls: u32) -> Self {
+        self.target.search_calls = Some(calls);
+        self
+    }
+
+    /// Refuses, before sending, a body larger than the endpoint admits.
+    pub fn with_request_limit(mut self, max_bytes: u64) -> Self {
+        self.max_request_bytes = Some(max_bytes);
+        self
+    }
+
+    /// The endpoint this client calls.
+    pub fn target(&self) -> &LeadTarget {
+        &self.target
+    }
+
+    async fn run(
+        &self,
+        mut request: WorkModelRequest,
+        events: &(dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> Result<WorkModelOutcome, WorkModelError> {
+        if request.model.wire != self.target.wire {
+            return Err(WorkModelError::BadRequest);
+        }
+        let origin = self.target.origin();
+        strip_foreign_replays(&mut request, &origin);
+        if image_fence::request_has_image(&request) && request.image_fence.is_none() {
+            return Err(WorkModelError::BadRequest);
+        }
+        let image_fence = request.image_fence.clone();
+        if image_fence
+            .as_ref()
+            .is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
+            return Err(WorkModelError::Cancelled);
+        }
+        let mut total = Decoded::default();
+        for continuation in 0..=MAX_PAUSE_CONTINUATIONS {
+            let body = self.body(&request)?;
+            if self
+                .max_request_bytes
+                .is_some_and(|max| body.len() as u64 > max)
+            {
+                return Err(WorkModelError::ContextTooLong);
+            }
+            let strict = self.target.strict_tools(&request);
+            let session = self.target.go_session(&request);
+            let generation = self.attempt(
+                &request.model.model,
+                &body,
+                session.as_ref(),
+                strict,
+                events,
+                image_fence.as_ref(),
+            );
+            let decoded = if let Some(fence) = &image_fence {
+                tokio::select! {
+                    biased;
+                    () = fence.revoked() => return Err(WorkModelError::Cancelled),
+                    result = generation => result?,
+                }
+            } else {
+                generation.await?
+            };
+            total.absorb(decoded);
+            if total.stop != DecodedStop::Paused || continuation == MAX_PAUSE_CONTINUATIONS {
+                break;
+            }
+            // A server-side tool loop paused: send the turn so far back so it resumes.
+            if total.resumed {
+                request.messages.pop();
+            }
+            request
+                .messages
+                .push(WorkModelMessage::Assistant(total.assistant.clone()));
+            total.resumed = true;
+        }
+        let stop = match total.stop {
+            DecodedStop::End(stop) => stop,
+            DecodedStop::Paused => WorkModelStop::MaxTokens,
+            DecodedStop::Open => return Err(WorkModelError::Protocol),
+        };
+        let usage = self.usage(&total);
+        let mut assistant = total.assistant;
+        for part in &mut assistant {
+            if let WorkModelPart::Replay(Value::Object(item)) = part {
+                item.insert("origin".into(), Value::String(origin.clone()));
+            }
+        }
+        Ok(WorkModelOutcome {
+            stop,
+            usage,
+            assistant,
+        })
+    }
+
+    fn body(&self, request: &WorkModelRequest) -> Result<Vec<u8>, WorkModelError> {
+        let body = match self.target.wire {
+            WorkModelWire::OpenAiResponses => openai::body(request, &self.target)?,
+            WorkModelWire::AnthropicMessages => anthropic::body(request, &self.target)?,
+            WorkModelWire::Gemini => gemini::body(request, &self.target)?,
+            WorkModelWire::ChatCompletions => chat::body(request, &self.target)?,
+        };
+        serde_json::to_vec(&body).map_err(|_| WorkModelError::BadRequest)
+    }
+
+    fn usage(&self, total: &Decoded) -> WorkModelUsage {
+        let mut usage = total.usage;
+        usage.cache_write_input_tokens = total.cache_write_tokens.min(usage.input_tokens);
+        if self.target.upstream == WorkModelProvider::Compatible
+            && !self.target.cloud
+            && zephium_core::work::model::local_model_endpoint(self.target.base.as_str())
+            && self.price.as_ref().is_none_or(|price| {
+                price.input == 0 && price.cached_input == 0 && price.output == 0
+            })
+        {
+            usage.cost_micros = Some(0);
+            return usage;
+        }
+        usage.cost_micros = total.provider_cost_micros.or_else(|| {
+            let price = self.price.as_ref()?;
+            let cached = u128::from(usage.cached_input_tokens.min(usage.input_tokens));
+            let written = u128::from(total.cache_write_tokens);
+            let fresh = u128::from(usage.input_tokens).saturating_sub(cached + written);
+            let micros = fresh * u128::from(price.input)
+                + cached * u128::from(price.cached_input)
+                + written * u128::from(price.input) * 5 / 4
+                + u128::from(usage.output_tokens) * u128::from(price.output);
+            let fees = u128::from(total.searches) * u128::from(self.search_fee_micros);
+            u64::try_from(micros.div_ceil(1_000_000) + fees).ok()
+        });
+        usage
+    }
+
+    async fn attempt(
+        &self,
+        model: &str,
+        body: &[u8],
+        session: Option<&HeaderValue>,
+        strict: bool,
+        events: &(dyn Fn(WorkModelEvent) + Send + Sync),
+        image_fence: Option<&Arc<dyn WorkModelImageFence>>,
+    ) -> Result<Decoded, WorkModelError> {
+        let url = self.target.call_url(model, strict)?;
+        let client = http(url.scheme() == "http")?;
+        let mut retries = 0;
+        // One key per logical generation. It changes only when Cloud admitted
+        // an attempt and released it unspent; see `cloud::refusal`.
+        let mut key = idempotency_key()?;
+        loop {
+            let secret = self.credential.secret().await?;
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert("accept", HeaderValue::from_static("text/event-stream"));
+            headers.insert("accept-encoding", HeaderValue::from_static("identity"));
+            self.target.authorize(&mut headers, &secret)?;
+            drop(secret);
+            if let Some(session) = session {
+                headers.insert("x-opencode-session", session.clone());
+            }
+            if self.target.cloud {
+                headers.insert("idempotency-key", key.clone());
+            }
+            let mut post = client.post(url.clone()).headers(headers);
+            if let Some(limit) = self.call_timeout {
+                post = post.timeout(limit);
+            }
+            let send = post.body(body.to_vec()).send();
+            let sent = image_fence::fenced(image_fence, send)
+                .await
+                .map_err(|()| WorkModelError::Cancelled)?;
+            let failure = match sent {
+                // Sent, maybe received: a Cloud call is never sent again blind.
+                Err(error) if self.target.cloud && !error.is_connect() => {
+                    let answered = cloud::Answered::default();
+                    self.record(&key, answered, None, LeadCloudAccounting::Unknown);
+                    return Err(WorkModelError::Protocol);
+                }
+                Err(error) => Failure::from_transport(&error),
+                Ok(response) if response.status().is_success() => {
+                    let answered = self
+                        .target
+                        .cloud
+                        .then(|| cloud::Answered::read(response.headers()));
+                    let (result, trailer) = self.stream(response, events).await;
+                    if let Some(answered) = answered {
+                        return self.settle_cloud(&key, answered, trailer.as_deref(), result);
+                    }
+                    match result {
+                        Ok(decoded) => return Ok(decoded),
+                        Err(StreamFailure::AfterOutput(error)) => return Err(error),
+                        Err(StreamFailure::BeforeOutput(error)) => Failure::retryable(error),
+                    }
+                }
+                Ok(response) if self.target.cloud => {
+                    let status = response.status();
+                    let answered = cloud::Answered::read(response.headers());
+                    let (failure, body) = Failure::from_response(response, true).await;
+                    let request_id = cloud::error_request_id(&body, &answered);
+                    let admitted = request_id.is_some();
+                    match cloud::refusal(status, request_id.as_deref()) {
+                        cloud::Refusal::Again => {}
+                        cloud::Refusal::AgainWithNewKey => {
+                            self.record(&key, answered, request_id, LeadCloudAccounting::Refused);
+                            key = idempotency_key()?;
+                        }
+                        cloud::Refusal::Final if admitted => {
+                            self.record(&key, answered, request_id, LeadCloudAccounting::Refused);
+                        }
+                        cloud::Refusal::Final => {}
+                        cloud::Refusal::Uncertain => {
+                            self.record(&key, answered, request_id, LeadCloudAccounting::Unknown);
+                            // A 409 says the server already holds this call; that is
+                            // not a protocol fault, and the receipt settles it.
+                            return Err(match failure.error {
+                                WorkModelError::Hosted {
+                                    refusal: HostedRefusal::AlreadySent,
+                                    ..
+                                } => failure.error,
+                                _ => WorkModelError::Protocol,
+                            });
+                        }
+                    }
+                    failure
+                }
+                Ok(response) => Failure::from_response(response, false).await.0,
+            };
+            if failure.error == WorkModelError::Unauthorized {
+                self.credential.rejected();
+            }
+            let wait = match failure.retry_wait(retries) {
+                Some(wait) => wait,
+                None => return Err(failure.error),
+            };
+            retries += 1;
+            #[cfg(test)]
+            let wait = wait.min(self.backoff);
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    /// The Cloud call's record, and its result as the caller should see it:
+    /// a dispatched call that failed is never read as worth retrying.
+    fn settle_cloud(
+        &self,
+        key: &HeaderValue,
+        answered: cloud::Answered,
+        trailer: Option<&str>,
+        result: Result<Decoded, StreamFailure>,
+    ) -> Result<Decoded, WorkModelError> {
+        let trailer = trailer.and_then(cloud::Trailer::parse);
+        let (request_id, accounting) = match trailer {
+            Some(trailer) => (trailer.request_id, trailer.accounting),
+            None => (
+                None,
+                answered
+                    .usage
+                    .clone()
+                    .unwrap_or(LeadCloudAccounting::Unknown),
+            ),
+        };
+        let request_id = request_id.or_else(|| answered.request_id.clone());
+        self.record(key, answered, request_id, accounting);
+        result.map_err(|failure| match failure {
+            StreamFailure::AfterOutput(error) | StreamFailure::BeforeOutput(error) => {
+                cloud::dispatched(error)
+            }
+        })
+    }
+
+    fn record(
+        &self,
+        key: &HeaderValue,
+        answered: cloud::Answered,
+        request_id: Option<String>,
+        accounting: LeadCloudAccounting,
+    ) {
+        let Some(observer) = &self.cloud_observer else {
+            return;
+        };
+        observer(LeadCloudRecord {
+            idempotency_key: key.to_str().unwrap_or_default().to_owned(),
+            request_id: request_id.or(answered.request_id),
+            policy_revision: answered.policy_revision,
+            accounting,
+        });
+    }
+
+    /// Decodes a stream; for Cloud, then reads on to its end for the
+    /// accounting trailer, which follows the provider's last event.
+    async fn stream(
+        &self,
+        response: reqwest::Response,
+        events: &(dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> (Result<Decoded, StreamFailure>, Option<String>) {
+        let mut framer = sse::SseFramer::default();
+        let mut body = response.bytes_stream();
+        let result = self.decode_stream(&mut body, &mut framer, events).await;
+        if !self.target.cloud {
+            return (result, None);
+        }
+        let drain = async {
+            let mut ignored = Vec::new();
+            while let Some(Ok(chunk)) = body.next().await {
+                if framer.push(&chunk, &mut ignored).is_err() {
+                    return;
+                }
+                ignored.clear();
+            }
+            let _ = framer.finish(&mut ignored);
+        };
+        let _ = tokio::time::timeout(TRAILER_WAIT, drain).await;
+        let trailer = framer.trailer().map(str::to_owned);
+        (result, trailer)
+    }
+
+    async fn decode_stream<S, B>(
+        &self,
+        body: &mut S,
+        framer: &mut sse::SseFramer,
+        events: &(dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> Result<Decoded, StreamFailure>
+    where
+        S: futures_util::Stream<Item = Result<B, reqwest::Error>> + Unpin,
+        B: AsRef<[u8]>,
+    {
+        let mut decoder = WireDecoder::for_target(self.target.wire, self.target.is_go());
+        let mut frames = Vec::new();
+        let mut out = Vec::new();
+        let mut emitted = false;
+        let fail = |emitted: bool, error: WorkModelError| {
+            if emitted {
+                StreamFailure::AfterOutput(error)
+            } else {
+                StreamFailure::BeforeOutput(error)
+            }
+        };
+        let mut done = false;
+        while !done {
+            let next = match self.idle_timeout {
+                Some(idle) => match tokio::time::timeout(idle, body.next()).await {
+                    Ok(next) => next,
+                    Err(_) => return Err(fail(emitted, WorkModelError::Network)),
+                },
+                None => body.next().await,
+            };
+            let chunk = match next {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(error)) => {
+                    return Err(fail(emitted, Failure::from_transport(&error).error))
+                }
+                None => break,
+            };
+            framer
+                .push(chunk.as_ref(), &mut frames)
+                .map_err(|error| fail(emitted, error))?;
+            for frame in frames.drain(..) {
+                match decoder.event(&frame, &mut out) {
+                    Ok(Flow::Continue) => {}
+                    Ok(Flow::Done) => done = true,
+                    Err(error) => return Err(fail(emitted, error)),
+                }
+            }
+            for event in out.drain(..) {
+                emitted = true;
+                events(event);
+            }
+        }
+        if !done {
+            framer
+                .finish(&mut frames)
+                .map_err(|error| fail(emitted, error))?;
+            for frame in frames.drain(..) {
+                decoder
+                    .event(&frame, &mut out)
+                    .map_err(|error| fail(emitted, error))?;
+            }
+        }
+        let decoded = decoder
+            .finish(&mut out)
+            .map_err(|error| fail(emitted, error))?;
+        for event in out.drain(..) {
+            events(event);
+        }
+        Ok(decoded)
+    }
+}
+
+impl WorkModelClient for LeadClient {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(self.run(request, events))
+    }
+}
+
+enum StreamFailure {
+    BeforeOutput(WorkModelError),
+    AfterOutput(WorkModelError),
+}
+
+struct Failure {
+    error: WorkModelError,
+    retry_after: Option<Duration>,
+}
+
+impl Failure {
+    fn retryable(error: WorkModelError) -> Self {
+        Self {
+            error,
+            retry_after: None,
+        }
+    }
+
+    fn from_transport(error: &reqwest::Error) -> Self {
+        Self::retryable(if error.is_builder() {
+            WorkModelError::Protocol
+        } else {
+            WorkModelError::Network
+        })
+    }
+
+    /// The failure, and the bounded body it was read from.
+    async fn from_response(response: reqwest::Response, cloud: bool) -> (Self, Vec<u8>) {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = bounded_body(response).await;
+        let (error, retry_after) = refused(status, &headers, &body, cloud);
+        (Self { error, retry_after }, body)
+    }
+
+    fn retry_wait(&self, retries: u32) -> Option<Duration> {
+        let retryable = matches!(
+            self.error,
+            WorkModelError::RateLimited { .. } | WorkModelError::Overloaded
+        );
+        if !retryable || retries >= MAX_RETRIES {
+            return None;
+        }
+        let wait = self
+            .retry_after
+            .unwrap_or(Duration::from_millis(1_000 * 3_u64.pow(retries)));
+        (wait <= MAX_RETRY_WAIT).then_some(wait)
+    }
+}
+
+async fn bounded_body(response: reqwest::Response) -> Vec<u8> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(Ok(chunk)) = stream.next().await {
+        let room = MAX_ERROR_BODY_BYTES.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        if body.len() >= MAX_ERROR_BODY_BYTES {
+            break;
+        }
+    }
+    body
+}
+
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    if let Some(ms) = headers
+        .get("retry-after-ms")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|ms| ms.is_finite() && *ms >= 0.0)
+    {
+        return Some(Duration::from_millis(ms.min(86_400_000.0) as u64));
     }
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
