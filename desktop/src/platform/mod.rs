@@ -5,6 +5,9 @@ pub use macos as imp;
 #[cfg(target_os = "macos")]
 mod window_controls;
 
+/// The corner-reveal state is pure timing, shared with tests off macOS.
+pub(crate) mod fullscreen_reveal;
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
