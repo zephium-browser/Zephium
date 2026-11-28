@@ -171,12 +171,13 @@ contract:
 | --- | --- |
 | `Zephium-macOS-arm64.dmg` | macOS download |
 | `Zephium-macOS-arm64.app.tar.gz` + `.sig` | macOS updater payload |
-| `Zephium-Windows-x64-setup.exe` + `.sig` | Windows download and updater payload |
-| `latest.json` | Updater manifest (`darwin-aarch64[-app]`, `windows-x86_64[-nsis]`) |
+| `Zephium-Windows-x64-setup.exe` + `.sig` | Windows x64 download and updater payload |
+| `Zephium-Windows-arm64-setup.exe` + `.sig` | Windows ARM64 download and updater payload |
+| `latest.json` | Updater manifest (`darwin-aarch64[-app]`, `windows-x86_64[-nsis]`, `windows-aarch64[-nsis]`) |
 | `SHA256SUMS` | Digests of every other asset |
 
 Renaming does not invalidate an updater signature. Windows signatures bind the
-release version and `windows-x86_64-nsis` target as well as the final bytes;
+release version and the x64 or ARM64 NSIS target as well as the final bytes;
 the updater rejects an unbound or mismatched signature.
 
 ## What the workflow verifies
@@ -188,10 +189,10 @@ the updater rejects an unbound or mismatched signature.
   `APPLE_TEAM_ID`, Gatekeeper (`spctl`) accepts the app, the app and the DMG
   are notarized and stapled, the main executable's entitlements are exactly
   camera and microphone, and no other Mach-O carries any.
-- Both updater signatures verify against the public key in
+- Every updater signature verifies against the public key in
   `desktop/tauri.conf.json`, and the asset set is exactly the one above.
 - Build provenance is attested for the DMG, the updater archive and the
-  installer (`gh attestation verify <file> --repo zephium-browser/Zephium`).
+  installers (`gh attestation verify <file> --repo zephium-browser/Zephium`).
 
 The macOS dSYM and Windows PDB are kept as workflow artifacts for 90 days.
 Download them for any release you need to symbolicate later.
@@ -226,6 +227,8 @@ The owner creates these exact SignPath resources:
   envelope) containing exactly one PE `Zephium_*_x64-setup.exe`, with
   Authenticode signing and timestamping. NSIS is treated as a PE file; this signs
   the downloaded setup, and does not claim signatures on its embedded payload.
+- Artifact configuration **`windows-nsis-arm64`**: the same, but containing
+  exactly one PE `Zephium_*_arm64-setup.exe` for the native ARM64 build.
 - Install the SignPath GitHub App and grant this repository access as required
   by SignPath's origin verification policy.
 
@@ -236,12 +239,15 @@ the issued certificate's complete, exact X.500 Subject. Do not guess the subject
 from the product name or activate using a test certificate. The existing updater
 key secrets are still required independently.
 
-The Windows job uploads `signpath-unsigned-windows-x64`, waits for approval,
+Each Windows job uploads its own unsigned setup (`signpath-unsigned-windows-x64`
+or `signpath-unsigned-windows-arm64`), waits for approval,
 verifies `Get-AuthenticodeSignature` is `Valid`, checks the exact subject and a
 timestamp, then replaces the setup. Only afterwards does
-`cargo run --locked -p xtask -- sign-windows-updater <setup> <version>`
+`cargo run --locked -p xtask -- sign-windows-updater <setup> <version> <target>`
 regenerates the updater signature over the final bytes, binding the version and
-target. This step also runs when SignPath is inactive; the draft job verifies
+target (`windows-x86_64-nsis` or `windows-aarch64-nsis`; the default is x64, so
+the x64 job keeps its original command). This step also runs when SignPath is
+inactive; the draft job verifies
 the signature against the configured public key. Signing failures never
 fall back to unsigned assets. The action is pinned to verified v3.0 commit
 `f6d04783b4569d051e0c80105fe66e82819d0092`.
@@ -260,7 +266,8 @@ certificate alone do not establish those results. Follow the
 and [artifact reference](https://docs.signpath.io/artifact-configuration/reference).
 
 Until then, SmartScreen judges each installer by its own download reputation.
-After publishing, submit `Zephium-Windows-x64-setup.exe` at
+After publishing, submit `Zephium-Windows-x64-setup.exe` and
+`Zephium-Windows-arm64-setup.exe` at
 <https://www.microsoft.com/wdsi/filesubmission> as a software developer
 ("Incorrectly detected as malware/malicious" when it is flagged). Keep the
 asset name and download URL unchanged between releases, and keep the bundle's

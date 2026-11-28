@@ -77,11 +77,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_draft_gates_all_required_jobs_including_skipped_component_cases(self):
         publish = job(WORKFLOW.read_text(), 'publish')
         dependencies = re.search(r'^    needs: \[([^]]+)\]', publish, re.M).group(1).split(', ')
-        self.assertEqual(set(dependencies), {'gate', 'ci', 'components', 'macos', 'windows'})
+        self.assertEqual(set(dependencies), {'gate', 'ci', 'components', 'macos', 'windows', 'windows_arm64'})
         match = re.search(r'^    if: \$\{\{ (.+) \}\}', publish, re.M)
         self.assertIsNotNone(match, 'draft needs an explicit condition for emergency skipped components')
         expression = match.group(1)
-        for statuses in itertools.product(['success', 'failure', 'skipped', 'cancelled'], repeat=5):
+        for statuses in itertools.product(['success', 'failure', 'skipped', 'cancelled'], repeat=len(dependencies)):
             results = dict(zip(dependencies, statuses))
             for emergency, cancelled in itertools.product([False, True], repeat=2):
                 condition = expression.replace('!cancelled()', str(not cancelled))

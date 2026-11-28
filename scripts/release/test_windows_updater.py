@@ -26,7 +26,7 @@ class WindowsUpdaterWorkflowTests(unittest.TestCase):
 
     def producer(self):
         workflow = (ROOT / '.github/workflows/release.yml').read_text()
-        windows = workflow.split('\n  windows:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        windows = workflow.split('\n  windows:\n', 1)[1].split('\n  windows_arm64:\n', 1)[0]
         match = re.search(
             r'      - name: Sign the final Windows bytes for the updater\n(.*?)(?=\n      - )',
             windows, re.S)
@@ -42,6 +42,18 @@ class WindowsUpdaterWorkflowTests(unittest.TestCase):
 
     def test_producer_is_unconditional_and_exists_on_the_consumer_branch(self):
         self.producer()
+
+    def test_arm64_job_publishes_a_target_bound_updater_asset(self):
+        workflow = (ROOT / '.github/workflows/release.yml').read_text()
+        arm = workflow.split('\n  windows_arm64:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        self.assertIn('--target aarch64-pc-windows-msvc', arm)
+        self.assertIn('Zephium_${VERSION}_aarch64-setup.exe', arm)
+        self.assertIn('"${VERSION}" windows-aarch64-nsis', arm)
+        self.assertIn('name: release-windows-arm64', arm)
+        self.assertIn('dist/Zephium-Windows-arm64-setup.exe.sig', arm)
+        publish = workflow.split('\n  publish:\n', 1)[1]
+        self.assertIn('Zephium-Windows-arm64-setup.exe Zephium-Windows-arm64-setup.exe.sig', publish)
+        self.assertIn('"windows-aarch64-nsis": {signature: $win_arm_sig, url: $win_arm_url}', publish)
 
     def test_producer_signs_the_final_installer_and_fails_closed(self):
         script = self.producer()

@@ -446,10 +446,132 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  windows_arm64:
+    name: Windows (ARM64)
+    needs: gate
+    runs-on: windows-latest
+    # Same budget as x64: 75 minutes build + 75 minutes signing + 30 minutes setup.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: rustup toolchain install --profile minimal --target aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-windows-arm64
+      - run: pnpm install --frozen-lockfile
+
+      - name: Write third-party notices
+        shell: bash
+        run: |
+          python3 scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt \
+            || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
+
+      - name: Build
+        timeout-minutes: 75
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # MSVC keeps debug info in the PDB, never in the .exe.
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+          CARGO_PROFILE_RELEASE_STRIP: none
+        run: pnpm tauri build --target aarch64-pc-windows-msvc --bundles nsis --config "${RELEASE_CONFIG}"
+
+      - name: Upload the unsigned setup for SignPath
+        if: needs.gate.outputs.signpath == 'true'
+        id: signpath-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signpath-unsigned-windows-arm64
+          path: target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${{ env.VERSION }}_arm64-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the Windows setup
+        timeout-minutes: 75
+        if: needs.gate.outputs.signpath == 'true'
+        uses: signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b # v3.1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: zephium
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: windows-nsis-arm64
+          github-artifact-id: ${{ steps.signpath-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          service-unavailable-timeout-in-seconds: 300
+          download-signed-artifact-timeout-in-seconds: 180
+          output-artifact-directory: ${{ runner.temp }}/signpath-signed
+
+      - name: Verify publisher trust and timestamp before replacing the setup
+        if: needs.gate.outputs.signpath == 'true'
+        shell: pwsh
+        env:
+          SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "Zephium_${env:VERSION}_arm64-setup.exe"
+          $signed = Join-Path $env:RUNNER_TEMP "signpath-signed/$name"
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -cne $env:SIGNPATH_SIGNER_SUBJECT -or
+              $null -eq $signature.TimeStamperCertificate) {
+            throw "Installer publisher, trust chain or timestamp verification failed."
+          }
+          Copy-Item -LiteralPath $signed -Destination "target/aarch64-pc-windows-msvc/release/bundle/nsis/$name" -Force
+
+      - name: Sign the final Windows bytes for the updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: >-
+          cargo run --locked -p xtask -- sign-windows-updater
+          "target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${VERSION}_arm64-setup.exe"
+          "${VERSION}" windows-aarch64-nsis
+
+      - name: Stage release assets
+        run: |
+          setup="target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${VERSION}_arm64-setup.exe"
+          test -s "${setup}"
+          test -s "${setup}.sig"
+          mkdir dist
+          cp "${setup}" dist/Zephium-Windows-arm64-setup.exe
+          cp "${setup}.sig" dist/Zephium-Windows-arm64-setup.exe.sig
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-windows-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: symbols-windows-arm64-${{ env.VERSION }}
+          path: target/aarch64-pc-windows-msvc/release/*.pdb
+          if-no-files-found: error
+          retention-days: 90
+
   publish:
     name: Draft release
-    needs: [gate, ci, components, macos, windows]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.ci.result == 'success' && needs.macos.result == 'success' && needs.windows.result == 'success' && (needs.components.result == 'success' || (inputs.emergency && needs.components.result == 'skipped')) }}
+    needs: [gate, ci, components, macos, windows, windows_arm64]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.ci.result == 'success' && needs.macos.result == 'success' && needs.windows.result == 'success' && needs.windows_arm64.result == 'success' && (needs.components.result == 'success' || (inputs.emergency && needs.components.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -471,7 +593,8 @@ jobs:
       - name: Verify the asset set and updater signatures
         working-directory: dist
         run: |
-          expected="Zephium-Windows-x64-setup.exe Zephium-Windows-x64-setup.exe.sig Zephium-macOS-arm64.app.tar.gz Zephium-macOS-arm64.app.tar.gz.sig Zephium-macOS-arm64.dmg"
+          expected="Zephium-Windows-x64-setup.exe Zephium-Windows-x64-setup.exe.sig Zephium-Windows-arm64-setup.exe Zephium-Windows-arm64-setup.exe.sig Zephium-macOS-arm64.app.tar.gz Zephium-macOS-arm64.app.tar.gz.sig Zephium-macOS-arm64.dmg"
+          expected="$(printf '%s\n' ${expected} | LC_ALL=C sort | paste -sd ' ')"
           actual="$(printf '%s\n' * | LC_ALL=C sort | paste -sd ' ')"
           if [[ "${actual}" != "${expected}" ]]; then
             echo "::error title=Unexpected release assets::Got [${actual}]."
@@ -480,7 +603,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq minisign
           base64 -d <<<"${UPDATER_PUBKEY}" > "${RUNNER_TEMP}/updater.pub"
-          for asset in Zephium-macOS-arm64.app.tar.gz Zephium-Windows-x64-setup.exe; do
+          for asset in Zephium-macOS-arm64.app.tar.gz Zephium-Windows-x64-setup.exe Zephium-Windows-arm64-setup.exe; do
             base64 -d < "${asset}.sig" > "${RUNNER_TEMP}/${asset}.minisig"
             if ! minisign -V -q -p "${RUNNER_TEMP}/updater.pub" -m "${asset}" -x "${RUNNER_TEMP}/${asset}.minisig"; then
               echo "::error title=Updater signature rejected::${asset} does not verify against the public key in desktop/tauri.conf.json."
@@ -500,6 +623,8 @@ jobs:
             --arg mac_sig "$(cat Zephium-macOS-arm64.app.tar.gz.sig)" \
             --arg win_url "${base}/Zephium-Windows-x64-setup.exe" \
             --arg win_sig "$(cat Zephium-Windows-x64-setup.exe.sig)" \
+            --arg win_arm_url "${base}/Zephium-Windows-arm64-setup.exe" \
+            --arg win_arm_sig "$(cat Zephium-Windows-arm64-setup.exe.sig)" \
             '{
               version: $version,
               notes: $notes,
@@ -508,7 +633,9 @@ jobs:
                 "darwin-aarch64": {signature: $mac_sig, url: $mac_url},
                 "darwin-aarch64-app": {signature: $mac_sig, url: $mac_url},
                 "windows-x86_64": {signature: $win_sig, url: $win_url},
-                "windows-x86_64-nsis": {signature: $win_sig, url: $win_url}
+                "windows-x86_64-nsis": {signature: $win_sig, url: $win_url},
+                "windows-aarch64": {signature: $win_arm_sig, url: $win_arm_url},
+                "windows-aarch64-nsis": {signature: $win_arm_sig, url: $win_arm_url}
               }
             }' > latest.json
           sha256sum Zephium-* latest.json > SHA256SUMS
@@ -520,6 +647,7 @@ jobs:
             dist/Zephium-macOS-arm64.dmg
             dist/Zephium-macOS-arm64.app.tar.gz
             dist/Zephium-Windows-x64-setup.exe
+            dist/Zephium-Windows-arm64-setup.exe
 
       - name: Create the draft release
         env:
@@ -541,6 +669,7 @@ jobs:
 
           - macOS (Apple Silicon): [Zephium-macOS-arm64.dmg](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-macOS-arm64.dmg)
           - Windows (x64): [Zephium-Windows-x64-setup.exe](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-Windows-x64-setup.exe)
+          - Windows (ARM64): [Zephium-Windows-arm64-setup.exe](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-Windows-arm64-setup.exe)
 
           Installed copies update themselves. ${windows_signing}
 

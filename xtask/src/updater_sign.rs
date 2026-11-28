@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 
 const TARGET: &str = "windows-x86_64-nsis";
+const ARM_TARGET: &str = "windows-aarch64-nsis";
 
 pub(crate) fn check_release_assets(arguments: &[String]) -> Result<(), &'static str> {
     let [directory, tag, repository] = arguments else {
@@ -34,6 +35,7 @@ fn check_assets(
 ) -> Result<(), &'static str> {
     const MAC: &str = "Zephium-macOS-arm64.app.tar.gz";
     const WINDOWS: &str = "Zephium-Windows-x64-setup.exe";
+    const WINDOWS_ARM: &str = "Zephium-Windows-arm64-setup.exe";
     let expected = std::collections::BTreeSet::from([
         "SHA256SUMS".to_owned(),
         "latest.json".to_owned(),
@@ -42,6 +44,8 @@ fn check_assets(
         format!("{MAC}.sig"),
         WINDOWS.to_owned(),
         format!("{WINDOWS}.sig"),
+        WINDOWS_ARM.to_owned(),
+        format!("{WINDOWS_ARM}.sig"),
     ]);
     let mut actual = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(directory).map_err(|_| "cannot read release assets")? {
@@ -82,6 +86,8 @@ fn check_assets(
         ("darwin-aarch64-app", MAC),
         ("windows-x86_64", WINDOWS),
         ("windows-x86_64-nsis", WINDOWS),
+        ("windows-aarch64", WINDOWS_ARM),
+        ("windows-aarch64-nsis", WINDOWS_ARM),
     ] {
         let entry = platforms
             .get(platform)
@@ -110,12 +116,17 @@ fn check_assets(
     let public = PublicKeyBox::from_string(&decode(public)?)
         .and_then(|key| key.into_public_key())
         .map_err(|_| "invalid updater public key")?;
-    for entry in platforms.values() {
+    for (platform, entry) in platforms {
+        let windows_target = match platform.as_str() {
+            "windows-x86_64" | "windows-x86_64-nsis" => Some(TARGET),
+            "windows-aarch64" | "windows-aarch64-nsis" => Some(ARM_TARGET),
+            _ => None,
+        };
         let asset = entry
             .get("url")
             .and_then(|url| url.as_str())
             .and_then(|url| url.strip_prefix(&base))
-            .filter(|asset| [MAC, WINDOWS].contains(asset))
+            .filter(|asset| [MAC, WINDOWS, WINDOWS_ARM].contains(asset))
             .ok_or("updater URL is not an updater asset of this tag")?;
         let signature = entry
             .get("signature")
@@ -123,6 +134,12 @@ fn check_assets(
             .ok_or("updater signature is missing")?;
         let signature = minisign::SignatureBox::from_string(&decode(signature)?)
             .map_err(|_| "invalid updater signature")?;
+        if let Some(target) = windows_target {
+            let comment = format!("zephium-updater-v1 version={version} target={target}");
+            if signature.trusted_comment().ok() != Some(comment) {
+                return Err("updater signature is not bound to this release version and target");
+            }
+        }
         minisign::verify(
             &public,
             &signature,
@@ -137,9 +154,15 @@ fn check_assets(
 }
 
 pub(crate) fn run(arguments: &[String]) -> Result<(), &'static str> {
-    let [installer, version] = arguments else {
-        return Err("usage: cargo xtask sign-windows-updater <installer.exe> <version>");
-    };
+    if !(2..=3).contains(&arguments.len()) {
+        return Err("usage: cargo xtask sign-windows-updater <installer.exe> <version> [target]");
+    }
+    let installer = &arguments[0];
+    let version = &arguments[1];
+    let target = arguments.get(2).map(String::as_str).unwrap_or(TARGET);
+    if !matches!(target, TARGET | ARM_TARGET) {
+        return Err("unsupported Windows updater target");
+    }
     let installer = Path::new(installer);
     if installer
         .extension()
@@ -160,7 +183,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), &'static str> {
     let secret = std::env::var("TAURI_SIGNING_PRIVATE_KEY")
         .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY is required")?;
     let password = std::env::var("TAURI_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
-    let signature = sign(installer, version, &secret, password, public)?;
+    let signature = sign(installer, version, &secret, password, public, target)?;
     let output = installer.with_extension("exe.sig");
     let mut temporary =
         tempfile::NamedTempFile::new_in(installer.parent().ok_or("invalid artifact path")?)
@@ -184,6 +207,7 @@ fn sign(
     secret: &str,
     password: String,
     public: &str,
+    target: &str,
 ) -> Result<String, &'static str> {
     let parsed = Version::parse(version).map_err(|_| "invalid release version")?;
     if parsed.to_string() != version {
@@ -208,7 +232,7 @@ fn sign(
                 .or_else(|_| key.into_secret_key(Some(password)))
         })
         .map_err(|_| "cannot unlock updater signing key")?;
-    let comment = format!("zephium-updater-v1 version={version} target={TARGET}");
+    let comment = format!("zephium-updater-v1 version={version} target={target}");
     let signature = minisign::sign(
         Some(&public),
         &secret,
@@ -251,10 +275,21 @@ mod tests {
                 "Zephium-Windows-x64-setup.exe",
                 ["windows-x86_64", "windows-x86_64-nsis"],
             ),
+            (
+                "Zephium-Windows-arm64-setup.exe",
+                ["windows-aarch64", "windows-aarch64-nsis"],
+            ),
         ] {
             let path = directory.join(asset);
             std::fs::write(&path, format!("harmless fixture: {asset}")).unwrap();
-            let signature = sign(&path, "1.2.4", &secret, String::new(), &public).unwrap();
+            let target = if keys.iter().any(|key| key.starts_with("windows-aarch64")) {
+                ARM_TARGET
+            } else if keys.iter().any(|key| key.starts_with("windows-x86_64")) {
+                TARGET
+            } else {
+                ""
+            };
+            let signature = sign(&path, "1.2.4", &secret, String::new(), &public, target).unwrap();
             std::fs::write(directory.join(format!("{asset}.sig")), &signature).unwrap();
             for key in keys {
                 platforms.insert(key.into(), serde_json::json!({
@@ -328,10 +363,46 @@ mod tests {
             );
             std::fs::write(&asset, bytes).unwrap();
         }
+        // A valid signature whose trusted comment names another target or
+        // version must not pass the release check.
+        for (keys, wrong_target, wrong_version) in [
+            (&["windows-x86_64", "windows-x86_64-nsis"][..], ARM_TARGET, "1.2.4"),
+            (&["windows-aarch64", "windows-aarch64-nsis"][..], TARGET, "1.2.4"),
+            (&["windows-x86_64", "windows-x86_64-nsis"][..], TARGET, "1.2.3"),
+        ] {
+            let asset = if keys[0].starts_with("windows-aarch64") {
+                "Zephium-Windows-arm64-setup.exe"
+            } else {
+                "Zephium-Windows-x64-setup.exe"
+            };
+            let sig_path = directory.join(format!("{asset}.sig"));
+            let original_sig = std::fs::read(&sig_path).unwrap();
+            let signature = sign(
+                &directory.join(asset),
+                wrong_version,
+                &secret,
+                String::new(),
+                &public,
+                wrong_target,
+            )
+            .unwrap();
+            std::fs::write(&sig_path, &signature).unwrap();
+            let mut bad = good.clone();
+            for key in keys {
+                bad["platforms"][*key]["signature"] = signature.clone().into();
+            }
+            assert_eq!(
+                check(&bad),
+                Err("updater signature is not bound to this release version and target"),
+                "wrong binding for {keys:?}"
+            );
+            std::fs::write(&sig_path, original_sig).unwrap();
+        }
         // Keep each original signature while changing only its downloaded bytes.
         for asset in [
             "Zephium-macOS-arm64.app.tar.gz",
             "Zephium-Windows-x64-setup.exe",
+            "Zephium-Windows-arm64-setup.exe",
         ] {
             let path = directory.join(asset);
             let bytes = std::fs::read(&path).unwrap();
@@ -355,7 +426,7 @@ mod tests {
         let encode = |value: String| base64::engine::general_purpose::STANDARD.encode(value);
         let secret = encode(pair.sk.to_box(None).unwrap().to_string());
         let public = encode(pair.pk.to_box().unwrap().to_string());
-        let signature = sign(&path, "1.2.4", &secret, String::new(), &public).unwrap();
+        let signature = sign(&path, "1.2.4", &secret, String::new(), &public, TARGET).unwrap();
         let decoded = String::from_utf8(
             base64::engine::general_purpose::STANDARD
                 .decode(signature)
@@ -367,27 +438,57 @@ mod tests {
             parsed.trusted_comment().unwrap(),
             "zephium-updater-v1 version=1.2.4 target=windows-x86_64-nsis"
         );
+        let arm = sign(&path, "1.2.4", &secret, String::new(), &public, ARM_TARGET).unwrap();
+        let arm = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(arm)
+                .unwrap(),
+        )
+        .unwrap();
+        let arm = minisign::SignatureBox::from_string(&arm).unwrap();
+        assert_eq!(
+            arm.trusted_comment().unwrap(),
+            "zephium-updater-v1 version=1.2.4 target=windows-aarch64-nsis"
+        );
         let other = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
         assert!(sign(
             &path,
             "1.2.4",
             &secret,
             String::new(),
-            &encode(other.pk.to_box().unwrap().to_string())
+            &encode(other.pk.to_box().unwrap().to_string()),
+            TARGET,
         )
         .is_err());
-        assert!(sign(&path, "v1.2.4", &secret, String::new(), &public).is_err());
+        assert!(sign(&path, "v1.2.4", &secret, String::new(), &public, TARGET).is_err());
+        assert_eq!(
+            run(&[
+                "installer.exe".into(),
+                "1.2.4".into(),
+                "windows-aarch64".into()
+            ]),
+            Err("unsupported Windows updater target")
+        );
         let encrypted =
             minisign::KeyPair::generate_encrypted_keypair(Some("fixture password".into())).unwrap();
         let secret = encode(encrypted.sk.to_box(None).unwrap().to_string());
         let public = encode(encrypted.pk.to_box().unwrap().to_string());
-        assert!(sign(&path, "1.2.4", &secret, "fixture password".into(), &public).is_ok());
+        assert!(sign(
+            &path,
+            "1.2.4",
+            &secret,
+            "fixture password".into(),
+            &public,
+            TARGET
+        )
+        .is_ok());
         assert!(sign(
             &path,
             "1.2.4",
             &secret,
             "wrong fixture password".into(),
-            &public
+            &public,
+            TARGET,
         )
         .is_err());
     }
