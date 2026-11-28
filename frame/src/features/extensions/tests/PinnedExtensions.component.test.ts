@@ -14,7 +14,6 @@ vi.mock("$domain/webext", () => ({
       name: `Extension ${install}`,
       pinned: native.pinned.includes(install),
     }),
-    MAX_PINNED: 3,
   },
 }));
 vi.mock("$domain/tabs", () => ({
@@ -42,15 +41,20 @@ const action = (id: string) => ({
 
 afterEach(() => vi.clearAllMocks());
 
-test("only pinned extensions get a button, three at most, badges included", async () => {
-  native.actions = ["a", "b", "c", "d", "e"].map(action);
-  native.pinned = ["a", "c", "d", "e"];
+test("every pinned extension gets a button, badges included, and the row scrolls", async () => {
+  native.actions = ["a", "b", "c", "d", "e", "f", "g"].map(action);
+  native.pinned = ["a", "c", "d", "e", "f", "g"];
   const screen = await render(PinnedExtensions);
+  const row = screen.container.querySelector<HTMLElement>(".pins")!;
+  expect(getComputedStyle(row).overflowX).toBe("auto");
   const buttons = screen.container.querySelectorAll("button[data-pinned-extension]");
   expect([...buttons].map((button) => button.getAttribute("data-pinned-extension"))).toEqual([
     "a",
     "c",
     "d",
+    "e",
+    "f",
+    "g",
   ]);
   await expect.element(screen.getByRole("button", { name: "Extension a" })).toHaveTextContent("3");
   await screen.getByRole("button", { name: "Extension c" }).click();

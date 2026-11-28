@@ -41,10 +41,6 @@ export const accessError = () => accessFailure;
 export const named = (id: string) => installed.find((extension) => extension.id === id) ?? null;
 export const byInstall = (install: string) =>
   installed.find((extension) => extension.install_id === install) ?? null;
-/** Buttons the address field has room for beside the tray. */
-export const MAX_PINNED = 3;
-export const pinnedCount = () =>
-  installed.filter((extension) => extension.pinned && extension.enabled).length;
 export const isRemovalAsked = (id: string) => removalAsked === id;
 export const settleRemovalAsk = () => (removalAsked = null);
 export const requestRemoval = (id: string) => (removalRequested = id);
@@ -178,7 +174,6 @@ export async function setEnabled(id: string, enabled: boolean): Promise<void> {
 }
 
 export async function setPinned(id: string, pinned: boolean): Promise<void> {
-  if (pinned && pinnedCount() >= MAX_PINNED) return;
   installed = installed.map((extension) =>
     extension.id === id ? { ...extension, pinned } : extension,
   );

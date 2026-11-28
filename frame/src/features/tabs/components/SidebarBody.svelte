@@ -186,9 +186,10 @@
 
   .new-tab-slot {
     display: flex;
-    flex: none;
+    flex: 0 1 auto;
     align-items: center;
     gap: 2px;
+    min-inline-size: 0;
     padding-inline: var(--sidebar-inset);
     padding-block: 2px calc(var(--sidebar-row-gap) + 2px);
   }
@@ -198,6 +199,7 @@
     align-items: center;
     gap: 10px;
     width: 100%;
+    min-inline-size: 0;
     height: var(--row-sidebar);
     padding-inline: 8px;
     border: 0;

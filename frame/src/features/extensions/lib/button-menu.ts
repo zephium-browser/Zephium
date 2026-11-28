@@ -19,10 +19,7 @@ const CHOICES: readonly ExtensionButtonChoice[] = ["pin", "unpin", "options", "m
  * the extension's own items where the platform lists them. Every platform
  * draws this one list; native only draws it and relays the choice.
  */
-function buttonMenuEntries(
-  extension: WebExtensionView | null,
-  roomToPin: boolean,
-): ExtensionButtonMenuEntry[] {
+function buttonMenuEntries(extension: WebExtensionView | null): ExtensionButtonMenuEntry[] {
   const manage = {
     kind: "item",
     choice: "manage",
@@ -32,14 +29,12 @@ function buttonMenuEntries(
   // The action snapshot can reach the tray before the install catalog.
   if (!extension) return [manage];
   return [
-    extension.pinned
-      ? { kind: "item", choice: "unpin", label: m.webext_unpin(), enabled: true }
-      : {
-          kind: "item",
-          choice: "pin",
-          label: roomToPin ? m.webext_pin() : m.webext_pin_full(),
-          enabled: roomToPin,
-        },
+    {
+      kind: "item",
+      choice: extension.pinned ? "unpin" : "pin",
+      label: extension.pinned ? m.webext_unpin() : m.webext_pin(),
+      enabled: true,
+    },
     ...(extension.has_options && extension.enabled
       ? [
           {
@@ -65,7 +60,7 @@ export function openButtonMenu(
   const install = action.runtime.install_id;
   const extension = webext.byInstall(install);
   if (!extension && !IS_MAC) return;
-  const entries = buttonMenuEntries(extension, webext.pinnedCount() < webext.MAX_PINNED);
+  const entries = buttonMenuEntries(extension);
   // WebKit adds the extension's own `contexts: ["action"]` items.
   if (IS_MAC) {
     extensions.menu(profileId, action, anchor, entries);

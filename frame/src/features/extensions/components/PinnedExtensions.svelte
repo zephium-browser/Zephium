@@ -12,8 +12,7 @@
   let pinned = $derived(
     extensions
       .activeActions(profileId, tabId)
-      .filter((action) => webext.byInstall(action.runtime.install_id)?.pinned)
-      .slice(0, webext.MAX_PINNED),
+      .filter((action) => webext.byInstall(action.runtime.install_id)?.pinned),
   );
 
   function invoke(event: MouseEvent, action: (typeof pinned)[number]) {
@@ -69,11 +68,19 @@
      beat, at once over the row or with one of them in hand. */
   .pins {
     display: flex;
-    flex: none;
+    flex: 0 1 auto;
     align-items: center;
     gap: 2px;
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
     opacity: 0;
     transition: opacity var(--motion-slow) var(--ease-smooth);
+  }
+
+  .pins::-webkit-scrollbar {
+    display: none;
   }
 
   .pins:focus-within {
@@ -94,6 +101,7 @@
 
   .pin {
     display: grid;
+    flex: none;
     place-items: center;
     inline-size: 30px;
     block-size: 30px;

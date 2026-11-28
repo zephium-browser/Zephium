@@ -79,7 +79,6 @@
     {@const installed = webext.byInstall(action.runtime.install_id)}
     {@const name = action.label || installed?.name || m.webext_action()}
     {@const pinned = installed?.pinned ?? false}
-    {@const full = !pinned && webext.pinnedCount() >= webext.MAX_PINNED}
     <div class="row">
       <button
         type="button"
@@ -108,8 +107,7 @@
           class="pin"
           aria-pressed={pinned}
           aria-label={pinned ? m.webext_unpin() : m.webext_pin()}
-          title={full ? m.webext_pin_full() : pinned ? m.webext_unpin() : m.webext_pin()}
-          disabled={full}
+          title={pinned ? m.webext_unpin() : m.webext_pin()}
           onclick={() => void webext.setPinned(installed.id, !pinned)}
         >
           <Icon icon={pinned ? PinOffIcon : PinIcon} size={14} />

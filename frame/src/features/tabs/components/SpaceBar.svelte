@@ -189,9 +189,10 @@
 
   .space-end {
     display: flex;
-    flex: none;
+    flex: 0 1 auto;
     align-items: center;
     gap: 2px;
+    min-inline-size: 0;
     margin-inline-start: auto;
   }
 
