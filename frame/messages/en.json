@@ -410,6 +410,8 @@
   "pref_general_default_help": "Open links from other apps in Zephium.",
   "pref_general_startup": "On startup",
   "pref_general_startup_help": "Your tabs stay in the sidebar either way.",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "Continue where you left off",
   "pref_general_startup_option_1": "Start with a new tab",
   "pref_general_restore": "Restore after an interruption",

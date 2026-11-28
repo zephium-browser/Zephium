@@ -145,6 +145,12 @@ export const fields = {
       { value: "pages", label: m.pref_general_startup_option_2 },
     ],
   },
+  "general.restore-session": {
+    section: "general",
+    label: m.pref_general_restore_session,
+    description: m.pref_general_restore_session_help,
+    initial: true,
+  },
   "general.startup-pages": {
     section: "general",
     label: m.pref_general_startup_pages,

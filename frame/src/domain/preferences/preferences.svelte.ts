@@ -39,6 +39,7 @@ const defaults = {
   "tabs.switch-to-open": "true",
   "tabs.automatic-pip": "true",
   "tabs.startup": "new-tab",
+  "tabs.restore-session": "true",
   "tabs.startup-pages": "",
   "tabs.home": "",
   "tabs.new-page": "",

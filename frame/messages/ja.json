@@ -385,6 +385,8 @@
   "pref_general_default_help": "他のアプリからのリンクをZephiumで開きます。",
   "pref_general_startup": "起動時",
   "pref_general_startup_help": "タブは、どちらの場合もサイドバーに残ります。",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "前回の続きから開く",
   "pref_general_startup_option_1": "新規タブで開始",
   "pref_general_restore": "中断後に復元",

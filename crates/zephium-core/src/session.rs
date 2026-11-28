@@ -250,6 +250,20 @@ pub struct Restored {
     pub recently_closed: Vec<PersistedClosedTab>,
 }
 
+/// Rebuilds a snapshot for a launch that starts with a new tab *only*. The
+/// previous session's tabs, focus and split tree are dropped; spaces,
+/// profiles, folders and the recently closed list stay. A malformed folder
+/// cannot resurrect a tab, since only non-tab rows survive.
+pub fn restore_new_tab_only(state: SessionState) -> Restored {
+    let mut state = state;
+    state
+        .items
+        .retain(|item| matches!(item.kind, PersistedKind::Folder { .. }));
+    state.active_item = None;
+    state.splits = None;
+    restore(state)
+}
+
 /// Rebuilds a persistence snapshot through the same validation path used at
 /// startup. Store adapters use this before writing so dangling/private rows,
 /// dangerous URLs, and oversized legacy display data never land on disk.
@@ -537,6 +551,44 @@ mod tests {
         assert!(!items.navigate(id, input).is_empty());
         let url = navigation::classify(input).expect("test URL must be valid");
         items.set_committed_url(id, url);
+    }
+
+    #[test]
+    fn a_new_tab_only_restore_drops_previous_tabs_focus_and_splits() {
+        let (profiles, spaces, mut items, _profile, space) = seed();
+        let (a, b) = (ItemId::from(10), ItemId::from(11));
+        let folder = ItemId::from(12);
+        items.insert(Item {
+            id: folder,
+            parent: None,
+            placement: today(space),
+            kind: ItemKind::Folder {
+                name: "Kept".into(),
+            },
+        });
+        items.insert_tab(a, today(space));
+        items.insert_tab(b, today(space));
+        navigate_and_commit(&mut items, a, "example.com");
+        navigate_and_commit(&mut items, b, "github.com");
+        let mut tree = Pane::leaf(a);
+        tree.split(a, b, crate::split::Axis::Row, false);
+        let state = snapshot(
+            &profiles,
+            &spaces,
+            &items,
+            Some(space),
+            Some(b),
+            Some(&tree),
+        );
+
+        let restored = restore_new_tab_only(state);
+        assert!(restored.items.view_ids().is_empty());
+        assert!(restored.active_item.is_none());
+        assert!(restored.splits.is_none());
+        assert!(restored.items.get(folder).is_some());
+        assert_eq!(restored.active_space, Some(space));
+        assert_eq!(restored.spaces.get(space).map(|s| s.id), Some(space));
+        assert_eq!(restored.profiles.iter().count(), 1);
     }
 
     #[test]

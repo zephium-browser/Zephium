@@ -385,6 +385,8 @@
   "pref_general_default_help": "Открывать ссылки из других приложений в Zephium.",
   "pref_general_startup": "При запуске",
   "pref_general_startup_help": "В любом случае ваши вкладки останутся на боковой панели.",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "Продолжить с места остановки",
   "pref_general_startup_option_1": "Начать с новой вкладки",
   "pref_general_restore": "Восстанавливать после сбоя",

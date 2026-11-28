@@ -385,6 +385,8 @@
   "pref_general_default_help": "Apri i link di altre app in Zephium.",
   "pref_general_startup": "All'avvio",
   "pref_general_startup_help": "Le tue schede restano comunque nella barra laterale.",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "Riprendi da dove avevi interrotto",
   "pref_general_startup_option_1": "Inizia con una nuova scheda",
   "pref_general_restore": "Ripristina dopo un'interruzione",

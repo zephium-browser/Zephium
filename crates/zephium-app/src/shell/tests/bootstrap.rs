@@ -298,6 +298,44 @@ fn an_empty_list_of_startup_pages_starts_where_the_person_left_off() {
 }
 
 #[test]
+fn starting_with_a_new_tab_only_discards_previous_session_tabs() {
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("tabs.startup".to_owned(), "new-tab".to_owned()),
+        ("tabs.restore-session".to_owned(), "false".to_owned()),
+    ]);
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "github.com");
+    shell.persist();
+
+    let (mut restarted, engine, screen) = setup_with(store.clone());
+    restarted.handle(Command::Bootstrap);
+    let fresh = active_id(&screen);
+    assert!(![first, second].contains(&fresh));
+    let after = last(&screen);
+    assert_eq!(after.tabs.len(), 1);
+    assert!(engine
+        .calls()
+        .iter()
+        .all(|call| !call.contains(&first.to_string())));
+
+    // With the preference unset, startup keeps today's behaviour.
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .remove("tabs.restore-session");
+    let (mut kept, _, screen) = setup_with(store);
+    kept.handle(Command::Bootstrap);
+    assert_eq!(last(&screen).tabs.len(), 3);
+}
+
+#[test]
 fn starting_with_a_new_tab_keeps_every_tab_and_loads_none_of_them() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, screen) = setup_with(store.clone());

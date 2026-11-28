@@ -385,6 +385,8 @@
   "pref_general_default_help": "從其他 App 開啟的連結，會在 Zephium 中開啟。",
   "pref_general_startup": "啟動時",
   "pref_general_startup_help": "無論如何，你的分頁都會保留在側邊欄中。",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "從上次離開的地方繼續",
   "pref_general_startup_option_1": "以新增分頁開始",
   "pref_general_restore": "中斷後還原",

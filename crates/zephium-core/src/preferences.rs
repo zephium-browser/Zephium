@@ -36,6 +36,7 @@ pub const KEYS: &[&str] = &[
     "tabs.switch-to-open",
     "tabs.automatic-pip",
     "tabs.startup",
+    "tabs.restore-session",
     "tabs.startup-pages",
     "tabs.home",
     "tabs.new-page",
@@ -257,6 +258,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "tabs.after-close" => matches!(value, "next" | "previous" | "recent"),
         // A new tab in front at launch; everything restored stays in the sidebar.
         "tabs.startup" => matches!(value, "continue" | "new-tab" | "pages"),
+        // Whether `new-tab` startup also restores the previous session's
+        // tabs. Only an explicit "false" turns restoration off.
+        "tabs.restore-session" => matches!(value, "true" | "false"),
         // One web address per line, at most ten, none repeated.
         "tabs.startup-pages" => {
             let lines: Vec<&str> = value.lines().collect();
@@ -355,6 +359,16 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_restore_only_takes_an_explicit_false() {
+        assert!(value_allowed("tabs.restore-session", "true"));
+        assert!(value_allowed("tabs.restore-session", "false"));
+        assert!(!value_allowed("tabs.restore-session", ""));
+        assert!(!value_allowed("tabs.restore-session", "off"));
+        // The preference is optional: an older store omits it entirely.
+        assert!(KEYS.contains(&"tabs.restore-session"));
+    }
+
     #[test]
     fn newtab_customization_accepts_only_local_images_and_closed_choices() {
         for key in [

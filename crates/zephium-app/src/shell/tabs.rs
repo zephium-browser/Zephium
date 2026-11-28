@@ -86,6 +86,9 @@ pub(super) struct TabPreferences {
     pub(super) automatic_pip: bool,
     /// Launch puts a new tab in front instead of the one left there.
     pub(super) start_with_new_tab: bool,
+    /// `new-tab` startup also restores the previous session's tabs by
+    /// default. An explicit persisted `false` starts with a clean slate.
+    pub(super) restore_session: bool,
     /// Launch opens these pages instead, when there are any.
     pub(super) start_with_pages: bool,
     pub(super) startup_pages: Vec<String>,
@@ -106,6 +109,7 @@ impl Default for TabPreferences {
             switch_to_open: true,
             automatic_pip: true,
             start_with_new_tab: true,
+            restore_session: true,
             start_with_pages: false,
             startup_pages: Vec::new(),
             home: None,
@@ -128,6 +132,7 @@ impl TabPreferences {
             "tabs.switch-to-open",
             "tabs.automatic-pip",
             "tabs.startup",
+            "tabs.restore-session",
             "tabs.startup-pages",
             "tabs.home",
             "tabs.new-page",
@@ -157,6 +162,7 @@ impl TabPreferences {
                 self.start_with_new_tab = value == "new-tab";
                 self.start_with_pages = value == "pages";
             }
+            ("tabs.restore-session", value) => self.restore_session = value != "false",
             ("tabs.startup-pages", value) => {
                 self.startup_pages = zephium_core::preferences::startup_pages(value)
             }

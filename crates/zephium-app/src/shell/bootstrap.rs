@@ -31,6 +31,11 @@ impl Shell {
             self.resume_focus();
             return;
         }
+        // Only an explicit opt-out changes startup. With the preference
+        // unset, the previous session is restored exactly as before.
+        let new_tab_only = self.tab_preferences.start_with_new_tab
+            && !self.tab_preferences.restore_session
+            && self.pending_external.is_empty();
         let pending_deletions = match self.store.pending_profile_deletions() {
             ProfileDeletionLoad::Loaded(pending) => pending,
             ProfileDeletionLoad::Failed => {
@@ -82,7 +87,11 @@ impl Shell {
                 state,
                 blocker_configs: loaded_blocker_configs,
             } => {
-                let restored = session::restore(state);
+                let restored = if new_tab_only {
+                    session::restore_new_tab_only(state)
+                } else {
+                    session::restore(state)
+                };
                 self.recently_closed = restored.recently_closed;
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;
@@ -119,7 +128,11 @@ impl Shell {
                 );
                 self.degraded_storage_profiles = degraded;
 
-                let restored = session::restore(state);
+                let restored = if new_tab_only {
+                    session::restore_new_tab_only(state)
+                } else {
+                    session::restore(state)
+                };
                 self.recently_closed = restored.recently_closed;
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;

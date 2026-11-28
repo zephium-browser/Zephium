@@ -385,6 +385,8 @@
   "pref_general_default_help": "在 Zephium 中打开来自其他 App 的链接。",
   "pref_general_startup": "启动时",
   "pref_general_startup_help": "无论如何设置，你的标签页都会保留在边栏中。",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "继续上次的浏览",
   "pref_general_startup_option_1": "以新标签页开始",
   "pref_general_restore": "中断后恢复",

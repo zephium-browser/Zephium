@@ -385,6 +385,8 @@
   "pref_general_default_help": "Ouvrir les liens provenant d'autres apps dans Zephium.",
   "pref_general_startup": "Au démarrage",
   "pref_general_startup_help": "Vos onglets restent dans la barre latérale dans tous les cas.",
+  "pref_general_restore_session": "Reopen tabs from last session",
+  "pref_general_restore_session_help": "With a new tab at startup, keep the previous session’s tabs in the sidebar. Turn off to start with only the new tab.",
   "pref_general_startup_option_0": "Reprendre là où vous en étiez",
   "pref_general_startup_option_1": "Commencer par un nouvel onglet",
   "pref_general_restore": "Restaurer après une interruption",
