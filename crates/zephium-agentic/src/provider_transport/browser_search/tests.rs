@@ -69,7 +69,7 @@ impl WorkPublicSearchProvider for Shared {
 }
 
 fn backend(engine: SearchEngine, native: &std::sync::Arc<Native>) -> BrowserSearch {
-    BrowserSearch::try_new(engine, "")
+    BrowserSearch::try_new(engine, "", "")
         .unwrap()
         .with_fallback(
             Box::new(Shared(native.clone())),
@@ -213,7 +213,7 @@ async fn a_fallback_that_was_never_sent_keeps_the_runs_fallbacks() {
 
 #[tokio::test]
 async fn without_a_fallback_a_wall_is_reported_unavailable() {
-    let search = BrowserSearch::try_new(SearchEngine::Brave, "").unwrap();
+    let search = BrowserSearch::try_new(SearchEngine::Brave, "", "").unwrap();
     let scope = scope(SearchEngine::Brave, "rust async runtime");
     assert_eq!(search.fallback(), None);
     assert!(matches!(
@@ -245,9 +245,31 @@ async fn a_query_the_engine_may_not_receive_is_never_sent_anywhere() {
 }
 
 #[test]
+fn kagi_session_token_goes_only_to_kagi() {
+    let search = BrowserSearch::try_new(SearchEngine::Kagi, "", "secret-token").unwrap();
+    let url = search
+        .results_page(&scope(SearchEngine::Kagi, "rust"))
+        .unwrap()
+        .url;
+    assert_eq!(url.host_str(), Some("kagi.com"));
+    assert_eq!(
+        url.query_pairs()
+            .find(|(key, _)| key == "token")
+            .map(|(_, value)| value.into_owned()),
+        Some("secret-token".to_owned())
+    );
+    let other = BrowserSearch::try_new(SearchEngine::Google, "", "secret-token").unwrap();
+    let url = other
+        .results_page(&scope(SearchEngine::Google, "rust"))
+        .unwrap()
+        .url;
+    assert!(url.query_pairs().all(|(key, _)| key != "token"));
+}
+
+#[test]
 fn freshness_becomes_each_engines_own_parameter() {
     let url = |engine, query: &str| {
-        BrowserSearch::try_new(engine, "https://search.example.net/?q={searchTerms}")
+        BrowserSearch::try_new(engine, "https://search.example.net/?q={searchTerms}", "")
             .unwrap()
             .results_page(&scope(engine, query))
             .unwrap()
@@ -278,5 +300,5 @@ fn freshness_becomes_each_engines_own_parameter() {
         url(SearchEngine::Custom, "rust release (past week)"),
         "https://search.example.net/?q=rust+release"
     );
-    assert!(BrowserSearch::try_new(SearchEngine::Custom, "").is_err());
+    assert!(BrowserSearch::try_new(SearchEngine::Custom, "", "").is_err());
 }

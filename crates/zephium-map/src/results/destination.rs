@@ -26,6 +26,7 @@ const ENGINE_HOSTS: &[(SearchEngine, &[&str])] = &[
     (SearchEngine::Bing, &["bing.com", "bing.net"]),
     (SearchEngine::Brave, &["search.brave.com"]),
     (SearchEngine::DuckDuckGo, &["duckduckgo.com", "duck.com"]),
+    (SearchEngine::Kagi, &["kagi.com"]),
 ];
 const AD_HOSTS: &[&str] = &["googleadservices.com", "doubleclick.net", "bat.bing.com"];
 const AD_PATHS: &[&str] = &[
