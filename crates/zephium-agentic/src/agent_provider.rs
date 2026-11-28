@@ -594,7 +594,7 @@ pub struct AgentProviderCallIdentity {
 
 impl AgentProviderCallIdentity {
     /// A correlation joined to no run, for probe replays outside any policy.
-    #[cfg(feature = "probe-harness")]
+    #[cfg(all(feature = "probe-harness", feature = "provider-transport"))]
     pub(crate) fn probe_fixture() -> Self {
         Self {
             manifest: crate::AgentRunManifestId::generate(),

@@ -324,7 +324,7 @@ impl AgentRunPolicy {
     }
     // Provider/server retention can replay an earlier picture without an
     // explicit image part in the next body. Fence the whole existing history.
-    #[cfg(any(test, feature = "provider-transport"))]
+    #[cfg(feature = "provider-transport")]
     pub(crate) fn has_model_image_history(&self) -> bool {
         self.image_owners
             .as_ref()
