@@ -1,4 +1,126 @@
-  zephium_agentic::ModelNativeSearch::try_new(model.entry.clone(), model.client.clone())
+//! The lead's run: its models per role, its search backend and the page
+//! machinery, all on the models the person chose. Searches open the
+//! person's own search engine's results page in the agent browser and read
+//! it with no model; the chosen models' own search, or the OpenAI public
+//! search, answers only when that page cannot be used, a few times a run.
+use super::*;
+use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
+use zephium_core::work::model::WorkModelRole;
+
+/// The models for each role; a helper role without its own model uses the
+/// lead's. `None` when no lead model resolves, and the run is refused.
+pub(crate) async fn models(
+    profile: ProfileId,
+    work: Option<zephium_core::work::WorkId>,
+) -> Option<WorkLeadModels> {
+    // Hosted calls are noted against their task on this computer, for the
+    // usage history; the service is never told the task.
+    let source = work.map(|work| zephium_app::work_models::WorkCallSource::Task {
+        profile: profile.to_string(),
+        work: work.to_string(),
+    });
+    let resolve = |role| {
+        let source = source.clone();
+        async move {
+            zephium_app::work_models::resolve_entry_for(profile, role, source)
+                .await
+                .ok()
+                .map(|(entry, client)| LeadModel { entry, client })
+        }
+    };
+    let lead = resolve(WorkModelRole::Lead).await?;
+    let page = resolve(WorkModelRole::Page)
+        .await
+        .unwrap_or_else(|| lead.clone());
+    let light = resolve(WorkModelRole::Light)
+        .await
+        .unwrap_or_else(|| page.clone());
+    Some(WorkLeadModels { lead, page, light })
+}
+
+/// Search opens the person's own search engine's results page in the agent
+/// browser, as if they typed the query in the address bar, and Rust reads
+/// the results off it: no model call. A page that cannot be used falls back
+/// to a provider's search a few times per run. A lead run always has the
+/// agent browser, so a browser search leads unless the person's custom
+/// engine has no usable address; then the provider search stands alone.
+async fn search_backend(
+    profile: ProfileId,
+    models: &WorkLeadModels,
+) -> Result<Box<dyn zephium_core::work::search::WorkPublicSearchProvider>, WorkError> {
+    let fallback = provider_search(profile, models).await?;
+    let (engine, template, token) = search_engine().await;
+    let Ok(browser) = zephium_agentic::BrowserSearch::try_new(engine, &template, &token) else {
+        return Ok(match fallback {
+            Some((search, _)) => search,
+            None => {
+                record_diagnostic(format_args!("work: phase=lead state=search backend=none"));
+                Box::new(NoSearch::for_models(models))
+            }
+        });
+    };
+    record_diagnostic(format_args!(
+        "work: phase=lead state=search backend=browser engine={} fallback={}",
+        engine.id(),
+        fallback
+            .as_ref()
+            .map_or("none", |(_, grant)| match grant.provider {
+                zephium_core::work::search::WorkSearchProvider::Native => "native",
+                zephium_core::work::search::WorkSearchProvider::OpenAi => "openai",
+                zephium_core::work::search::WorkSearchProvider::Browser => "browser",
+            })
+    ));
+    Ok(match fallback {
+        Some((search, grant)) => Box::new(browser.with_fallback(search, grant)?),
+        None => Box::new(browser),
+    })
+}
+
+/// The engine the person searches with in the address bar, and their
+/// custom engine's address.
+async fn search_engine() -> (zephium_core::search::SearchEngine, String, String) {
+    use zephium_core::ports::store::Store;
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = crate::APP_STORE.get()?;
+        Some((
+            store
+                .app_setting("search.engine")
+                .as_deref()
+                .and_then(zephium_core::search::SearchEngine::from_id)
+                .unwrap_or_default(),
+            store.app_setting("search.custom-url").unwrap_or_default(),
+            store.app_setting("search.kagi-token").unwrap_or_default(),
+        ))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// The provider search a browser search falls back to: the chosen models'
+/// own search, the light model first since searches are many and short;
+/// else the person's OpenAI key's fixed public search; else none.
+async fn provider_search(
+    profile: ProfileId,
+    models: &WorkLeadModels,
+) -> Result<
+    Option<(
+        Box<dyn zephium_core::work::search::WorkPublicSearchProvider>,
+        zephium_core::work::search::WorkSearchFallbackV1,
+    )>,
+    WorkError,
+> {
+    // Local selections never acquire a provider-search credential or silently
+    // add a separately billed native/OpenAI search behind browser search.
+    if models.all_free() {
+        return Ok(None);
+    }
+    use zephium_agentic::{AgentProviderTransport, AgentProviderTransportConfig};
+    use zephium_core::work::search::{WorkSearchFallbackV1, WorkSearchProvider};
+    for model in [&models.light, &models.lead, &models.page] {
+        if let Ok(search) =
+            zephium_agentic::ModelNativeSearch::try_new(model.entry.clone(), model.client.clone())
         {
             record_diagnostic(format_args!(
                 "work: phase=lead state=search provider=native model={}",

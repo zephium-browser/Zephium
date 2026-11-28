@@ -1,4 +1,331 @@
-gine", &self.engine)
+//! Public search disclosure and attributable source evidence: a provider's
+//! answer with its citations, or the ranked results of the person's own
+//! search engine read in the agent browser.
+use super::{
+    runtime::{WorkExecutionLimits, WorkUsage},
+    WorkError,
+};
+use serde::{Deserialize, Serialize};
+use std::{future::Future, pin::Pin};
+
+pub const PUBLIC_SEARCH_MODEL: &str = "gpt-6-luna";
+pub const PUBLIC_SEARCH_MAX_QUERY_CHARS: usize = 512;
+pub const PUBLIC_SEARCH_MAX_QUERY_BYTES: usize = 2048;
+
+/// Shared scalar-value boundary matching the provider schema's maxLength.
+/// This validates shape, not whether a query contains private information.
+pub fn validate_public_search_query(query: &str) -> Result<(), WorkError> {
+    if query.trim().is_empty()
+        || query.len() > PUBLIC_SEARCH_MAX_QUERY_BYTES
+        || query.chars().count() > PUBLIC_SEARCH_MAX_QUERY_CHARS
+        || query.chars().any(char::is_control)
+    {
+        return Err(WorkError::Invalid);
+    }
+    Ok(())
+}
+
+/// One search context plus the maximum exact request and output, including reasoning.
+pub const PUBLIC_SEARCH_TOKEN_RESERVATION: u32 = 131_072 + 8192 + 8192;
+
+/// Host maximum for an explicitly directed, single public read.
+pub fn validate_direct_public_read(
+    scope: &WorkPublicSearchScope,
+    limits: WorkExecutionLimits,
+) -> Result<(), WorkError> {
+    scope.validate()?;
+    limits.validate()?;
+    if limits.model_tokens > PUBLIC_SEARCH_TOKEN_RESERVATION
+        || limits.cost_micro_usd > 100_000
+        || limits.operations != 1
+        || limits.timeout_seconds > 180
+        || limits.max_workers != 1
+    {
+        return Err(WorkError::Capacity);
+    }
+    Ok(())
+}
+
+/// OpenAI's fixed public search profiles.
+pub fn supported_public_search_model(model: &str) -> bool {
+    matches!(model, "gpt-4.1-mini" | "gpt-5.6-luna" | "gpt-6-luna")
+}
+
+/// The engines a browser search can name, as the `search.engine` preference
+/// stores them.
+pub const BROWSER_SEARCH_ENGINES: [&str; 6] = [
+    "google",
+    "duckduckgo",
+    "bing",
+    "brave",
+    "kagi",
+    "custom",
+];
+/// Results one browser search's evidence holds at most.
+pub const BROWSER_SEARCH_MAX_RESULTS: usize = 16;
+pub const BROWSER_SEARCH_SNIPPET_BYTES: usize = 1024;
+
+/// A model the provider may search with: a fixed OpenAI profile, for a
+/// chosen model's own search its catalog id, and for a browser search the
+/// engine.
+pub fn supported_search_model(provider: WorkSearchProvider, model: &str) -> bool {
+    match provider {
+        WorkSearchProvider::OpenAi => supported_public_search_model(model),
+        WorkSearchProvider::Browser => BROWSER_SEARCH_ENGINES.contains(&model),
+        WorkSearchProvider::Native => {
+            !model.is_empty()
+                && model.len() <= 160
+                && model
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() && !matches!(b, b'"' | b'\\'))
+        }
+    }
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSearchProvider {
+    OpenAi,
+    /// The web search built into the chosen model's own provider.
+    Native,
+    /// The person's search engine's results page, read in the agent browser
+    /// with no model call.
+    Browser,
+}
+
+/// The search a browser search falls back to when it cannot use a results
+/// page.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkSearchFallbackV1 {
+    pub provider: WorkSearchProvider,
+    pub model: String,
+}
+impl WorkSearchFallbackV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        if self.provider == WorkSearchProvider::Browser
+            || !supported_search_model(self.provider, &self.model)
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPublicSearchScope {
+    pub provider: WorkSearchProvider,
+    pub model: String,
+    pub query: String,
+}
+impl WorkPublicSearchScope {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        if !supported_search_model(self.provider, &self.model) {
+            return Err(WorkError::Invalid);
+        }
+        validate_public_search_query(&self.query)
+    }
+}
+impl std::fmt::Debug for WorkPublicSearchScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkPublicSearchScope")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProviderSearchCitation {
+    pub url: String,
+    pub title: String,
+    pub start_index: u32,
+    pub end_index: u32,
+    /// The engine's own text under a browser search result. A browser search
+    /// has no answer, so its results span nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProviderSearchEvidenceV1 {
+    pub version: u16,
+    pub provider: WorkSearchProvider,
+    pub model: String,
+    /// Catalog-validated actual snapshot returned by the provider.
+    pub response_model: String,
+    pub response_id: String,
+    pub search_call_id: String,
+    /// Empty for a browser search: a results page gives no answer.
+    pub answer: String,
+    /// For a browser search, its results in the engine's order.
+    pub citations: Vec<WorkProviderSearchCitation>,
+    /// Provider-reported usage, distinct from fixed billed search-content units.
+    pub actual_input_tokens: u32,
+    pub actual_output_tokens: u32,
+}
+impl std::fmt::Debug for WorkProviderSearchEvidenceV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkProviderSearchEvidenceV1([content redacted])")
+    }
+}
+impl WorkProviderSearchEvidenceV1 {
+    /// A bounded passage around this provider annotation, not a webpage quote.
+    /// The complete original answer remains in the publication record. Returning
+    /// a passage avoids disclosing that same full answer once per citation to a
+    /// synthesizing parent. Provider offsets count characters, not UTF-8 bytes.
+    pub fn citation_excerpt(&self, index: usize) -> Result<String, WorkError> {
+        let citation = self.citations.get(index).ok_or(WorkError::NotFound)?;
+        if self.provider == WorkSearchProvider::Browser {
+            return Ok(citation
+                .snippet
+                .clone()
+                .unwrap_or_else(|| citation.title.clone()));
+        }
+        let start = (citation.start_index as usize).saturating_sub(256);
+        let text: String = self.answer.chars().skip(start).take(768).collect();
+        if text.is_empty() {
+            return Err(WorkError::Invalid);
+        }
+        Ok(text)
+    }
+
+    pub fn validate(&self) -> Result<(), WorkError> {
+        fn identity(value: &str, prefix: &str) -> bool {
+            value.starts_with(prefix)
+                && value.len() > prefix.len()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        }
+        let model_matches = match (self.provider, self.model.as_str()) {
+            (WorkSearchProvider::OpenAi, "gpt-4.1-mini") => matches!(
+                self.response_model.as_str(),
+                "gpt-4.1-mini" | "gpt-4.1-mini-2025-04-14"
+            ),
+            (WorkSearchProvider::OpenAi, "gpt-5.6-luna") => self.response_model == "gpt-5.6-luna",
+            (WorkSearchProvider::OpenAi, "gpt-6-luna") => self.response_model == "gpt-6-luna",
+            (WorkSearchProvider::OpenAi, _) => false,
+            (WorkSearchProvider::Native | WorkSearchProvider::Browser, model) => {
+                supported_search_model(self.provider, model) && self.response_model == model
+            }
+        };
+        // Native and browser searches have no provider response identity to
+        // keep; Rust mints correlation ids, which never claim to be receipts.
+        let (response, call) = match self.provider {
+            WorkSearchProvider::OpenAi => ("resp_", "ws_"),
+            WorkSearchProvider::Native => ("zr_", "zs_"),
+            WorkSearchProvider::Browser => ("zb_", "zq_"),
+        };
+        if !model_matches
+            || self.version != 1
+            || !identity(&self.response_id, response)
+            || !identity(&self.search_call_id, call)
+        {
+            return Err(WorkError::Invalid);
+        }
+        if self.provider == WorkSearchProvider::Browser {
+            return self.validate_results();
+        }
+        if self.answer.trim().is_empty()
+            || self.answer.len() > 32768
+            || self
+                .answer
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+            || self.citations.is_empty()
+            || self.citations.len() > 64
+            || self.actual_input_tokens == 0
+            || self.actual_output_tokens > 8192
+            || self
+                .actual_input_tokens
+                .checked_add(self.actual_output_tokens)
+                .is_none()
+        {
+            return Err(WorkError::Invalid);
+        }
+        let characters = self.answer.chars().count();
+        for (index, citation) in self.citations.iter().enumerate() {
+            let url = url::Url::parse(&citation.url).map_err(|_| WorkError::Invalid)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || citation.url.len() > 2048
+                || citation.title.trim().is_empty()
+                || citation.title.len() > 512
+                || citation.title.chars().any(char::is_control)
+                || citation.start_index >= citation.end_index
+                || citation.end_index as usize > characters
+                || citation.snippet.is_some()
+                || self.citations[..index].contains(citation)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        Ok(())
+    }
+
+    /// A browser search: no answer and no model usage, only the engine's
+    /// distinct results, each with the engine's own text where it gave one.
+    fn validate_results(&self) -> Result<(), WorkError> {
+        if !self.answer.is_empty()
+            || self.citations.is_empty()
+            || self.citations.len() > BROWSER_SEARCH_MAX_RESULTS
+            || self.actual_input_tokens != 0
+            || self.actual_output_tokens != 0
+        {
+            return Err(WorkError::Invalid);
+        }
+        for (index, result) in self.citations.iter().enumerate() {
+            let url = url::Url::parse(&result.url).map_err(|_| WorkError::Invalid)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || result.url.len() > 2048
+                || result.title.trim().is_empty()
+                || result.title.len() > 512
+                || result.title.chars().any(char::is_control)
+                || result.start_index != 0
+                || result.end_index != 0
+                || result.snippet.as_ref().is_some_and(|snippet| {
+                    snippet.trim().is_empty()
+                        || snippet.len() > BROWSER_SEARCH_SNIPPET_BYTES
+                        || snippet.chars().any(char::is_control)
+                })
+                || self.citations[..index]
+                    .iter()
+                    .any(|earlier| earlier.url == result.url)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        Ok(())
+    }
+}
+pub struct WorkPublicSearchResult {
+    pub evidence: WorkProviderSearchEvidenceV1,
+    pub usage: WorkUsage,
+}
+
+/// The results page a browser search opens in the agent browser: the
+/// person's engine and its address for the query.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WorkResultsPage {
+    pub engine: crate::search::SearchEngine,
+    pub url: url::Url,
+}
+impl std::fmt::Debug for WorkResultsPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkResultsPage")
+            .field("engine", &self.engine)
             .finish_non_exhaustive()
     }
 }

@@ -1,4 +1,151 @@
-words = std::collections::HashSet::new();
+use super::SearchEngine;
+use crate::navigation;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use url::Url;
+
+pub const MAX_SHORTCUTS: usize = 64;
+pub const MAX_SHORTCUT_SETTINGS_BYTES: usize = 32 * 1024;
+/// Defaults that were once offered and no longer are.
+const RETIRED: &[&str] = &[
+    "rust-docs",
+    "npm",
+    "pypi",
+    "gitlab",
+    "crates",
+    "imdb",
+    "goodreads",
+    "openstreetmap",
+];
+
+const PREFIX_STOPLIST: &[&str] = &[
+    "a",
+    "i",
+    "e",
+    "x",
+    "r",
+    "b",
+    "d",
+    "g",
+    "k",
+    "w",
+    "so",
+    "aw",
+    "gm",
+    "gl",
+    "gr",
+    "tw",
+    "wa",
+    "ia",
+    "tr",
+    "sp",
+    "ok",
+    "hi",
+    "no",
+    "yo",
+    "go",
+    "to",
+    "in",
+    "on",
+    "at",
+    "it",
+    "is",
+    "me",
+    "my",
+    "we",
+    "us",
+    "or",
+    "an",
+    "as",
+    "be",
+    "do",
+    "he",
+    "if",
+    "of",
+    "up",
+    "ya",
+    "lol",
+    "omg",
+    "idk",
+    "brb",
+    "btw",
+    "hey",
+    "yes",
+    "google",
+    "brave",
+    "perplexity",
+    "wiki",
+    "images",
+    "maps",
+    "twitter",
+    "crates",
+    "crate",
+    "translate",
+    "rust",
+    "twitch",
+    "archive",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct SearchShortcut {
+    pub id: String,
+    pub name: String,
+    pub keywords: Vec<String>,
+    pub search_url: String,
+    pub home_url: String,
+    pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<SearchEngine>,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutTrigger {
+    Keyword,
+    Bang,
+    None,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedSearch<'registry, 'input> {
+    pub shortcut: Option<&'registry str>,
+    pub query: Cow<'input, str>,
+    pub trigger: ShortcutTrigger,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShortcutRegistry(Vec<SearchShortcut>);
+
+impl Default for ShortcutRegistry {
+    fn default() -> Self {
+        Self(serde_json::from_str(include_str!("shortcuts.json")).expect("bundled shortcuts"))
+    }
+}
+
+impl ShortcutRegistry {
+    pub fn entries(&self) -> &[SearchShortcut] {
+        &self.0
+    }
+
+    pub fn from_setting(value: &str) -> Option<Self> {
+        if value.is_empty() {
+            return Some(Self::default());
+        }
+        if value.len() > MAX_SHORTCUT_SETTINGS_BYTES {
+            return None;
+        }
+        let mut entries: Vec<SearchShortcut> = serde_json::from_str(value).ok()?;
+        if entries.len() > MAX_SHORTCUTS {
+            return None;
+        }
+        // A list saved before a default was taken out still names it; it is
+        // left behind rather than the whole list refused.
+        entries.retain(|entry| !RETIRED.contains(&entry.id.as_str()));
+        let defaults = Self::default();
+        let mut ids = std::collections::HashSet::new();
+        let mut keywords = std::collections::HashSet::new();
         for entry in &entries {
             if entry.id.len() > 80
                 || !entry

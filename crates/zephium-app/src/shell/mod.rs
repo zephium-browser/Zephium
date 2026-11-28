@@ -1,4 +1,2006 @@
-alse;
+//! Authoritative browser-shell state machine and effect coordination.
+
+mod archive;
+mod audio;
+mod blocked;
+mod blocker;
+mod blocker_sites;
+mod blocker_statistics;
+mod bookmarks;
+mod bootstrap;
+mod browsing_data;
+mod certificates;
+mod effects;
+mod engine_events;
+mod extension_actions;
+mod extension_browser_requests;
+mod extension_browser_surface;
+mod extension_data;
+mod extension_store;
+mod favicon_probe;
+mod favicons;
+mod fullscreen;
+mod history;
+mod history_list;
+mod https_first;
+mod media;
+mod mini;
+mod network;
+pub use mini::{
+    admitted_mini_size, MAX_MINI_WINDOWS, MINI_PAGE_INSET, MINI_TOOLBAR_HEIGHT,
+    MINI_WINDOW_MIN_SIZE, MINI_WINDOW_SIZE,
+};
+mod operations;
+mod page_permissions;
+mod page_requests;
+mod page_source;
+mod persistence;
+mod presentation;
+mod private;
+mod profile_deletion;
+mod profile_roster;
+mod projections;
+mod recent_tabs;
+mod scope;
+mod search;
+mod site_permissions;
+mod tab_previews;
+mod tabs;
+mod time;
+mod user_content_status;
+mod view_lifecycle;
+mod webext;
+pub use webext::{WebExtensionStatus, WebExtensionTarget};
+mod window_layout;
+mod work_authoring;
+mod zoom;
+
+use effects::{mutation_result, operation_result, NativeWork};
+use extension_actions::ExtensionActionState;
+use extension_browser_surface::ExtensionBrowserSurfaceState;
+#[cfg(test)]
+use favicons::ICON_CACHE_CAPACITY;
+use favicons::{origin_of, FaviconState};
+use page_permissions::PagePermissionPromptState;
+#[cfg(test)]
+use presentation::PendingPresentation;
+use presentation::PresentationState;
+#[cfg(test)]
+use presentation::MAX_PRESENTATION_ADMISSION_REJECTIONS;
+use profile_deletion::{
+    ProfileDeletionCoordinator, ProfileDeletionPhase, ProfileDeletionState,
+    PROFILE_DELETION_STORE_TIMEOUT,
+};
+use search::SearchState;
+use view_lifecycle::{CrashState, PendingDiscardProbe, ResidencyState, LIVE_VIEW_ABSOLUTE_LIMIT};
+#[cfg(test)]
+use view_lifecycle::{LIVE_VIEW_PRESSURE_LIMIT, MAX_CONCURRENT_DISCARD_PROBES};
+use window_layout::GrabbedDivider;
+use zoom::{ZoomOrigin, ZoomState, ZoomStep};
+
+use persistence::PersistenceState;
+#[cfg(test)]
+use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_DELAY};
+
+#[cfg(test)]
+use crate::actor::{spawn, Handle, TryPushError};
+use crate::actor::{CallbackHandle, CommandQueue};
+#[cfg(feature = "agentic-browser")]
+use crate::api::AgentLifecycle;
+use crate::api::PagePermissionPromptDecision;
+#[cfg(test)]
+use crate::api::PresentationChrome;
+use crate::api::TabAction;
+use crate::api::{
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
+    ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
+    SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
+};
+#[cfg(test)]
+use crate::store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
+use crate::store_reads::{StoreReadQueue, StoreReadResult};
+
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "agentic-browser")]
+use zephium_agentic::AgentBrowserShutdownOutcome;
+#[cfg(test)]
+use zephium_core::extensions::ExtensionBrowserRequestId;
+use zephium_core::extensions::{
+    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
+    ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
+};
+use zephium_core::geometry::{Rect, Size};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
+use zephium_core::item::{ItemKind, Lifecycle, Placement, SpaceSection, TabState};
+use zephium_core::items::{Effect, Items};
+use zephium_core::layout;
+use zephium_core::ports::blocker::BlockerShutdownOutcome;
+#[cfg(test)]
+use zephium_core::ports::chrome::Chrome as GeometryChrome;
+use zephium_core::ports::chrome::ChromeFrame;
+#[cfg(test)]
+use zephium_core::ports::engine::Engine;
+use zephium_core::ports::engine::{
+    ContentScope, DiscardProbeId, EngineEvent, NativeAction, NativeDispatch,
+    NavigationPresentationId, Partition, ProfileDataErasureOutcome, StageMotion, ZoomRequestId,
+};
+#[cfg(test)]
+use zephium_core::ports::store::Store;
+use zephium_core::ports::store::{
+    PendingProfileDeletion, ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome,
+    ProfileDeletionLoad, SessionLoad, StoreShutdownOutcome, MAX_FAVICON_BATCH_ORIGINS,
+};
+use zephium_core::profiles::{Profile, ProfileKind, Profiles};
+use zephium_core::session;
+use zephium_core::spaces::{Space, Spaces};
+use zephium_core::split::{self, Axis, Edge, Pane};
+use zephium_core::windows::{WindowKind, Windows};
+use zephium_core::{commands, navigation};
+use zephium_ipc::{
+    BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
+    BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
+    BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
+    ExtensionActionFailure, ExtensionActionRuntimeView, ExtensionActionShortcutView,
+    ExtensionActionsView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
+    OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
+    PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
+    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
+    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
+    SpaceView, SplitGroupView, TabView,
+};
+
+// More simultaneous native renderers are neither usable in the current tiled
+// layout nor safe to reconstruct synchronously after a restore/process loss.
+pub(crate) const MAX_VISIBLE_PANES: usize = 8;
+pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
+pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A person opening, switching, closing or navigating tabs, or a page
+/// changing address or loading: what keeps a warm spare worth holding.
+fn browsing_activity(cmd: &Command) -> bool {
+    match cmd {
+        Command::Open
+        | Command::Activate(_)
+        | Command::Close(_)
+        | Command::Navigate { .. }
+        | Command::Reload(_)
+        | Command::Engine(EngineEvent::UrlChanged { .. })
+        | Command::Engine(EngineEvent::LoadingChanged { .. }) => true,
+        Command::Operation { command, .. } => browsing_activity(command),
+        _ => false,
+    }
+}
+// FIFO wait, storage-reader quiescence, snapshot construction, durability,
+// native teardown, and thread joins consume
+// this one caller-owned deadline. Under CPU load a WebView2 browser took up
+// to 13 s to exit, so Windows gets room for its 20 s process wait.
+#[cfg(all(not(test), target_os = "windows"))]
+pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24);
+#[cfg(all(not(test), not(target_os = "windows")))]
+pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(8);
+// A clean shutdown joins the shell, timer and storage-reader threads, which
+// took longer than 50 ms on loaded CI runners and failed tests that expect a
+// clean outcome. Tests that wait for the deadline to expire pay this once.
+#[cfg(test)]
+pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+#[cfg(feature = "agentic-browser")]
+enum AgentLifecycleOwner {
+    Absent,
+    Owned(AgentLifecycle),
+    Consumed,
+}
+
+#[cfg(feature = "agentic-browser")]
+impl AgentLifecycleOwner {
+    fn new(lifecycle: Option<AgentLifecycle>) -> Self {
+        lifecycle.map_or(Self::Absent, Self::Owned)
+    }
+}
+
+mod browser_pages;
+mod kept_sites;
+mod spaces;
+mod work_pane;
+
+/// Pages a run may queue for a seat in its page group at once.
+#[cfg(feature = "work-execution")]
+const MAX_QUEUED_PAGES: usize = 8;
+/// Passes one wake makes over the page lane while its turns keep moving.
+#[cfg(feature = "work-execution")]
+const MAX_PAGE_LANE_PASSES: usize = 4;
+
+#[cfg(feature = "work-execution")]
+fn trace_refusal(
+    cause: crate::work_resources::product::RetainedRefusal,
+    lane: crate::work_resources::product::RetainedLaneFacts,
+) {
+    crate::work_trace::record(format_args!(
+        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
+        lane.live, lane.settled, lane.lost, lane.queued, lane.unsettled, lane.group_failed, lane.group_sealed
+    ));
+}
+
+struct NativeOpener {
+    source: ItemId,
+    activate_when_presentable: bool,
+}
+
+pub struct Shell {
+    #[cfg(feature = "work-execution")]
+    work: Option<Box<crate::work::ApplicationWork>>,
+    #[cfg(feature = "work-execution")]
+    retained_work: Option<Box<crate::work_resources::product::ProductWork>>,
+    #[cfg(feature = "work-execution")]
+    retained_pages: Vec<crate::work_resources::product::ProductWork>,
+    /// Pages waiting for a seat in their run's page group, in arrival order.
+    #[cfg(feature = "work-execution")]
+    queued_pages: std::collections::VecDeque<crate::work_resources::product::ProductWork>,
+    #[cfg(feature = "work-execution")]
+    retained_page_runtime: Option<crate::work_resources::product::RetainedWorkGroup>,
+    /// Retained works the runtime gave up on before they could close; they
+    /// keep polling and shut down with the shell, out of the live slot.
+    #[cfg(feature = "work-execution")]
+    retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
+    profiles: Profiles,
+    spaces: Spaces,
+    items: Items,
+    recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
+    windows: Windows,
+    recent_tabs: recent_tabs::RecentTabs,
+    tab_previews: tab_previews::TabPreviews,
+    mini: mini::MiniState,
+    pending_size: Size,
+    favicons: FaviconState,
+    history: history::HistoryState,
+    bookmarks: bookmarks::BookmarkState,
+    extension_data: extension_data::ExtensionDataState,
+    history_lists: history_list::HistoryListState,
+    sources: page_source::SourceState,
+    search: SearchState,
+    tab_preferences: tabs::TabPreferences,
+    new_tab_destinations: std::collections::HashMap<ItemId, url::Url>,
+    proxy: network::ProxyPreference,
+    presentation: PresentationState,
+    zoom: ZoomState,
+    /// Tabs gone quiet whose speaker is still held.
+    audio_quiet: std::collections::HashSet<ItemId>,
+    /// What each watched tab's media is doing, for the sidebar's player.
+    media: zephium_core::media::MediaPlayers,
+    divider: Option<GrabbedDivider>,
+    private: Option<private::PrivateSession>,
+    private_projected: (bool, Option<u32>),
+    /// The Recently Closed entries the menus were last told of.
+    closed_projected: Vec<(ProfileId, zephium_core::ids::ClosedSessionId)>,
+    roster: profile_roster::RosterState,
+    space_memory: spaces::SpaceMemory,
+    /// Kinds of application link each profile's sites may open without
+    /// asking, as (site, scheme). Saved profiles read theirs from the store;
+    /// a private profile keeps them only until the session ends.
+    app_link_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<(zephium_core::permissions::PageOrigin, String)>,
+    >,
+    /// Sites each saved profile lets open new tabs without a click, as read
+    /// from the store; a profile is absent until its list has been read.
+    popup_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<zephium_core::permissions::PageOrigin>,
+    >,
+    /// Whether each site may save files, per profile: true to allow, false to
+    /// block. Saved profiles read theirs from the store; a private profile
+    /// keeps what the person answers only until the session ends.
+    download_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeMap<zephium_core::permissions::PageOrigin, bool>,
+    >,
+    /// Local https origins whose refused certificate the person continued
+    /// past, for this run only; their pages never look secure.
+    continued_certificates:
+        std::collections::HashSet<(ProfileId, zephium_core::http_auth::AuthOrigin)>,
+    https_first: https_first::HttpsFirst,
+    residency: ResidencyState,
+    last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
+    pending_visit_titles: std::collections::HashSet<ItemId>,
+    time: time::TimeState,
+    window_visible: bool,
+    window_focused: bool,
+    // Cells because every relayout, which takes `&self`, re-checks that the
+    // fullscreen page may still be fullscreen and drops it at once if not.
+    content_fullscreen: std::cell::Cell<Option<fullscreen::ContentFullscreen>>,
+    host_fullscreen: std::cell::Cell<bool>,
+    browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
+    browser_return_revision: u64,
+    browser_after_return: Option<Box<Command>>,
+    browser_return_ready: bool,
+    /// Set while the window lays out for a return that a queued command is about to change.
+    browser_return_hidden: bool,
+    /// One of the browser's own dialogs is open over the window.
+    chrome_modal: bool,
+    browser_return: Option<browser_pages::PendingBrowserReturn>,
+    work_pane: Option<work_pane::WorkPane>,
+    work_pane_generation: u32,
+    runtime_restart_required: bool,
+    /// Profiles whose browser engine only a restart can trust again.
+    restart_profiles: std::collections::HashSet<ProfileId>,
+    /// The saved session could not be restored this launch and was set aside.
+    session_set_aside: bool,
+    user_content_status: user_content_status::UserContentStatus,
+    crash: CrashState,
+    bootstrapped: bool,
+    pending_external: Vec<String>,
+    /// The page a find is running in, so its results and its end go there.
+    find_target: Option<ItemId>,
+    native_openers: std::collections::HashMap<ItemId, NativeOpener>,
+    #[cfg(debug_assertions)]
+    bootstrap_started: Option<std::time::Instant>,
+    persistence: PersistenceState,
+    shutdown_result: Option<ShutdownOutcome>,
+    self_queue: Option<CommandQueue>,
+    profile_deletion: ProfileDeletionCoordinator,
+    /// Exact startup cohort whose per-profile history/favicon database was
+    /// preserved but disabled by storage validation. Session/meta state and
+    /// native website data remain independently usable.
+    degraded_storage_profiles: std::collections::HashSet<ProfileId>,
+    blocker: blocker::BlockerCoordinator,
+    blocker_statistics: std::collections::HashMap<ProfileId, blocker_statistics::Statistics>,
+    #[cfg(feature = "agentic-browser")]
+    agent_lifecycle: AgentLifecycleOwner,
+    extension_browser_surfaces: ExtensionBrowserSurfaceState,
+    web_extensions: webext::WebExtensionState,
+    extension_actions: ExtensionActionState,
+    page_permissions: PagePermissionPromptState,
+    terminal_failure: Option<ShellTerminalFailureCallback>,
+    terminal_failure_handoff_panicked: bool,
+    engine: SharedEngine,
+    store: SharedStore,
+    store_reads: Option<StoreReadQueue>,
+    notes: Option<zephium_core::ports::notes::SharedNotes>,
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
+    chrome: SharedChrome,
+    emit: EmitFn,
+    #[cfg(test)]
+    auto_settle_content_rules: bool,
+}
+
+pub(super) struct ShellPorts {
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    #[cfg(feature = "agentic-browser")]
+    agent_lifecycle: Option<AgentLifecycle>,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+}
+
+impl ShellPorts {
+    pub(super) fn new(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        terminal_failure: ShellTerminalFailureCallback,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self {
+            profile_cleanup: None,
+            engine,
+            store,
+            blocker,
+            #[cfg(feature = "agentic-browser")]
+            agent_lifecycle: None,
+            terminal_failure,
+            chrome,
+            emit,
+        }
+    }
+
+    pub(super) fn with_profile_cleanup(
+        mut self,
+        cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
+    ) -> Self {
+        self.profile_cleanup = cleanup;
+        self
+    }
+
+    #[cfg(feature = "agentic-browser")]
+    pub(super) fn with_agent_lifecycle(mut self, lifecycle: Option<AgentLifecycle>) -> Self {
+        self.agent_lifecycle = lifecycle;
+        self
+    }
+}
+
+impl Shell {
+    #[cfg(test)]
+    pub fn new(
+        engine: SharedEngine,
+        store: SharedStore,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(
+            ShellPorts::new(
+                engine,
+                store,
+                Arc::new(tests::ImmediateAllowAllCompiler),
+                Box::new(|_| {}),
+                chrome,
+                emit,
+            ),
+            None,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_blocker(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(
+            ShellPorts::new(engine, store, blocker, Box::new(|_| {}), chrome, emit),
+            None,
+            false,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_failure(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        terminal_failure: ShellTerminalFailureCallback,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(
+            ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit),
+            None,
+            true,
+        )
+    }
+
+    #[cfg(all(test, feature = "agentic-browser"))]
+    pub(super) fn new_with_agent_lifecycle(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        agent_lifecycle: AgentLifecycle,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(
+            ShellPorts::new(engine, store, blocker, Box::new(|_| {}), chrome, emit)
+                .with_agent_lifecycle(Some(agent_lifecycle)),
+            None,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_store_reads(
+        ports: ShellPorts,
+        store_reads: impl Into<Option<StoreReadQueue>>,
+        #[cfg(test)] auto_settle_content_rules: bool,
+    ) -> Self {
+        let mut shell = Self::with_store_reads_deferred_blocker_catalog(
+            ports,
+            store_reads,
+            #[cfg(test)]
+            auto_settle_content_rules,
+        );
+        shell.initialize_blocker_catalog();
+        shell
+    }
+
+    /// Builds only actor-owned state and does not enter any external port.
+    /// The actor installs `ShellExitGuard` before completing catalog admission,
+    /// so a panic cannot strand the Store/native/blocker cleanup graph outside
+    /// an observable terminal path.
+    pub(super) fn with_store_reads_deferred_blocker_catalog(
+        ports: ShellPorts,
+        store_reads: impl Into<Option<StoreReadQueue>>,
+        #[cfg(test)] auto_settle_content_rules: bool,
+    ) -> Self {
+        let ShellPorts {
+            profile_cleanup,
+            engine,
+            store,
+            blocker,
+            #[cfg(feature = "agentic-browser")]
+            agent_lifecycle,
+            terminal_failure,
+            chrome,
+            emit,
+        } = ports;
+        Self {
+            profiles: Profiles::default(),
+            spaces: Spaces::default(),
+            items: Items::default(),
+            recently_closed: Vec::new(),
+            windows: Windows::default(),
+            mini: mini::MiniState::default(),
+            pending_size: Size::default(),
+            favicons: FaviconState::default(),
+            history: history::HistoryState::default(),
+            bookmarks: bookmarks::BookmarkState::default(),
+            extension_data: Default::default(),
+            history_lists: history_list::HistoryListState::default(),
+            sources: page_source::SourceState::default(),
+            time: time::TimeState::load(&store),
+            search: SearchState {
+                shortcuts: store
+                    .app_setting("search.shortcuts")
+                    .as_deref()
+                    .and_then(zephium_core::search::ShortcutRegistry::from_setting)
+                    .unwrap_or_default(),
+                custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
+                kagi_token: store.app_setting("search.kagi-token").unwrap_or_default(),
+                engine: store
+                    .app_setting("search.engine")
+                    .as_deref()
+                    .and_then(zephium_core::search::SearchEngine::from_id)
+                    .unwrap_or_default(),
+                include_history: store
+                    .app_setting("search.history")
+                    .is_none_or(|value| value != "false"),
+                ..SearchState::default()
+            },
+            tab_preferences: tabs::TabPreferences::load(&*store),
+            new_tab_destinations: Default::default(),
+            proxy: network::ProxyPreference::load(&*store),
+            presentation: PresentationState::default(),
+            zoom: ZoomState::load(&*store),
+            audio_quiet: std::collections::HashSet::new(),
+            media: zephium_core::media::MediaPlayers::default(),
+            divider: None,
+            private: None,
+            private_projected: (false, None),
+            closed_projected: Vec::new(),
+            roster: profile_roster::RosterState::default(),
+            space_memory: spaces::SpaceMemory::default(),
+            app_link_sites: std::collections::HashMap::new(),
+            popup_sites: std::collections::HashMap::new(),
+            download_sites: std::collections::HashMap::new(),
+            continued_certificates: std::collections::HashSet::new(),
+            https_first: https_first::HttpsFirst::default(),
+            residency: ResidencyState::load(&*store),
+            last_visits: std::collections::HashMap::new(),
+            pending_visit_titles: std::collections::HashSet::new(),
+            window_visible: true,
+            window_focused: false,
+            content_fullscreen: std::cell::Cell::new(None),
+            host_fullscreen: std::cell::Cell::new(false),
+            browser_page: None,
+            browser_page_projected: None,
+            browser_return_revision: 0,
+            browser_after_return: None,
+            browser_return_ready: false,
+            browser_return_hidden: false,
+            chrome_modal: false,
+            browser_return: None,
+            work_pane: None,
+            work_pane_generation: 0,
+            runtime_restart_required: false,
+            restart_profiles: std::collections::HashSet::new(),
+            session_set_aside: false,
+            user_content_status: user_content_status::UserContentStatus::default(),
+            crash: CrashState::default(),
+            bootstrapped: false,
+            pending_external: Vec::new(),
+            find_target: None,
+            native_openers: std::collections::HashMap::new(),
+            #[cfg(debug_assertions)]
+            bootstrap_started: None,
+            persistence: PersistenceState::default(),
+            shutdown_result: None,
+            recent_tabs: Default::default(),
+            tab_previews: Default::default(),
+            self_queue: None,
+            profile_deletion: ProfileDeletionCoordinator::default(),
+            degraded_storage_profiles: std::collections::HashSet::new(),
+            blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            blocker_statistics: std::collections::HashMap::new(),
+            #[cfg(feature = "agentic-browser")]
+            agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
+            #[cfg(feature = "work-execution")]
+            work: None,
+            #[cfg(feature = "work-execution")]
+            retained_work: None,
+            #[cfg(feature = "work-execution")]
+            retained_pages: Vec::new(),
+            #[cfg(feature = "work-execution")]
+            queued_pages: std::collections::VecDeque::new(),
+            #[cfg(feature = "work-execution")]
+            retained_page_runtime: None,
+            #[cfg(feature = "work-execution")]
+            retained_graveyard: Vec::new(),
+            extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
+            web_extensions: webext::WebExtensionState::default(),
+            extension_actions: ExtensionActionState::default(),
+            page_permissions: PagePermissionPromptState::default(),
+            terminal_failure: Some(terminal_failure),
+            terminal_failure_handoff_panicked: false,
+            engine,
+            store,
+            store_reads: store_reads.into(),
+            notes: None,
+            profile_cleanup,
+            chrome,
+            emit,
+            #[cfg(test)]
+            auto_settle_content_rules,
+        }
+    }
+
+    pub(super) fn initialize_blocker_catalog(&mut self) {
+        self.blocker.initialize_catalog();
+    }
+
+    pub(super) fn attach_queue(&mut self, queue: CommandQueue) {
+        let waker = queue.clone();
+        self.blocker
+            .service
+            .set_change_waker(std::sync::Arc::new(move || {
+                let _ = waker.try_push(Command::BlockerCatalogChanged);
+            }));
+        self.attach_queue_for_terminal_cleanup(queue);
+        self.schedule_blocker_catalog_activation_poll();
+    }
+
+    /// Installs only the actor's self-queue for a startup cancellation. No
+    /// timer or external coordinator work is admitted before the queued
+    /// terminal barrier is consumed.
+    pub(super) fn attach_queue_for_terminal_cleanup(&mut self, queue: CommandQueue) {
+        self.self_queue = Some(queue);
+    }
+
+    pub(super) fn is_shutdown(&self) -> bool {
+        self.shutdown_result.is_some()
+    }
+
+    pub(super) fn terminal_failure_handoff_panicked(&self) -> bool {
+        self.terminal_failure_handoff_panicked
+    }
+
+    pub fn handle(&mut self, cmd: Command) {
+        // No late engine/UI/timer work may mutate state after the final
+        // snapshot. Repeated shutdown requests receive the original result.
+        if let Some(outcome) = self.shutdown_result {
+            if let Command::Shutdown { ack, .. } = cmd {
+                let _ = ack.send(outcome);
+            }
+            return;
+        }
+        if browsing_activity(&cmd) {
+            self.note_browsing_activity();
+        }
+        match cmd {
+            Command::BeginTabSwitcher {
+                session,
+                reverse,
+                keyboard,
+            } => self.begin_tab_switcher(session, reverse, keyboard),
+            Command::TabSwitcher { session, action } => self.tab_switcher_action(session, action),
+            Command::RevealTabSwitcher { session } => self.reveal_tab_switcher(session),
+            Command::CaptureTabPreview => self.capture_tab_preview(),
+            Command::TabPreviewReady { request, bytes } => self.tab_preview_ready(request, bytes),
+            Command::ReadTabPreview {
+                window,
+                tab,
+                revision,
+                done,
+            } => {
+                let bytes = self.read_tab_preview(window, tab, revision);
+                let _ = done.send(bytes);
+            }
+            Command::WorkDocument(submission) => self.work_document(submission),
+            Command::WorkEnvironmentChanged(change) => {
+                if self.windows.focused().is_some_and(|window| {
+                    window.profile.to_string() == change.profile
+                        && !self.profile_deletion_quarantines(window.profile)
+                }) {
+                    (self.emit)(Projection::WorkEnvironmentChanged(change));
+                }
+            }
+            Command::WorkChanged(change) => {
+                if self.windows.focused().is_some_and(|window| {
+                    window.profile.to_string() == change.profile
+                        && !self.profile_deletion_quarantines(window.profile)
+                }) {
+                    (self.emit)(Projection::WorkChanged(change));
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::AttachRetainedWork(attachment) => {
+                if let Some(work) = crate::work_resources::product::ProductWork::take(&attachment) {
+                    self.retire_settled_pages();
+                    if self
+                        .retained_work
+                        .as_ref()
+                        .is_some_and(|work| work.is_stuck())
+                    {
+                        if let Some(mut stuck) = self.retained_work.take() {
+                            stuck.begin_shutdown();
+                            self.retained_graveyard.push(*stuck);
+                        }
+                    }
+                    self.attach_retained(work);
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::AttachWork(attachment) => {
+                if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
+                    if !work.belongs_to_store(&self.store)
+                        || self.retained_work.is_some()
+                        || self.retained_page_runtime.is_some()
+                        || !work.belongs_to_engine(&self.engine)
+                        || !work.accepts_predecessor(self.work.as_deref())
+                        || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+                    {
+                        work.refuse_attachment();
+                    } else {
+                        if let Some(previous) = &self.work {
+                            previous.retire_projection();
+                        }
+                        work.initialize();
+                        self.work = Some(Box::new(work));
+                    }
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::AdmitWork(submission) => {
+                let profile = self.work_profile_binding();
+                if let Some(work) = &mut self.work {
+                    work.admit(submission, Some(profile));
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkControl(control) => {
+                if let Some(work) = &mut self.work {
+                    work.control(*control);
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkWake => {}
+            Command::Operation {
+                operation_id,
+                command,
+            } => {
+                // Public construction rejects nested operations and shutdown
+                // barriers. Keep the actor defensive if a future in-process
+                // caller bypasses that constructor.
+                if matches!(
+                    command.as_ref(),
+                    Command::Operation { .. } | Command::Shutdown { .. }
+                ) {
+                    return;
+                }
+                let command = *command;
+                if let Command::RespondToPagePermissionPrompt {
+                    profile,
+                    item,
+                    request,
+                    decision,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_page_permission_response(
+                        operation_id.clone(),
+                        *profile,
+                        *item,
+                        *request,
+                        *decision,
+                    ) {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::DeleteProfile(profile) = &command {
+                    let profile = *profile;
+                    let mut completion =
+                        self.begin_profile_deletion(profile, Some(operation_id.clone()));
+                    completion.operation_id = operation_id;
+                    let deferred = completion.outcome == OperationOutcome::Deferred;
+                    if deferred {
+                        // Admission already told the caller this operation is
+                        // owned by the FIFO. Retain its id and emit no
+                        // misleading terminal disposition while either durable phase
+                        // is pending or retrying.
+                        self.drive_profile_deletion(profile);
+                    } else {
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::SetFocusedContentBlockerEnabled(enabled) = &command {
+                    if let Some(mut completion) =
+                        self.begin_focused_blocker_mutation(operation_id.clone(), *enabled)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::SetSitePermission {
+                    origin,
+                    kind,
+                    decision,
+                    scheme,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_site_permission_change(
+                        operation_id.clone(),
+                        origin.clone(),
+                        *kind,
+                        *decision,
+                        scheme.clone(),
+                    ) {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::ChangeBlockerSite { context, action } = &command {
+                    if let Some(mut completion) =
+                        self.begin_blocker_site_mutation(operation_id.clone(), context, action)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if matches!(&command, Command::RefreshContentBlockerSources) {
+                    if let Some(mut completion) =
+                        self.begin_blocker_catalog_refresh(operation_id.clone())
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                let mut completion = self.handle_operation(command);
+                completion.operation_id = operation_id;
+                (self.emit)(Projection::OperationProcessed(completion));
+            }
+            Command::Bootstrap => self.bootstrap(),
+            Command::SetWebExtensions {
+                profile,
+                extensions,
+                failures,
+                retry,
+            } => self.set_prepared_web_extensions(profile, extensions, failures, retry),
+            Command::OpenWebExtensionOptions {
+                profile,
+                extension_id,
+            } => {
+                #[cfg(target_os = "windows")]
+                self.open_web_extension_options(profile, extension_id);
+                #[cfg(not(target_os = "windows"))]
+                let _ = self
+                    .engine
+                    .open_web_extension_options(profile, extension_id);
+            }
+            Command::AnswerWebExtensionAccess {
+                profile,
+                request,
+                allowed,
+            } => {
+                let _ = self
+                    .engine
+                    .answer_web_extension_access(profile, request, allowed);
+            }
+            Command::RemoveWebExtension { profile, extension } => {
+                self.remove_web_extension(profile, *extension)
+            }
+            Command::ResolveWebExtensionTarget { tab, reply } => {
+                let _ = reply.try_send(self.web_extension_target(tab));
+            }
+            Command::WebExtensionStatus { profile, reply } => {
+                let _ = reply.try_send(self.web_extension_status(profile));
+            }
+            Command::Open => {
+                let _ = self.operation_open();
+            }
+            Command::Activate(id) => {
+                let _ = self.operation_activate(id);
+            }
+            Command::SetTabEssential {
+                id,
+                essential,
+                before,
+            } => {
+                let _ = self.operation_set_tab_essential(id, essential, before);
+            }
+            Command::KeepSite(id) => {
+                let _ = self.operation_keep_site(&id);
+            }
+            Command::ReleaseSite(id) => {
+                let _ = self.operation_release_site(&id);
+            }
+            Command::RenameFocusedProfile(name) => {
+                let _ = self.operation_rename_focused_profile(&name);
+            }
+            Command::CreateProfile {
+                name,
+                avatar,
+                photo,
+                switch,
+            } => {
+                let _ = self.operation_create_profile(&name, avatar, photo, switch);
+            }
+            Command::SwitchProfile(profile) => {
+                let _ = self.operation_switch_profile(profile);
+            }
+            Command::RenameProfile { profile, name } => {
+                let _ = self.operation_rename_profile(profile, &name);
+            }
+            Command::SetProfileAvatar {
+                profile,
+                avatar,
+                photo,
+            } => {
+                let _ = self.operation_set_profile_avatar(profile, avatar, photo);
+            }
+            Command::ProfileAvatarPhoto { profile, reply } => {
+                self.profile_avatar_photo(profile, reply);
+            }
+            Command::Profiles { reply } => {
+                let _ = reply.try_send(self.profiles_view());
+            }
+            Command::Close(id) => {
+                let _ = self.operation_close(id);
+            }
+            Command::Navigate { id, input } => {
+                let _ = self.operation_navigate(id, input);
+            }
+            Command::Reload(id) => {
+                let _ = self.operation_reload(id);
+            }
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => {
+                let _ = self.operation_answer_page_request(id, request, decision);
+            }
+            Command::AnswerHttpAuth {
+                id,
+                request,
+                credentials,
+            } => {
+                let _ = self.operation_answer_http_auth(id, request, credentials);
+            }
+            Command::ContinuePastCertificate(id) => {
+                let _ = self.operation_continue_past_certificate(id);
+            }
+            Command::ContinuePastBlock { id, url } => {
+                let _ = self.operation_continue_past_block(id, &url);
+            }
+            Command::LeaveBlockedPage(id) => {
+                let _ = self.operation_leave_blocked_page(id);
+            }
+            Command::GoBack(id) => {
+                let _ = self.operation_history(id, false);
+            }
+            Command::GoForward(id) => {
+                let _ = self.operation_history(id, true);
+            }
+            Command::GoToHistoryEntry { id, offset, url } => {
+                let _ = self.operation_go_to_history_entry(id, offset, url);
+            }
+            Command::HistoryList { id, done } => self.history_list(id, done),
+            Command::PageSource { id, done } => self.page_source(id, done),
+            Command::SplitWith { other, axis } => {
+                let _ = self.operation_split(other, axis);
+            }
+            Command::Unsplit => {
+                let _ = self.operation_unsplit();
+            }
+            Command::LeaveSplit(id) => {
+                let _ = self.operation_leave_split(id);
+            }
+            Command::TabAction { id, action } => {
+                let _ = self.operation_tab_action(id, action);
+            }
+            Command::Space(command) => {
+                let _ = self.operation_space(*command);
+            }
+            Command::SetWindowSize(size) => match self.windows.focused_mut() {
+                Some(win) => {
+                    win.size = size;
+                    self.refresh_sidebar_peek();
+                    // macOS resizes natively via autoresizing masks; Windows
+                    // and Linux have no equivalent, the shell must relayout.
+                    let _ = self.relayout();
+                }
+                None => self.pending_size = size,
+            },
+            Command::SetWindowFocused(focused) => {
+                self.window_focused = focused;
+                if !focused {
+                    self.cancel_page_permission_if_not_foreground();
+                }
+            }
+            Command::StopMediaCapture { item, navigation } => {
+                let _ = self.operation_stop_media_capture(item, navigation);
+            }
+            Command::SetTabMuted { id, muted } => {
+                let _ = self.operation_set_tab_muted(id, muted);
+            }
+            Command::MediaPlayer { id, action } => {
+                let _ = self.operation_media_player(id, action);
+            }
+            Command::SetWindowVisible(visible) => {
+                if self.window_visible != visible {
+                    self.window_visible = visible;
+                    // Do not immediately suspend a page that was actively in
+                    // use when the window minimized. The ordinary idle grace
+                    // still applies after every content view becomes hidden.
+                    if !visible {
+                        if self.windows.focused().is_some_and(|win| win.sidebar_peek) {
+                            self.peek_sidebar(false, false);
+                        }
+                        // OS pointer capture cannot remain authoritative while
+                        // its window is hidden/minimized.
+                        self.drop_divider();
+                        if let Some(active) = self.windows.focused().and_then(|w| w.active) {
+                            self.touch(active);
+                        }
+                        self.cancel_page_permission_if_not_foreground();
+                    }
+                    let _ = self.relayout();
+                    self.maintain_views();
+                }
+            }
+            Command::BrowserChromeRestored { revision, applied } => {
+                self.browser_chrome_restored(revision, applied)
+            }
+            Command::ShowBrowserPage(page) => {
+                let _ = self.operation_show_browser_page(page);
+            }
+            Command::SetSidebarWidth(width, animate) => {
+                if let Some(win) = self.windows.focused_mut() {
+                    win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
+                }
+                self.refresh_sidebar_peek();
+                if animate {
+                    if let Some(win) = self.windows.focused() {
+                        let _ = self.engine.hint_stage_motion(win.id, StageMotion::Slide);
+                    }
+                }
+                let _ = self.relayout_with(animate);
+            }
+            Command::SetSidebarHidden(hidden) => {
+                let Some(win) = self.windows.focused_mut() else {
+                    return;
+                };
+                if win.metrics.sidebar_hidden == hidden {
+                    return;
+                }
+                win.metrics.sidebar_hidden = hidden;
+                let id = win.id;
+                // A visibility change ends the peek even if the old chrome
+                // document never delivers its delayed lowering.
+                self.peek_sidebar(false, false);
+                let _ = self.engine.hint_stage_motion(id, StageMotion::Slide);
+                let _ = self.relayout_with(true);
+            }
+            Command::PeekSidebar { peek, slide } => {
+                self.peek_sidebar(peek, slide);
+            }
+            Command::SetPagePermissionCardHost(available) => {
+                self.set_page_permission_card_host(available)
+            }
+            Command::SetChromeModal(open) => {
+                if self.chrome_modal != open {
+                    self.chrome_modal = open;
+                    let _ = self.relayout();
+                }
+            }
+            Command::SidebarResizeGuide(width) => {
+                if let Some(win) = self.windows.focused() {
+                    let zone = width.filter(|width| width.is_finite()).map(|width| {
+                        // A hidden sidebar is resized from the card's edge.
+                        if win.metrics.sidebar_hidden {
+                            let mut metrics = win.metrics;
+                            metrics.sidebar_width =
+                                zephium_core::layout::clamp_sidebar_width(width);
+                            let card = layout::hidden_card(win.size, metrics);
+                            return Rect::new(
+                                (card.x + card.width - 2.0).max(card.x),
+                                card.y,
+                                2.0,
+                                card.height,
+                            );
+                        }
+                        let padding = win.metrics.padding;
+                        let x = (padding + zephium_core::layout::clamp_sidebar_width(width) - 2.0)
+                            .min((win.size.width - padding - 2.0).max(padding));
+                        Rect::new(x, padding, 2.0, (win.size.height - 2.0 * padding).max(0.0))
+                    });
+                    let _ = self.engine.set_resize_guide(win.id, zone);
+                }
+            }
+            Command::DownloadCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::downloads::{DownloadError, DownloadResponse};
+                let authorized = self
+                    .windows
+                    .focused()
+                    .is_some_and(|window| window.profile == expected_profile)
+                    && !self.profile_deletion_quarantines(expected_profile)
+                    && call.validate();
+                if !authorized {
+                    done.finish(DownloadResponse::Error {
+                        error: DownloadError::Invalid,
+                    });
+                } else {
+                    let partition = match self
+                        .profiles
+                        .get(expected_profile)
+                        .map(|profile| profile.kind)
+                    {
+                        Some(zephium_core::profiles::ProfileKind::Incognito) => {
+                            zephium_core::ports::engine::Partition::Ephemeral(expected_profile)
+                        }
+                        Some(_) => {
+                            zephium_core::ports::engine::Partition::Persistent(expected_profile)
+                        }
+                        None => {
+                            done.finish(DownloadResponse::Error {
+                                error: DownloadError::Invalid,
+                            });
+                            return;
+                        }
+                    };
+                    self.engine.download_call(partition, *call, done);
+                }
+            }
+            Command::HistoryCall {
+                expected_profile,
+                call,
+                done,
+            } => self.history_call(expected_profile, *call, done),
+            Command::BrowsingDataCall {
+                expected_profile,
+                call,
+                done,
+            } => self.browsing_data_call(expected_profile, *call, done),
+            Command::BookmarkCall {
+                expected_profile,
+                call,
+                done,
+            } => self.bookmark_call(expected_profile, *call, done),
+            Command::ImportDestination { done } => done.finish(self.import_destination()),
+            Command::Import {
+                destination,
+                work,
+                done,
+            } => self.import_into_profile(destination, *work, done),
+            Command::Export { kind, done } => self.export_from_focused(kind, done),
+            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment),
+            Command::AttachAppProxy(attachment) => self.proxy.attach(attachment.0),
+            Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
+            Command::FaviconProbed {
+                profile,
+                origin,
+                rgba,
+            } => self.favicon_probed(profile, origin, rgba),
+            Command::FaviconFetched {
+                ticket,
+                rgba,
+                source,
+                failed,
+            } => self.favicon_fetched(ticket, rgba, source, failed),
+            Command::AttachNotes(attachment) => {
+                self.notes.get_or_insert(attachment.0);
+            }
+            Command::NoteCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::notes::{NoteError, NoteReply, NoteResponse};
+                // Private profiles keep nothing on disk, notes included.
+                let profile = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| {
+                        self.profiles.get(*profile).is_some_and(|p| {
+                            p.kind != zephium_core::profiles::ProfileKind::Incognito
+                        })
+                    });
+                match (profile, &self.notes) {
+                    (Some(profile), Some(notes)) => notes.call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(NoteReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    ),
+                    _ => done.finish(NoteReply {
+                        profile: None,
+                        response: NoteResponse::Error {
+                            error: NoteError::Unavailable,
+                        },
+                    }),
+                }
+            }
+            Command::WorkPaneSetRect { rect, generation } => {
+                self.work_pane_set_rect(rect, generation);
+            }
+            Command::WorkPaneShow { target, rect } => {
+                let _ = self.operation_work_pane_show(target, rect);
+            }
+            Command::WorkPaneHide => {
+                let _ = self.operation_work_pane_hide();
+            }
+            Command::ResourceCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| !self.incognito_profile(*profile))
+                {
+                    self.store.resource_call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
+            Command::ImportMedia {
+                expected_profile,
+                import,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| !self.incognito_profile(*profile))
+                {
+                    self.store.import_media(
+                        profile,
+                        *import,
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
+            Command::DragOver { point } => {
+                if let Some(win) = self.windows.focused().map(|w| w.id) {
+                    let preview = point
+                        .and_then(|(x, y)| self.resolve_drop(x, y))
+                        .map(|drop| zephium_core::ports::engine::DropPreview {
+                            tab: drop.tab,
+                            zone: drop.zone,
+                            shift: drop.shift,
+                        });
+                    let _ = self.engine.set_drop_indicator(win, preview);
+                }
+            }
+            Command::DropTab { id, x, y } => {
+                let _ = self.operation_drop_tab(id, x, y);
+            }
+            Command::DividerGrab { x, y } => {
+                self.drop_divider();
+                self.divider = self.locate_divider(x, y);
+            }
+            Command::DividerDrag { x, y } => self.divider_drag(x, y),
+            Command::DividerRelease { x, y } => {
+                let _ = self.operation_divider_release(x.zip(y));
+            }
+            Command::Run(id) => {
+                let _ = self.operation_run_command(&id);
+            }
+            // This privileged mutation must carry a desktop operation id.
+            Command::InvokeExtensionAction { .. } => {}
+            Command::RespondToPagePermissionPrompt { .. } => {}
+            Command::SetSitePermission { .. } => {}
+            Command::SitePermissions { origin, reply } => {
+                self.query_site_permissions(origin, reply)
+            }
+            Command::SitePermissionCatalogLoaded {
+                operation_id,
+                profile,
+                origin,
+                kind,
+                decision,
+                outcome,
+            } => self.site_permission_catalog_loaded(
+                operation_id,
+                profile,
+                origin,
+                kind,
+                decision,
+                *outcome,
+            ),
+            Command::SitePermissionSettled {
+                operation_id,
+                applied,
+            } => self.site_permission_settled(operation_id, applied),
+            Command::PagePermissionCatalogLoaded {
+                profile,
+                item,
+                request,
+                outcome,
+            } => self.settle_page_permission_catalog_load(profile, item, request, *outcome),
+            Command::PagePermissionCatalogMutated {
+                profile,
+                item,
+                request,
+                outcome,
+            } => self.settle_page_permission_catalog_mutation(profile, item, request, *outcome),
+            Command::PagePermissionTimeout {
+                profile,
+                item,
+                request,
+            } => self.on_page_permission_timeout(profile, item, request),
+            Command::Search(query) => {
+                self.search.context = None;
+                self.search.mini = false;
+                self.search(&query);
+            }
+            Command::SearchSupplementaryFinished { context, query } => {
+                self.search_supplementary_finished(*context, query)
+            }
+            Command::SearchAdditional {
+                context,
+                query,
+                results,
+            } => self.search_additional(*context, query, results),
+            Command::SearchScoped {
+                query,
+                context,
+                mini,
+            } => self.search_scoped(&query, *context, mini),
+            Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
+            Command::PanelLoaded => {
+                self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
+                self.project_tab_switcher();
+            }
+            Command::RunSearchAction {
+                context,
+                action,
+                background,
+                replace,
+                new_mini,
+            } => {
+                let _ = self
+                    .operation_run_search_action(*context, action, background, replace, new_mini);
+            }
+            Command::OpenUrl { input, new_tab } => {
+                let _ = self.operation_open_url(input, new_tab);
+            }
+            Command::OpenExternal(urls) => self.open_external(urls),
+            Command::MiniAttached { window, size } => self.mini_attached(window, size),
+            Command::MiniResized { window, size } => self.mini_resized(window, size),
+            Command::Mini { window, action } => {
+                let _ = self.mini_action(window, action);
+            }
+            Command::Find(request) => self.find_in_page(request),
+            Command::ShowStoreButton { tab, button } => self.show_store_button(tab, button),
+            Command::SetAppSetting { key, value } => {
+                let _ = self.operation_set_app_setting(key, value);
+            }
+            #[cfg(feature = "work-planning")]
+            Command::SetWorkScreenshots(change) => {
+                let _ = self.operation_set_work_screenshots(change);
+            }
+            // These mutations are accepted only through `Command::Operation`
+            // so every foreground request has one truthful terminal identity.
+            Command::DeleteProfile(_)
+            | Command::RetryContentPolicy { .. }
+            | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
+            | Command::RetryFocusedContentPolicy { .. }
+            | Command::RefreshContentBlockerSources => {}
+            Command::ContentPolicyStatus { profile, reply } => {
+                let outcome = self
+                    .blocker
+                    .status(profile)
+                    .map(ContentPolicyStatusQueryOutcome::Found)
+                    .unwrap_or(ContentPolicyStatusQueryOutcome::UnknownProfile);
+                let _ = reply.send(outcome);
+            }
+            Command::ElementPicker {
+                context,
+                action,
+                reply,
+            } => self.element_picker(&context, action, reply),
+            Command::BlockerStatistics { profile, reply } => {
+                self.query_blocker_statistics(profile, reply)
+            }
+            Command::FocusedContentPolicyStatus { reply } => {
+                self.maintain_blocker_catalog();
+                let _ = reply.send(self.focused_blocker_status_view());
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkProfileBinding { reply } => {
+                let _ = reply.send(self.work_profile_binding());
+            }
+            Command::TabMetadata {
+                profile,
+                ids,
+                reply,
+            } => {
+                let _ = reply.send(self.tab_metadata(profile, &ids));
+            }
+            Command::WindowTabs { profile, reply } => {
+                let _ = reply.send(self.window_tabs(profile));
+            }
+            Command::OpenBackgroundTab {
+                profile,
+                space,
+                after,
+                url,
+                focus,
+                done,
+            } => done.finish(self.open_page_tab(profile, space, after, &url, focus)),
+            Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
+            Command::PresentationFallback {
+                id,
+                navigation,
+                hard_deadline,
+            } => self.on_presentation_fallback(id, navigation, hard_deadline),
+            Command::ChromePresentationApplied {
+                id,
+                navigation,
+                url,
+                active,
+                projection_revision,
+                applied,
+            } => self.on_chrome_presentation_applied(
+                id,
+                navigation,
+                url,
+                active,
+                projection_revision,
+                applied,
+            ),
+            Command::DiscardProbeTimeout { id, probe } => self.on_discard_probe_timeout(id, probe),
+            Command::ViewCapacityRetry(id) => self.on_view_capacity_retry(id),
+            Command::ProfileDeletionReady(profile) => {
+                self.consume_profile_deletion_outcome(profile)
+            }
+            Command::BlockerReady(profile) => self.consume_blocker_compile_result(profile),
+            Command::BlockerStoreReady(profile) => {
+                self.consume_blocker_store_result(profile);
+                self.consume_blocker_site_result(profile);
+            }
+            Command::BlockerStartupDeadline { profile, token } => {
+                self.on_blocker_startup_deadline(profile, token)
+            }
+            Command::BlockerPreferenceRetry { profile, token } => {
+                self.on_blocker_preference_reconciliation_retry(profile, token)
+            }
+            Command::BlockerCatalogPoll { operation, attempt } => {
+                self.on_blocker_catalog_poll(operation, attempt)
+            }
+            Command::BlockerCatalogChanged => self.maintain_blocker_catalog(),
+            Command::ProfileDeletionRetry {
+                profile,
+                generation,
+            } => {
+                if self
+                    .profile_deletion
+                    .states
+                    .get(&profile)
+                    .is_some_and(|state| state.retry_generation == generation)
+                {
+                    self.drive_profile_deletion(profile);
+                }
+            }
+            Command::StoreRead(result) => self.on_store_read(result),
+            Command::Persist => self.persist(),
+            Command::Tick => {
+                if !self.bootstrapped {
+                    self.bootstrap();
+                    if !self.bootstrapped {
+                        return;
+                    }
+                }
+                self.maintain_blocker_statistics();
+                self.flush_visit_titles();
+                self.flush_time(None);
+                self.maintain_blocker_catalog();
+                self.drain_blocker_inbox();
+                self.drive_blocker_preference_reconciliations();
+                self.drain_profile_deletion_inbox();
+                self.reconcile_runtime_restart_requirement();
+                let extension_surfaces = self.retry_extension_browser_surfaces();
+                if extension_surfaces.native.rejected {
+                    crate::diagnostic!(
+                        "extensions: maintenance could not reconcile browser metadata"
+                    );
+                }
+                let extension_actions = self.retry_extension_actions();
+                if extension_actions.rejected {
+                    crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
+                }
+                self.archive_idle_tabs();
+                self.release_idle_spare();
+                if self.maintain_views() {
+                    self.project_items();
+                }
+            }
+            Command::Engine(event) => self.on_engine_event(event),
+            Command::Shutdown { deadline, ack } => self.shutdown_until(deadline, ack),
+            Command::TimeCall {
+                expected_profile,
+                call,
+                done,
+            } => self.time_call(expected_profile, *call, done),
+            Command::ZoomCall {
+                expected_profile,
+                call,
+                done,
+            } => self.zoom_call(expected_profile, *call, done),
+            Command::TimeReportRead {
+                profile,
+                report,
+                done,
+            } => self.on_time_report(profile, report, done),
+            Command::SetAppActive(active) => self.set_app_active(active),
+            Command::SetSystemAwake(awake) => self.set_system_awake(awake),
+            Command::SetMemoryPressure(pressure) => self.on_memory_pressure(pressure),
+            Command::FocusWake => self.focus_wake(),
+            Command::AudioWake => self.audio_wake(),
+            Command::VisitTitlesWake => self.flush_visit_titles(),
+            // Accepted only through `Command::Operation`.
+            Command::Focus(_) => {}
+        }
+        if self.shutdown_result.is_none() {
+            self.refresh_time();
+            self.refresh_focus_cover();
+        }
+        #[cfg(feature = "work-execution")]
+        self.poll_work();
+    }
+
+    /// Admits a retained work now, or, for a page that waits only for a
+    /// seat in the run's page group, keeps it queued in order until one frees.
+    /// A settled page whose native audit ended holds no browser any more: it
+    /// keeps its recorded debt, but neither a seat nor its run's group, so a
+    /// lost page never holds the pages after it, in its run or another.
+    #[cfg(feature = "work-execution")]
+    fn attach_retained(&mut self, mut work: crate::work_resources::product::ProductWork) {
+        use crate::work_resources::product::RetainedRefusal as Refusal;
+        let lane = self.page_lane();
+        let refusal = if self.work.is_some()
+            || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+        {
+            Some(Refusal::Busy)
+        } else if work.given_up() {
+            Some(Refusal::GivenUp)
+        } else if !work.admits(&self.engine, &self.store, self.work_profile_binding()) {
+            Some(Refusal::Stale)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            trace_refusal(refusal, lane);
+            work.refuse(refusal, lane);
+            return;
+        }
+        if !work.is_page() {
+            if self
+                .retained_work
+                .as_ref()
+                .is_some_and(|work| !work.is_closed())
+                || self.retained_page_runtime.is_some()
+            {
+                trace_refusal(Refusal::Busy, lane);
+                work.refuse(Refusal::Busy, lane);
+            } else {
+                // Install original ownership before native construction.
+                self.retained_work = Some(Box::new(work));
+                self.retained_work.as_mut().unwrap().initialize();
+            }
+            return;
+        }
+        let seated = self
+            .retained_work
+            .as_ref()
+            .is_none_or(|work| work.is_closed())
+            && work.admits_peers(
+                &self.retained_pages,
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.holds_seat()),
+            )
+            && !self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed() || group.is_sealed());
+        // A page without a seat waits for one, in order, within its own
+        // bounded wait: a full or sealed group of its run, or another run's
+        // pages still closing, give way once their members have closed.
+        // A member whose record cannot be saved never closes, so nothing
+        // waiting behind it would sit down: it is refused at once instead.
+        if !seated {
+            if lane.unsettled > 0 {
+                trace_refusal(Refusal::Unsettled, lane);
+                work.refuse(Refusal::Unsettled, lane);
+            } else if self.queued_pages.len() < MAX_QUEUED_PAGES {
+                if work.begin_wait() {
+                    crate::work_trace::record(format_args!(
+                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
+                        lane.live,
+                        lane.settled,
+                        lane.lost,
+                        lane.queued,
+                        lane.unsettled,
+                        lane.group_failed,
+                        lane.group_sealed
+                    ));
+                }
+                self.queued_pages.push_back(work);
+            } else {
+                trace_refusal(Refusal::QueueFull, lane);
+                work.refuse(Refusal::QueueFull, lane);
+            }
+            return;
+        }
+        if self.retained_page_runtime.is_none() {
+            self.retained_page_runtime = work.new_runtime_group().ok();
+        }
+        if let Some(waited) = work.waited() {
+            crate::work_trace::record(format_args!(
+                "work: phase=page_lane event=seated waited_ms={}",
+                waited.as_millis()
+            ));
+        }
+        if let Some(group) = &self.retained_page_runtime {
+            work.set_runtime_group(group.clone());
+            self.retained_pages.push(work);
+            self.retained_pages.last_mut().unwrap().initialize();
+        } else {
+            trace_refusal(Refusal::GroupStart, lane);
+            work.refuse(Refusal::GroupStart, lane);
+        }
+    }
+
+    /// The page lane as it stands, in closed counts.
+    #[cfg(feature = "work-execution")]
+    fn page_lane(&self) -> crate::work_resources::product::RetainedLaneFacts {
+        let count = |n: usize| u8::try_from(n).unwrap_or(u8::MAX);
+        crate::work_resources::product::RetainedLaneFacts {
+            live: count(self.retained_pages.len()),
+            settled: count(
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.holds_seat())
+                    .count(),
+            ),
+            lost: count(
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.beyond_closing())
+                    .count(),
+            ),
+            queued: count(self.queued_pages.len()),
+            unsettled: count(self.unsettled_pages()),
+            group_failed: self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed()),
+            group_sealed: self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_sealed()),
+        }
+    }
+
+    /// Live and graveyarded pages whose record cannot be saved.
+    #[cfg(feature = "work-execution")]
+    fn unsettled_pages(&self) -> usize {
+        self.retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .filter(|work| work.durably_unsettled())
+            .count()
+    }
+
+    /// Queued pages take seats in order as they free; a page that can sit
+    /// now does not wait behind one that cannot (another run's page waiting
+    /// for this run's group to close). One whose run ended or ran out of
+    /// time while it waited is refused.
+    #[cfg(feature = "work-execution")]
+    fn admit_queued_pages(&mut self) {
+        for work in std::mem::take(&mut self.queued_pages) {
+            self.attach_retained(work);
+        }
+    }
+
+    /// A settled page that cannot close with its group moves to the graveyard
+    /// and stops holding admission; the group no longer waits on it.
+    #[cfg(feature = "work-execution")]
+    fn retire_settled_pages(&mut self) {
+        self.retained_pages.retain(|page| !page.is_closed());
+        let mut index = 0;
+        while index < self.retained_pages.len() {
+            if self.retained_pages[index].leaves_group() {
+                let mut page = self.retained_pages.remove(index);
+                crate::work_trace::record(format_args!(
+                    "work: phase=page_lane event=left_group lost={} live={}",
+                    page.beyond_closing(),
+                    self.retained_pages.len()
+                ));
+                page.leave_group();
+                page.begin_shutdown();
+                self.retained_graveyard.push(page);
+            } else {
+                index += 1;
+            }
+        }
+        // The group, and the native group it stands for, ends with its last
+        // member, live or graveyarded, not with its last live page: a
+        // graveyarded page still owns a native seat and an audit, and a fresh
+        // group cannot start natively until every member has closed.
+        // A graveyarded member whose own native audit has ended holds no
+        // seat any more: nothing further can close it, and the next group's
+        // native admission still requires every member's proof.
+        if self.retained_pages.is_empty()
+            && !self.retained_graveyard.iter().any(|work| work.holds_seat())
+            && self.retained_page_runtime.take().is_some()
+        {
+            crate::work_trace::record(format_args!(
+                "work: phase=page_lane event=group_closed lost={}",
+                self.retained_graveyard.len()
+            ));
+        }
+    }
+
+    /// One native audit at a time across live and graveyarded pages. The
+    /// audit counts the whole native browser, so it starts only once no
+    /// member holds a resource. Live pages take the turn first; the first turn
+    /// seals the group against new pages.
+    #[cfg(feature = "work-execution")]
+    fn grant_native_audit(&mut self) {
+        self.retire_settled_pages();
+        if self
+            .retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .any(|work| work.holds_native_audit())
+            || !self
+                .retained_pages
+                .iter()
+                .chain(
+                    self.retained_graveyard
+                        .iter()
+                        .filter(|work| work.native_member()),
+                )
+                .all(|page| page.ready_for_group_shutdown())
+        {
+            return;
+        }
+        let granted = if let Some(page) = self
+            .retained_pages
+            .iter_mut()
+            .find(|page| !page.is_closed())
+        {
+            page.allow_group_shutdown();
+            true
+        } else if let Some(work) = self
+            .retained_graveyard
+            .iter_mut()
+            .find(|work| work.awaits_group_audit())
+        {
+            work.allow_group_shutdown();
+            true
+        } else {
+            false
+        };
+        if granted {
+            if let Some(group) = &self.retained_page_runtime {
+                group.seal();
+            }
+        }
+    }
+
+    /// What one pass over the page lane can change that lets another pass
+    /// hand on the audit turn or seat a queued page.
+    #[cfg(feature = "work-execution")]
+    fn page_lane_turn(&self) -> (usize, usize, usize, usize, usize, bool) {
+        (
+            self.retained_pages.len(),
+            self.retained_graveyard.len(),
+            self.queued_pages.len(),
+            self.retained_pages
+                .iter()
+                .chain(&self.retained_graveyard)
+                .filter(|work| work.holds_native_audit() || work.holds_seat())
+                .count(),
+            self.unsettled_pages(),
+            self.retained_page_runtime.is_some(),
+        )
+    }
+
+    #[cfg(feature = "work-execution")]
+    fn poll_work(&mut self) {
+        // A member whose audit ends during a pass hands the turn on, and a
+        // group that closes seats the pages queued behind it, in this same
+        // wake: no later wake is owed to the lane, so none may be waited for.
+        for _ in 0..MAX_PAGE_LANE_PASSES {
+            let turn = self.page_lane_turn();
+            self.grant_native_audit();
+            self.admit_queued_pages();
+            for page in &mut self.retained_pages {
+                page.poll();
+            }
+            self.retire_settled_pages();
+            self.retained_graveyard.retain(|work| !work.is_closed());
+            for work in &mut self.retained_graveyard {
+                work.poll();
+            }
+            if self.page_lane_turn() == turn {
+                break;
+            }
+        }
+        if let Some(work) = &mut self.retained_work {
+            work.poll();
+        }
+        if let Some(work) = &mut self.work {
+            work.poll();
+        }
+        // The timer holds one deadline: the earliest any owner still needs.
+        if let Some(queue) = &self.self_queue {
+            queue.schedule_work(self.next_work_deadline());
+        }
+    }
+
+    #[cfg(feature = "work-execution")]
+    fn next_work_deadline(&self) -> Option<std::time::Instant> {
+        self.retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .chain(self.retained_work.as_deref())
+            .filter_map(crate::work_resources::product::ProductWork::next_deadline)
+            .chain(self.work.as_ref().and_then(|work| work.next_deadline()))
+            .min()
+    }
+
+    fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        for window in self.windows.iter_mut() {
+            window.sidebar_peek = false;
+        }
+        // Reserve the last quarter of the remaining budget for native teardown.
+        let now = std::time::Instant::now();
+        let storage_deadline = deadline - deadline.saturating_duration_since(now) / 4;
+        let mut terminal_clean = now < deadline;
+        self.flush_visit_titles();
+        #[cfg(feature = "work-runtime")]
+        crate::work_commands::shutdown();
+        #[cfg(feature = "work-execution")]
+        let lane = self.page_lane();
+        #[cfg(feature = "work-execution")]
+        for mut page in std::mem::take(&mut self.queued_pages) {
+            page.refuse(
+                crate::work_resources::product::RetainedRefusal::Discarded,
+                lane,
+            );
+        }
+        #[cfg(feature = "work-execution")]
+        for page in &mut self.retained_pages {
+            page.begin_shutdown();
+        }
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.retained_work {
+            work.begin_shutdown();
+        }
+        #[cfg(feature = "work-execution")]
+        for work in &mut self.retained_graveyard {
+            work.begin_shutdown();
+        }
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.work {
+            work.begin_shutdown();
+        }
+        self.cancel_pending_page_permission_for_shutdown();
+
+        if let Some(reads) = &self.store_reads {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reads.quiesce_until(storage_deadline)
+            })) {
+                Ok(true) => {}
+                Ok(false) => {
+                    terminal_clean = false;
+                }
+                Err(_) => {
+                    crate::diagnostic!("shutdown: storage-reader quiescence panicked");
+                    terminal_clean = false;
+                }
+            }
+        }
+        self.clear_pending_store_reads();
+
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flush_time(None))).is_err()
+        {
+            crate::diagnostic!("shutdown: final time flush panicked");
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.flush_pending_focus_records(true);
+            !self.has_unadmitted_time_writes()
+        })) {
+            Ok(true) => {}
+            Ok(false) => {
+                terminal_clean = false;
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: focus admission preflight panicked");
+                terminal_clean = false;
+            }
+        }
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {
+            crate::diagnostic!("shutdown: final session snapshot panicked");
+            terminal_clean = false;
+        }
+
+        // A failed durability barrier is terminal, but cannot skip native teardown.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.store.flush_until(storage_deadline)
+        })) {
+            Ok(true) => {}
+            Ok(false) => {
+                crate::diagnostic!("shutdown: storage durability preflight was not proven");
+                terminal_clean = false;
             }
             Err(_) => {
                 crate::diagnostic!("shutdown: storage durability preflight panicked");
