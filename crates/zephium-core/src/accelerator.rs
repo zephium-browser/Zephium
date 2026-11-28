@@ -307,15 +307,19 @@ impl Accelerator {
     /// are held to the same rule except for the few bare keys they declare.
     pub fn bindable(&self, platform: Platform) -> Result<(), AcceleratorError> {
         let function = matches!(self.key, Key::Function(_));
-        // Alt+Left, Alt+Right and Alt+Home are the browser's own keys on
-        // Windows and Linux. Without Control they are not AltGr, and no text
-        // field gives them a meaning. Option+Arrow moves by word on macOS.
-        let alt_navigation = platform == Platform::Other
+        // Alt+Left, Alt+Right, Alt+Home and Alt+D are the browser's own keys
+        // on Windows and Linux. Without Control they are not AltGr, and no
+        // text field gives them a meaning. Option+Arrow moves by word and
+        // Option+D types a character on macOS, so these stay non-Mac keys.
+        let alt_browser_key = platform == Platform::Other
             && self.alt
             && !self.ctrl
             && !self.shift
-            && matches!(self.key, Key::Left | Key::Right | Key::Home);
-        if !self.has_primary(platform) && !function && !alt_navigation {
+            && matches!(
+                self.key,
+                Key::Left | Key::Right | Key::Home | Key::Letter(b'D')
+            );
+        if !self.has_primary(platform) && !function && !alt_browser_key {
             return Err(AcceleratorError::Unbindable);
         }
         // Ctrl+Alt is AltGr on many Windows and Linux layouts: it types text.
@@ -470,6 +474,11 @@ mod tests {
         assert_eq!(parse("F6", other).bindable(other), Ok(()));
         assert_eq!(parse("Alt+Left", other).bindable(other), Ok(()));
         assert_eq!(parse("Alt+Home", other).bindable(other), Ok(()));
+        assert_eq!(parse("Alt+D", other).bindable(other), Ok(()));
+        assert_eq!(
+            parse("Alt+D", mac).bindable(mac),
+            Err(AcceleratorError::Unbindable)
+        );
         assert_eq!(
             parse("Alt+Left", mac).bindable(mac),
             Err(AcceleratorError::Unbindable)

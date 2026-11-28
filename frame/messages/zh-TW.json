@@ -252,6 +252,7 @@
   "command_nav_reload": "重新載入網頁",
   "command_nav_stop": "停止載入",
   "command_url_focus": "前往網址",
+  "command_url_focus_alternate": "開啟網址（替代）",
   "command_zoom_in": "放大",
   "command_zoom_out": "縮小",
   "command_zoom_reset": "實際大小",

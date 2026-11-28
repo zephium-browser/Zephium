@@ -252,6 +252,7 @@
   "command_nav_reload": "Перезавантажити сторінку",
   "command_nav_stop": "Зупинити завантаження",
   "command_url_focus": "Відкрити адресу",
+  "command_url_focus_alternate": "Відкрити адресу (альтернатива)",
   "command_zoom_in": "Збільшити",
   "command_zoom_out": "Зменшити",
   "command_zoom_reset": "Справжній розмір",

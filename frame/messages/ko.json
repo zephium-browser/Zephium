@@ -252,6 +252,7 @@
   "command_nav_reload": "페이지 새로고침",
   "command_nav_stop": "로딩 중지",
   "command_url_focus": "주소 표시줄 열기",
+  "command_url_focus_alternate": "주소 열기 (대체)",
   "command_zoom_in": "확대",
   "command_zoom_out": "축소",
   "command_zoom_reset": "실제 크기",

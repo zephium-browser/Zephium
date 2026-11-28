@@ -252,6 +252,7 @@
   "command_nav_reload": "ページを再読み込み",
   "command_nav_stop": "読み込みを停止",
   "command_url_focus": "場所を開く",
+  "command_url_focus_alternate": "アドレスを開く（代替）",
   "command_zoom_in": "拡大",
   "command_zoom_out": "縮小",
   "command_zoom_reset": "実際のサイズ",

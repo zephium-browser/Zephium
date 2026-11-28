@@ -252,6 +252,7 @@
   "command_nav_reload": "Обновить страницу",
   "command_nav_stop": "Остановить загрузку",
   "command_url_focus": "Перейти к адресу",
+  "command_url_focus_alternate": "Открыть адрес (альтернатива)",
   "command_zoom_in": "Увеличить",
   "command_zoom_out": "Уменьшить",
   "command_zoom_reset": "Реальный размер",

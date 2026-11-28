@@ -252,6 +252,7 @@
   "command_nav_reload": "Sayfayı yeniden yükle",
   "command_nav_stop": "Yüklemeyi durdur",
   "command_url_focus": "Konumu aç",
+  "command_url_focus_alternate": "Adresi aç (alternatif)",
   "command_zoom_in": "Yakınlaştır",
   "command_zoom_out": "Uzaklaştır",
   "command_zoom_reset": "Gerçek boyut",

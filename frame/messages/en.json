@@ -275,6 +275,7 @@
   "command_nav_reload": "Reload page",
   "command_nav_stop": "Stop loading",
   "command_url_focus": "Open location",
+  "command_url_focus_alternate": "Open location (alternate)",
   "command_zoom_in": "Zoom in",
   "command_zoom_out": "Zoom out",
   "command_zoom_reset": "Actual size",

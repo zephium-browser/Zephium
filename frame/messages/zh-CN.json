@@ -252,6 +252,7 @@
   "command_nav_reload": "重新载入页面",
   "command_nav_stop": "停止载入",
   "command_url_focus": "打开位置",
+  "command_url_focus_alternate": "打开地址（备用）",
   "command_zoom_in": "放大",
   "command_zoom_out": "缩小",
   "command_zoom_reset": "实际大小",

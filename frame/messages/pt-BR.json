@@ -252,6 +252,7 @@
   "command_nav_reload": "Recarregar página",
   "command_nav_stop": "Interromper carregamento",
   "command_url_focus": "Abrir endereço",
+  "command_url_focus_alternate": "Abrir endereço (alternativo)",
   "command_zoom_in": "Aumentar zoom",
   "command_zoom_out": "Diminuir zoom",
   "command_zoom_reset": "Tamanho real",

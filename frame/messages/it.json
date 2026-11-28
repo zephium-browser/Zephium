@@ -252,6 +252,7 @@
   "command_nav_reload": "Ricarica pagina",
   "command_nav_stop": "Interrompi caricamento",
   "command_url_focus": "Vai all'indirizzo",
+  "command_url_focus_alternate": "Apri indirizzo (alternativo)",
   "command_zoom_in": "Ingrandisci",
   "command_zoom_out": "Riduci",
   "command_zoom_reset": "Dimensione effettiva",

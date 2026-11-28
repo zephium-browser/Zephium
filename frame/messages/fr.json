@@ -252,6 +252,7 @@
   "command_nav_reload": "Recharger la page",
   "command_nav_stop": "Arrêter le chargement",
   "command_url_focus": "Ouvrir une adresse",
+  "command_url_focus_alternate": "Ouvrir l'adresse (alternative)",
   "command_zoom_in": "Zoom avant",
   "command_zoom_out": "Zoom arrière",
   "command_zoom_reset": "Taille réelle",
