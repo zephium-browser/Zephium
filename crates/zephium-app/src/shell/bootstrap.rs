@@ -1,73 +1,4 @@
-//! Authoritative session bootstrap and recovery admission.
-
-use super::*;
-
-impl Shell {
-    pub(super) fn bootstrap(&mut self) {
-        #[cfg(debug_assertions)]
-        let started = *self
-            .bootstrap_started
-            .get_or_insert_with(std::time::Instant::now);
-        if self.profile_deletion.failed_closed {
-            return;
-        }
-        // Before any view exists: none may start out on the wrong route.
-        self.engine.set_proxy(self.proxy.server());
-        // Runtime update state is independent of session recovery and chrome
-        // reloads. Querying the sticky engine state also repairs a callback
-        // that arrived before the shell callback ingress was installed.
-        if !self.reconcile_runtime_restart_requirement() {
-            self.project_runtime_status();
-        }
-        // The chrome re-invokes bootstrap whenever its webview reloads (dev
-        // HMR, crash recovery); state and native surfaces must not be rebuilt.
-        if self.windows.focused().is_some() {
-            self.peek_sidebar(false, false);
-            let _ = self.relayout();
-            self.forget_delivered_icons(zephium_ipc::IconSurface::Chrome);
-            self.forget_offered_items();
-            self.project_items();
-            self.project_browser_page();
-            self.resume_focus();
-            return;
-        }
-        let pending_deletions = match self.store.pending_profile_deletions() {
-            ProfileDeletionLoad::Loaded(pending) => pending,
-            ProfileDeletionLoad::Failed => {
-                crate::diagnostic!(
-                    "bootstrap: profile deletion journal is unavailable; refusing initialization"
-                );
-                self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
-                return;
-            }
-        };
-        let mut journal_profiles = std::collections::HashSet::new();
-        if pending_deletions.len() > zephium_core::session::MAX_SESSION_PROFILES
-            || pending_deletions
-                .iter()
-                .any(|deletion| !journal_profiles.insert(deletion.profile))
-        {
-            crate::diagnostic!(
-                "bootstrap: profile deletion journal exceeds its unique bounded cohort"
-            );
-            self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
-            return;
-        }
-        let mut active_item = None;
-        let mut active_space = None;
-        let mut splits = None;
-        let mut session_absent = false;
-        let mut blocker_configs = None;
-        let mut load = self.store.load_session();
-        if let SessionLoad::RecoveryRequired { reason } = &load {
-            // A session that cannot be restored must not keep the browser
-            // from opening at every launch. The store keeps its bytes in a
-            // file and restarts it from the profile registry, so each
-            // profile keeps its history, bookmarks and settings.
-            crate::diagnostic!(
-                "bootstrap: session cannot be restored ({reason}); setting it aside"
-            );
-            if let Some((restarted, _file)) = self.store.set_aside_session() {
+e((restarted, _file)) = self.store.set_aside_session() {
                 if !matches!(
                     restarted,
                     SessionLoad::RecoveryRequired { .. } | SessionLoad::Failed
@@ -82,7 +13,11 @@ impl Shell {
                 state,
                 blocker_configs: loaded_blocker_configs,
             } => {
-                let restored = session::restore(state);
+                let restored = if new_tab_only {
+                    session::restore_new_tab_only(state)
+                } else {
+                    session::restore(state)
+                };
                 self.recently_closed = restored.recently_closed;
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;
@@ -119,7 +54,11 @@ impl Shell {
                 );
                 self.degraded_storage_profiles = degraded;
 
-                let restored = session::restore(state);
+                let restored = if new_tab_only {
+                    session::restore_new_tab_only(state)
+                } else {
+                    session::restore(state)
+                };
                 self.recently_closed = restored.recently_closed;
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;

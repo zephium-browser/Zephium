@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import PreferenceSelect from "../PreferenceSelect.svelte";
+  import PreferenceSwitch from "../PreferenceSwitch.svelte";
   import ImportBrowserData from "../ImportBrowserData.svelte";
   import ExportBrowserData from "../ExportBrowserData.svelte";
   import DownloadPreferences from "../DownloadPreferences.svelte";
@@ -60,7 +61,10 @@
   ><LoginItemRow /><PreferenceSelect
     id="general.startup"
     preference="tabs.startup"
-  />{#if preferences.value("tabs.startup") === "pages"}<StartupPages />{/if}<HomePageRow
+  />{#if preferences.value("tabs.startup") === "new-tab"}<PreferenceSwitch
+      id="general.restore-session"
+      preference="tabs.restore-session"
+    />{/if}{#if preferences.value("tabs.startup") === "pages"}<StartupPages />{/if}<HomePageRow
   /></SettingsGroup
 >
 <SettingsGroup title={m.network_group()}><ProxyRows /></SettingsGroup>
