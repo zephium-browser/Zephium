@@ -4196,6 +4196,7 @@ fn toggle_window_fullscreen(window: &WebviewWindow) {
 }
 
 fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAdmission {
+    let id = zephium_core::commands::runs_as(id);
     execute_command_or(app, id, || {
         app.try_state::<Handle>()
             .map_or_else(rejected_operation, |shell| {
@@ -4204,7 +4205,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     })
 }
 
-/// Runs a command the app owns itself, handing one the shell owns to `shell`.
+/// Runs a canonical command the app owns, handing one the shell owns to `shell`.
 fn execute_command_or(
     app: &tauri::AppHandle,
     id: &str,
@@ -4217,7 +4218,6 @@ fn execute_command_or(
     if shutdown_started(app) {
         return rejected_operation();
     }
-    let id = zephium_core::commands::runs_as(id);
     if id == "tab.close" && tab_switcher::close_selected(app) {
         return accepted_ui_operation();
     }
@@ -4780,6 +4780,7 @@ fn launcher_run(
             background,
         );
     };
+    let id = zephium_core::commands::runs_as(id);
     let (admission, settlement) = route_launcher_command(
         |to_shell| execute_command_or(&app, id, to_shell),
         || {
