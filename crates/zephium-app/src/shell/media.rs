@@ -28,10 +28,29 @@ impl Shell {
             .is_some_and(|tab| tab.content == TabContent::Web && tab.has_view());
         let media = media.filter(|_| live);
         let was_running = self.keeps_running(id);
+        // A system picture-in-picture window can close without an explicit
+        // return command (Windows has no media-return handler). The page goes
+        // on playing off screen, so the transition back to inline playback has
+        // to select its tab and bring the window forward. Paused or finished
+        // media, and a tab already on screen, are left alone: the person did
+        // not ask to be taken there. Only the change from `in_pip` counts, so
+        // later reports of the same playback do not keep raising the window.
+        let returned = self
+            .media
+            .get(id)
+            .is_some_and(|previous| previous.in_pip)
+            && media
+                .as_ref()
+                .is_some_and(|next| !next.in_pip && next.playing && !next.ended)
+            && !self.on_screen(id);
         if self.media.observe(id, media, std::time::Instant::now()) {
             self.project_media_player();
         }
         self.follow_running(id, was_running);
+        if returned {
+            let _ = self.show_media_tab(id);
+            (self.emit)(Projection::RaiseWindow);
+        }
     }
 
     /// The tab closed, or its page went away with its media.
@@ -177,7 +196,28 @@ impl Shell {
                     OperationReason::MutationApplied,
                 );
             }
-            MediaPlayerAction::Show => return self.show_media_tab(id),
+            MediaPlayerAction::Show => {
+                if self.media.get(id).is_some_and(|media| media.in_pip) {
+                    // The player's site button is also the way back from a
+                    // picture in picture: close the presentation, then put
+                    // its page and the window in front, like the system's own
+                    // return control does where the engine offers one.
+                    let closed = self.engine.media_action(id, MediaAction::PictureInPicture)
+                        == NativeDispatch::Scheduled;
+                    self.return_to_media(id);
+                    if !closed {
+                        return operation_result(
+                            OperationOutcome::NativeAdmissionFailed,
+                            OperationReason::NativeDispatchRejected,
+                        );
+                    }
+                    return operation_result(
+                        OperationOutcome::Applied,
+                        OperationReason::MutationApplied,
+                    );
+                }
+                return self.show_media_tab(id);
+            }
             MediaPlayerAction::Play => MediaAction::Play,
             MediaPlayerAction::Pause => MediaAction::Pause,
             MediaPlayerAction::Seek { seconds } if seconds.is_finite() && seconds >= 0.0 => {

@@ -1,17 +1,4 @@
-<script lang="ts">
-  import {
-    Cancel01Icon,
-    PictureInPictureOnIcon,
-    VolumeHighIcon,
-    VolumeOffIcon,
-  } from "@hugeicons/core-free-icons";
-  import * as m from "$shared/i18n/messages";
-  import Icon from "$shared/ui/Icon";
-  import FavIcon from "$shared/ui/FavIcon";
-  import { favicons } from "$domain/favicons";
-  import { mediaPlayer } from "$domain/media-player";
-  import { tabs } from "$domain/tabs";
-  import { clock, fraction } from "../lib/time";
+ock, fraction } from "../lib/time";
   import { everyWhileVisible } from "$shared/lib/visible-interval";
 
   let { compact = false }: { compact?: boolean } = $props();
@@ -48,6 +35,9 @@
   function seek(event: Event) {
     const seconds = Number((event.currentTarget as HTMLInputElement).value);
     if (!player || !Number.isFinite(seconds)) return;
+    // A drag fires `input` all along and `change` at the end. Both reach the
+    // page, but the same position is not sent twice for one gesture.
+    if (sought?.for === player && sought.seconds === seconds) return;
     sought = { for: player, seconds };
     mediaPlayer.seek(seconds);
   }
@@ -175,6 +165,7 @@
                 position: clock(position),
                 duration: clock(duration),
               })}
+              oninput={seek}
               onchange={seek}
             />
           {/if}

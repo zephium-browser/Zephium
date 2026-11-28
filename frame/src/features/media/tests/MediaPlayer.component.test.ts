@@ -95,9 +95,27 @@ test("seeking asks native and holds its place until the page answers", async () 
   const slider = screen.getByRole("slider", { name: "Playback position" });
   const input = slider.element() as HTMLInputElement;
   input.value = "150";
-  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.dispatchEvent(new Event("input", { bubbles: true }));
   expect(native.player).toHaveBeenLastCalledWith("tab-1", { kind: "seek", seconds: 150 });
   await expect.element(slider).toHaveAttribute("aria-valuetext", "2:30 of 3:20");
+});
+
+test("scrubbing follows a drag and does not repeat the final position on change", async () => {
+  const screen = await render(MediaPlayer);
+  emitNativeEvent("mediaPlayerChanged", view({ playing: false }));
+  await screen.getByRole("region", { name: "Now playing" }).hover();
+  const slider = screen.getByRole("slider", { name: "Playback position" });
+  const input = slider.element() as HTMLInputElement;
+  for (const seconds of [80, 120, 150]) {
+    input.value = String(seconds);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  expect(native.player.mock.calls.filter(([, action]) => action.kind === "seek")).toEqual([
+    ["tab-1", { kind: "seek", seconds: 80 }],
+    ["tab-1", { kind: "seek", seconds: 120 }],
+    ["tab-1", { kind: "seek", seconds: 150 }],
+  ]);
 });
 
 test("a live stream shows that it is live instead of a length", async () => {
