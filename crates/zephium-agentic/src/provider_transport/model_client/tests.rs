@@ -428,6 +428,31 @@ fn model_entries_bind_closed_labels_and_conservative_prices() {
     assert!(AgentProviderModelClient::try_new(&toolless, client).is_err());
 }
 
+#[test]
+fn long_context_models_reserve_at_most_their_pricing_ceiling() {
+    let mut custom = entry("compatible/http://localhost:11434/v1#long");
+    custom.model.provider = WorkModelProvider::Compatible;
+    custom.model.wire = WorkModelWire::ChatCompletions;
+    custom.context_window = 1_000_000;
+    let model = AgentProviderModelClient::try_new(&custom, Scripted::stalled()).expect("custom");
+    assert_eq!(model.max_input_tokens(), 500_000);
+    assert!(model.try_call_config(128_000).is_ok());
+
+    let mut larger = entry("compatible/http://localhost:11434/v1#longer");
+    larger.model.provider = WorkModelProvider::Compatible;
+    larger.model.wire = WorkModelWire::ChatCompletions;
+    larger.context_window = 2_000_000;
+    let model =
+        AgentProviderModelClient::try_new(&larger, Scripted::stalled()).expect("larger context");
+    assert_eq!(model.max_input_tokens(), 500_000);
+
+    let mut builtin = entry("anthropic/claude-test-5-1m");
+    builtin.context_window = 1_000_000;
+    let model =
+        AgentProviderModelClient::try_new(&builtin, Scripted::stalled()).expect("builtin context");
+    assert_eq!(model.max_input_tokens(), 200_000);
+}
+
 fn reasked_reason(request: &WorkModelRequest) -> String {
     match request.messages.last() {
         Some(WorkModelMessage::ToolResults(results)) => {

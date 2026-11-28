@@ -11,7 +11,7 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use zephium_core::work::model::{
     HostedRefusal, WorkModelClient, WorkModelEntry, WorkModelError, WorkModelEvent, WorkModelPrice,
-    WorkModelRef, WorkModelUsage,
+    WorkModelProvider, WorkModelRef, WorkModelUsage,
 };
 
 use super::*;
@@ -32,8 +32,13 @@ const UNPRICED: WorkModelPrice = WorkModelPrice {
 /// Pricing revisions that tell a catalog price from the fallback above.
 const CATALOG_PRICE_REVISION: u64 = 1;
 const FALLBACK_PRICE_REVISION: u64 = 2;
-/// Below every supported provider's long-context price tier.
+/// Largest input a direct-provider entry may reserve. This stays below the
+/// long-context price tier of every priced catalog entry.
 const MAX_MODEL_INPUT_TOKENS: u64 = 200_000;
+/// Largest input a `Compatible` entry may reserve. Custom endpoints are local
+/// and free or priced from their own list; OpenCode's tiered prices are
+/// collapsed to their highest rate before they reach this schedule.
+const MAX_COMPATIBLE_MODEL_INPUT_TOKENS: u64 = 500_000;
 const MAX_LABEL_BYTES: usize = 80;
 
 /// One chosen model and its client, bound to a pricing schedule built from
@@ -79,10 +84,15 @@ impl AgentProviderModelClient {
             )
             .map_err(|_| AgentProviderContractError::InputAccountingMode)?
         };
+        let max_input = if entry.model.provider == WorkModelProvider::Compatible {
+            MAX_COMPATIBLE_MODEL_INPUT_TOKENS
+        } else {
+            MAX_MODEL_INPUT_TOKENS
+        };
         let profile = AgentProviderPricingProfile::try_new(
             AgentProviderPricingRevision::new(revision)
                 .ok_or(AgentProviderContractError::InputAccountingMode)?,
-            u64::from(entry.context_window).min(MAX_MODEL_INPUT_TOKENS),
+            u64::from(entry.context_window).min(max_input),
         )
         .map_err(|_| AgentProviderContractError::InputAccountingMode)?;
         let schedule = AgentProviderPricingSchedule::try_new(
