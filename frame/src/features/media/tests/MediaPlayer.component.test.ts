@@ -110,6 +110,9 @@ test("scrubbing follows a drag and does not repeat the final position on change"
     input.value = String(seconds);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   }
+  emitNativeEvent("mediaPlayerChanged", view({ playing: false, position: 149 }));
+  await expect.element(slider).toHaveAttribute("aria-valuetext", "2:29 of 3:20");
+  input.value = "150";
   input.dispatchEvent(new Event("change", { bubbles: true }));
   expect(native.player.mock.calls.filter(([, action]) => action.kind === "seek")).toEqual([
     ["tab-1", { kind: "seek", seconds: 80 }],

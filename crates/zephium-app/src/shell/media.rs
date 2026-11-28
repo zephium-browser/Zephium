@@ -47,8 +47,12 @@ impl Shell {
             self.project_media_player();
         }
         self.follow_running(id, was_running);
-        if returned {
-            let _ = self.show_media_tab(id);
+        if returned
+            && matches!(
+                self.show_media_tab(id).outcome,
+                OperationOutcome::Applied | OperationOutcome::Deferred | OperationOutcome::NoOp
+            )
+        {
             (self.emit)(Projection::RaiseWindow);
         }
     }
@@ -152,6 +156,12 @@ impl Shell {
     /// The player can show a tab of another space; going to it shows that
     /// space, arriving on the tab.
     pub(super) fn show_media_tab(&mut self, id: ItemId) -> OperationDisposition {
+        if !self.windows.focused().is_some_and(|window| {
+            self.profile_of_item(id) == Some(window.profile)
+                && !self.profile_deletion_quarantines(window.profile)
+        }) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
         if self.item_in_focused_scope(id) {
             return self.operation_activate(id);
         }
@@ -202,18 +212,18 @@ impl Shell {
                     // picture in picture: close the presentation, then put
                     // its page and the window in front, like the system's own
                     // return control does where the engine offers one.
-                    let closed = self.engine.media_action(id, MediaAction::PictureInPicture)
+                    let scheduled = self.engine.media_action(id, MediaAction::PictureInPicture)
                         == NativeDispatch::Scheduled;
                     self.return_to_media(id);
-                    if !closed {
+                    if !scheduled {
                         return operation_result(
                             OperationOutcome::NativeAdmissionFailed,
                             OperationReason::NativeDispatchRejected,
                         );
                     }
                     return operation_result(
-                        OperationOutcome::Applied,
-                        OperationReason::MutationApplied,
+                        OperationOutcome::Deferred,
+                        OperationReason::NativeWorkPending,
                     );
                 }
                 return self.show_media_tab(id);

@@ -266,6 +266,27 @@ fn leaving_picture_in_picture_selects_the_playing_tab_and_raises_the_window() {
 }
 
 #[test]
+fn leaving_picture_in_picture_cannot_return_from_another_profile() {
+    let (mut shell, _engine, screen, raises, item) = ready_with_raises();
+    let mut pip = media("1", true);
+    pip.in_pip = true;
+    report(&mut shell, item, Some(pip));
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(shell.private_shown());
+    assert!(shell.items.tab(item).unwrap().has_view());
+    let (space, active) = {
+        let window = shell.windows.focused().unwrap();
+        (window.space, active_id(&screen))
+    };
+
+    report(&mut shell, item, Some(media("1", true)));
+
+    assert_eq!(shell.windows.focused().unwrap().space, space);
+    assert_eq!(active_id(&screen), active);
+    assert_eq!(*raises.lock().unwrap(), 0);
+}
+
+#[test]
 fn a_paused_or_finished_picture_in_picture_leave_changes_nothing() {
     let (mut shell, _engine, screen, raises, item) = ready_with_raises();
     let mut pip = media("1", true);
@@ -288,7 +309,7 @@ fn a_paused_or_finished_picture_in_picture_leave_changes_nothing() {
 }
 
 #[test]
-fn going_back_from_picture_in_picture_closes_it_and_returns_to_its_tab() {
+fn going_back_from_picture_in_picture_requests_exit_and_returns_to_its_tab() {
     let (mut shell, engine, screen, raises, item) = ready_with_raises();
     let mut pip = media("1", true);
     pip.in_pip = true;
@@ -298,12 +319,12 @@ fn going_back_from_picture_in_picture_closes_it_and_returns_to_its_tab() {
 
     let shown = shell.operation_media_player(item, MediaPlayerAction::Show);
 
-    assert_eq!(shown.outcome, OperationOutcome::Applied);
+    assert_eq!(shown.outcome, OperationOutcome::Deferred);
     assert!(
         engine
             .calls()
             .contains(&format!("media {item} PictureInPicture")),
-        "the presentation is closed"
+        "a picture-in-picture action is scheduled"
     );
     assert_eq!(active_id(&screen), item);
     assert_eq!(*raises.lock().unwrap(), 1);
@@ -319,12 +340,17 @@ fn going_to_a_playing_tab_outside_picture_in_picture_does_not_raise_or_close() {
     let shown = shell.operation_media_player(item, MediaPlayerAction::Show);
 
     assert_ne!(shown.outcome, OperationOutcome::Rejected);
-    assert_eq!((shell.windows.focused().unwrap().space, active_id(&screen)), (home, item));
+    assert_eq!(
+        (shell.windows.focused().unwrap().space, active_id(&screen)),
+        (home, item)
+    );
     assert_eq!(*raises.lock().unwrap(), 0);
-    assert!(!engine
-        .calls()
-        .iter()
-        .any(|call| call.contains("PictureInPicture")));
+    assert!(
+        !engine
+            .calls()
+            .iter()
+            .any(|call| call.contains("PictureInPicture"))
+    );
 }
 
 #[test]
