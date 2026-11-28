@@ -14,6 +14,10 @@ use std::cell::Cell;
 pub(crate) struct FullscreenReveal {
     fullscreen: Cell<bool>,
     inside: Cell<bool>,
+    /// WillExitFullScreen has hidden the native buttons but DidExit has not
+    /// laid the titlebar out again. No corner callback may change opacity in
+    /// this window: the buttons must stay hidden until the final restore.
+    exiting: Cell<bool>,
 }
 
 impl FullscreenReveal {
@@ -22,17 +26,30 @@ impl FullscreenReveal {
     pub(crate) fn set_fullscreen(&self, fullscreen: bool) {
         self.fullscreen.set(fullscreen);
         self.inside.set(false);
+        self.exiting.set(false);
+    }
+
+    /// The window is between WillExitFullScreen and DidExitFullScreen.
+    pub(crate) fn begin_exit(&self) {
+        self.exiting.set(true);
+        self.inside.set(false);
+    }
+
+    pub(crate) fn exiting(&self) -> bool {
+        self.exiting.get()
     }
 
     /// The pointer entered or left the top-left region.
     pub(crate) fn pointer(&self, inside: bool) {
-        self.inside.set(self.fullscreen.get() && inside);
+        if !self.exiting.get() {
+            self.inside.set(self.fullscreen.get() && inside);
+        }
     }
 
     /// Whether the controls must be visible now. There is deliberately no
     /// timer that hides them while the pointer remains inside.
     pub(crate) fn visible(&self) -> bool {
-        self.fullscreen.get() && self.inside.get()
+        !self.exiting.get() && self.fullscreen.get() && self.inside.get()
     }
 }
 
@@ -72,6 +89,24 @@ mod tests {
         assert!(!reveal.visible());
         reveal.pointer(false);
         assert!(!reveal.visible(), "repeated exits do not resurrect it");
+    }
+
+    #[test]
+    fn will_exit_mouse_exited_did_exit_keeps_the_buttons_hidden() {
+        let reveal = FullscreenReveal::default();
+        reveal.set_fullscreen(true);
+        reveal.pointer(true);
+        assert!(reveal.visible());
+        // WillExit -> a tracking-area exit before DidExit.
+        reveal.begin_exit();
+        reveal.pointer(false);
+        assert!(reveal.exiting());
+        assert!(!reveal.visible(), "no corner fade during the exit animation");
+        // DidExit restores the ordinary controls and clears the barrier.
+        reveal.set_fullscreen(false);
+        assert!(!reveal.exiting());
+        reveal.set_fullscreen(true);
+        assert!(!reveal.visible(), "the stale corner state is not replayed");
     }
 
     #[test]

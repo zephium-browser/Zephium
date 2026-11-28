@@ -261,7 +261,7 @@ impl WindowControls {
     /// Applies the fullscreen corner state: the drawn discs show where the
     /// real buttons are hidden, so there is only ever one set on screen.
     fn reveal_fullscreen(&self) {
-        if !self.ivars().suspended.get() {
+        if !self.ivars().suspended.get() || self.ivars().reveal.exiting() {
             return;
         }
         let shown = self.ivars().reveal.visible();
@@ -366,6 +366,7 @@ impl WindowControls {
     /// them out again until the animation ends. They are hidden for the
     /// length of it and come back, already in place, when it is done.
     fn leaving(&self) {
+        self.ivars().reveal.begin_exit();
         self.tell_chrome(false);
         for button in self.buttons() {
             fade(&button, 0.0, 0.0);
