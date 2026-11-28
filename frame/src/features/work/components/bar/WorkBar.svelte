@@ -1,4 +1,72 @@
-   if (!target || !surface) return false;
+<script lang="ts">
+  import { untrack, type Snippet } from "svelte";
+  import Icon from "$shared/ui/Icon";
+  import { keymap } from "$domain/keymap";
+  import { uiCommands } from "$domain/ui-commands";
+  import { acceleratorKeys } from "$shared/lib/accelerator";
+  import { IS_MAC } from "$shared/platform";
+  import { ArrowUp02Icon, Mic01Icon } from "../../lib/icons";
+  import * as m from "$shared/i18n/messages";
+
+  const loadVoice = () => import("./VoiceView.svelte");
+
+  let {
+    value = $bindable(""),
+    placeholder,
+    disabled = false,
+    busy = false,
+    holding = false,
+    model = null,
+    tools,
+    attach,
+    context,
+    above,
+    trailing,
+    onsubmit,
+    ref = $bindable(),
+    surface = $bindable(),
+  }: {
+    value?: string;
+    placeholder: string;
+    disabled?: boolean;
+    busy?: boolean;
+    /** Something the field opened is still in use, so it stays open. */
+    holding?: boolean;
+    /** The model the runs here use, when a run has said. */
+    model?: string | null;
+    tools?: Snippet;
+    attach?: Snippet;
+    context?: Snippet;
+    above?: Snippet;
+    /** What stands before the mic, such as the model the runs use; it replaces the model's name. */
+    trailing?: Snippet;
+    onsubmit: () => void;
+    ref?: HTMLElement;
+    /** The sheet the words sit on; the canvas cuts its window-through hole to its shape. */
+    surface?: HTMLElement;
+  } = $props();
+  const id = $props.id();
+  let textarea = $state<HTMLTextAreaElement>();
+  let focused = $state(false);
+  /** A menu or popover the field's own controls opened: it may live in a portal, but it is the bar's. */
+  let menu = $state(false);
+  const opened = (element: Element | undefined) =>
+    !!element?.querySelector('.field [aria-expanded="true"]');
+  $effect(() => {
+    const element = surface;
+    if (!element) return;
+    const observer = new MutationObserver(() => {
+      const open = opened(element);
+      if (open === menu) return;
+      menu = open;
+      // WebKit can leave focus on body while a portal closes. Only an
+      // actual outside press/focus transfer releases the composer's focus.
+    });
+    observer.observe(element, { subtree: true, attributeFilter: ["aria-expanded"] });
+    return () => observer.disconnect();
+  });
+  function owns(target: Node | null): boolean {
+    if (!target || !surface) return false;
     if (surface.contains(target)) return true;
     // Bits UI's non-modal popover content need not expose aria-controls.
     // While this field's trigger is expanded, its active portal is part of the field.
