@@ -175,7 +175,7 @@
                 position: clock(position),
                 duration: clock(duration),
               })}
-              onchange={seek}
+              oninput={seek}
             />
           {/if}
           <div class="media-foot">

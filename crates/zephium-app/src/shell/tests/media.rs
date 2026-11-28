@@ -3,12 +3,51 @@ use super::*;
 use zephium_core::media::MediaSnapshot;
 use zephium_ipc::{MediaPlayerAction, MediaPlayerView};
 
+type RaiseLog = Arc<Mutex<usize>>;
+
 fn ready() -> (Shell, Arc<FakeEngine>, Screen, ItemId) {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let item = active_id(&screen);
     navigate_and_commit(&mut shell, item, "https://www.music.example/");
     (shell, engine, screen, item)
+}
+
+/// A shell that counts the requests for the window to come forward.
+fn ready_with_raises() -> (Shell, Arc<FakeEngine>, Screen, RaiseLog, ItemId) {
+    let engine = Arc::new(FakeEngine::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let raises: RaiseLog = Arc::new(Mutex::new(0));
+    let (sink, raise_sink) = (screen.clone(), raises.clone());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if matches!(projection, Projection::RaiseWindow) {
+                *raise_sink.lock().unwrap() += 1;
+            }
+            apply_projection(&mut sink.lock().unwrap(), projection);
+        }),
+    );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    shell.disable_native_notification_source_for_test();
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let item = active_id(&screen);
+    navigate_and_commit(&mut shell, item, "https://www.music.example/");
+    (shell, engine, screen, raises, item)
 }
 
 /// A second tab in front, leaving `item` playing behind it.
@@ -206,4 +245,124 @@ fn the_player_follows_its_tab_across_spaces_and_goes_to_it() {
     let window = shell.windows.focused().unwrap();
     assert_eq!((window.space, window.active), (home, Some(item)));
     assert_eq!(player(&shell), None);
+}
+
+#[test]
+fn leaving_picture_in_picture_selects_the_playing_tab_and_raises_the_window() {
+    let (mut shell, _engine, screen, raises, item) = ready_with_raises();
+    let mut pip = media("1", true);
+    pip.in_pip = true;
+    report(&mut shell, item, Some(pip));
+    behind(&mut shell, &screen);
+    assert_ne!(active_id(&screen), item);
+
+    report(&mut shell, item, Some(media("2", true)));
+
+    assert_eq!(active_id(&screen), item);
+    assert_eq!(*raises.lock().unwrap(), 1);
+    // A later report of the same playback is not another return.
+    report(&mut shell, item, Some(media("3", true)));
+    assert_eq!(*raises.lock().unwrap(), 1);
+}
+
+#[test]
+fn leaving_picture_in_picture_cannot_return_from_another_profile() {
+    let (mut shell, _engine, screen, raises, item) = ready_with_raises();
+    let mut pip = media("1", true);
+    pip.in_pip = true;
+    report(&mut shell, item, Some(pip));
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(shell.private_shown());
+    assert!(shell.items.tab(item).unwrap().has_view());
+    let (space, active) = {
+        let window = shell.windows.focused().unwrap();
+        (window.space, active_id(&screen))
+    };
+
+    report(&mut shell, item, Some(media("1", true)));
+
+    assert_eq!(shell.windows.focused().unwrap().space, space);
+    assert_eq!(active_id(&screen), active);
+    assert_eq!(*raises.lock().unwrap(), 0);
+}
+
+#[test]
+fn a_paused_or_finished_picture_in_picture_leave_changes_nothing() {
+    let (mut shell, _engine, screen, raises, item) = ready_with_raises();
+    let mut pip = media("1", true);
+    pip.in_pip = true;
+    report(&mut shell, item, Some(pip));
+    behind(&mut shell, &screen);
+
+    report(&mut shell, item, Some(media("2", false)));
+    assert_ne!(active_id(&screen), item);
+    assert_eq!(*raises.lock().unwrap(), 0);
+
+    let mut pip = media("2", false);
+    pip.in_pip = true;
+    report(&mut shell, item, Some(pip));
+    let mut ended = media("3", false);
+    ended.ended = true;
+    report(&mut shell, item, Some(ended));
+    assert_ne!(active_id(&screen), item);
+    assert_eq!(*raises.lock().unwrap(), 0);
+}
+
+#[test]
+fn going_back_from_picture_in_picture_requests_exit_and_returns_to_its_tab() {
+    let (mut shell, engine, screen, raises, item) = ready_with_raises();
+    let mut pip = media("1", true);
+    pip.in_pip = true;
+    report(&mut shell, item, Some(pip));
+    behind(&mut shell, &screen);
+    assert_ne!(active_id(&screen), item);
+
+    let shown = shell.operation_media_player(item, MediaPlayerAction::Show);
+
+    assert_eq!(shown.outcome, OperationOutcome::Deferred);
+    assert!(
+        engine
+            .calls()
+            .contains(&format!("media {item} PictureInPicture")),
+        "a picture-in-picture action is scheduled"
+    );
+    assert_eq!(active_id(&screen), item);
+    assert_eq!(*raises.lock().unwrap(), 1);
+}
+
+#[test]
+fn going_to_a_playing_tab_outside_picture_in_picture_does_not_raise_or_close() {
+    let (mut shell, engine, screen, raises, item) = ready_with_raises();
+    report(&mut shell, item, Some(media("1", true)));
+    let home = shell.windows.focused().unwrap().space;
+    behind(&mut shell, &screen);
+
+    let shown = shell.operation_media_player(item, MediaPlayerAction::Show);
+
+    assert_ne!(shown.outcome, OperationOutcome::Rejected);
+    assert_eq!(
+        (shell.windows.focused().unwrap().space, active_id(&screen)),
+        (home, item)
+    );
+    assert_eq!(*raises.lock().unwrap(), 0);
+    assert!(
+        !engine
+            .calls()
+            .iter()
+            .any(|call| call.contains("PictureInPicture"))
+    );
+}
+
+#[test]
+fn closing_the_player_still_only_dismisses_it_without_raising() {
+    let (mut shell, _engine, screen, raises, item) = ready_with_raises();
+    report(&mut shell, item, Some(media("1", true)));
+    behind(&mut shell, &screen);
+
+    let closed = shell.operation_media_player(item, MediaPlayerAction::Close);
+
+    assert_eq!(closed.outcome, OperationOutcome::Applied);
+    assert_eq!(player(&shell), None);
+    assert_ne!(active_id(&screen), item);
+    assert_eq!(*raises.lock().unwrap(), 0);
 }
