@@ -17,6 +17,8 @@
 use std::cell::{Cell, RefCell};
 use std::ptr::{null_mut, NonNull};
 
+use super::fullscreen_reveal::FullscreenReveal;
+
 use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -88,6 +90,9 @@ pub struct Ivars {
     /// Full screen hands the controls to the menu-bar reveal, where they must
     /// be visible the moment it slides down.
     suspended: Cell<bool>,
+    /// While the pointer is in the top-left corner, the drawn discs stand in
+    /// for the lights AppKit hides.
+    reveal: FullscreenReveal,
     /// The hidden sidebar's card keeps the controls one card inset inward.
     inset: InsetState,
     observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
@@ -123,7 +128,7 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            if self.ivars().suspended.get() {
+            if self.ivars().suspended.get() && !self.ivars().reveal.visible() {
                 return;
             }
             let (white, alpha) = if self.is_dark() { REST_DARK } else { REST_LIGHT };
@@ -164,11 +169,19 @@ define_class!(
 
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
+            if self.ivars().suspended.get() {
+                self.corner_reveal(true);
+                return;
+            }
             self.light(true, true);
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
+            if self.ivars().suspended.get() {
+                self.corner_reveal(false);
+                return;
+            }
             self.light(false, true);
         }
 
@@ -186,6 +199,7 @@ impl WindowControls {
             lit: Cell::new(false),
             settled: Cell::new(false),
             suspended: Cell::new(false),
+            reveal: FullscreenReveal::default(),
             inset: InsetState::default(),
             observers: RefCell::new(Vec::new()),
             chrome: RefCell::new(None),
@@ -234,6 +248,33 @@ impl WindowControls {
         self.effectiveAppearance()
             .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark]))
             .is_some_and(|name| name.isEqualToString(dark))
+    }
+
+    /// Tracks the pointer in a fullscreen corner and applies the state at
+    /// once. There is no one-shot timer: the controls stay as long as the
+    /// pointer stays, and leave with it.
+    fn corner_reveal(&self, inside: bool) {
+        self.ivars().reveal.pointer(inside);
+        self.reveal_fullscreen();
+    }
+
+    /// Applies the fullscreen corner state: the drawn discs show where the
+    /// real buttons are hidden, so there is only ever one set on screen.
+    fn reveal_fullscreen(&self) {
+        if !self.ivars().suspended.get() || self.ivars().reveal.exiting() {
+            return;
+        }
+        let shown = self.ivars().reveal.visible();
+        let duration = if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+            0.0
+        } else {
+            LIGHT_SECONDS
+        };
+        for button in self.buttons() {
+            fade(&button, if shown { 0.0 } else { 1.0 }, duration);
+        }
+        fade(self, if shown { 1.0 } else { 0.0 }, duration);
+        self.setNeedsDisplay(true);
     }
 
     fn light(&self, lit: bool, animate: bool) {
@@ -296,11 +337,21 @@ impl WindowControls {
         self.ivars().suspended.set(suspended);
         self.tell_chrome(suspended);
         if suspended {
-            for button in self.buttons() {
-                fade(&button, 1.0, 0.0);
-            }
-            fade(self, 0.0, 0.0);
+            self.ivars().reveal.set_fullscreen(true);
+            // The pointer may already be in the corner when fullscreen starts;
+            // read its position instead of waiting for a move it may never get.
+            let inside = self
+                .window()
+                .map(|window| {
+                    let point = self
+                        .convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+                    self.hot_rect().is_some_and(|hot| NSPointInRect(point, hot))
+                })
+                .unwrap_or(false);
+            self.ivars().reveal.pointer(inside);
+            self.reveal_fullscreen();
         } else {
+            self.ivars().reveal.set_fullscreen(false);
             // Leaving fullscreen, AppKit lays the titlebar out afresh at its
             // own position. The inset is applied as the content view draws,
             // which a window that comes back at the same size never asks for.
@@ -315,6 +366,7 @@ impl WindowControls {
     /// them out again until the animation ends. They are hidden for the
     /// length of it and come back, already in place, when it is done.
     fn leaving(&self) {
+        self.ivars().reveal.begin_exit();
         self.tell_chrome(false);
         for button in self.buttons() {
             fade(&button, 0.0, 0.0);

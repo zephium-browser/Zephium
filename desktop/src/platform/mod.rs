@@ -5,6 +5,9 @@ pub use macos as imp;
 #[cfg(target_os = "macos")]
 mod window_controls;
 
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod fullscreen_reveal;
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
