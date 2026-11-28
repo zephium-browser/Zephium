@@ -9,6 +9,16 @@ mirrors the file of the same name in the project's tap repository,
 The published releases ship an Apple Silicon (arm64) DMG only, so the cask
 refuses Intel machines:
 
+The project tap repository (`zephium-browser/homebrew-tap`) is not public
+yet, so the tap command below is pending publication. Until it exists, install
+the cask directly from a checkout of this repository:
+
+```sh
+brew install --cask ./packaging/homebrew/Casks/zephium.rb
+```
+
+Once the tap is public, the published form will be:
+
 ```sh
 brew tap zephium-browser/tap https://github.com/zephium-browser/homebrew-tap
 brew install --cask zephium-browser/tap/zephium
@@ -16,8 +26,10 @@ brew install --cask zephium-browser/tap/zephium
 
 `brew upgrade --cask zephium-browser/tap/zephium` picks up a new version once
 the tap is updated. `brew uninstall --cask zephium-browser/tap/zephium` removes
-the app and, through the `zap` stanza, Zephium's support, container, cache,
-preference, saved-state and WebKit directories.
+the app only. To also remove Zephium's support, container, cache, preference,
+saved-state and WebKit directories through the `zap` stanza, use
+`brew uninstall --zap --cask zephium-browser/tap/zephium` (or the local cask
+path while the tap is pending) instead.
 
 ## Keeping version and sha256 in sync
 

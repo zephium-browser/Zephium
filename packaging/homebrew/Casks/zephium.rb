@@ -9,6 +9,7 @@ cask "zephium" do
   homepage "https://zephium.app"
 
   depends_on arch: :arm64
+  depends_on macos: ">= :sonoma"
 
   app "Zephium.app"
 
