@@ -1,4 +1,546 @@
-rue,
+//! Revisioned privileged-chrome projections.
+
+use std::collections::HashSet;
+
+use super::*;
+
+#[derive(Default)]
+struct SidebarProjection {
+    nodes: Vec<SidebarNodeView>,
+    tabs: Vec<TabView>,
+    visited_ids: HashSet<ItemId>,
+    tab_ids: HashSet<ItemId>,
+}
+
+impl Shell {
+    pub(super) fn project_page_permission_prompt(&self) {
+        let prompt =
+            self.page_permissions
+                .visible()
+                .and_then(|(profile, item, request, processing)| {
+                    let kinds = match request.kind {
+                    zephium_core::permissions::PagePermissionRequestKind::Single(kind) => {
+                        page_permission_kind_view(kind).into_iter().collect()
+                    }
+                    zephium_core::permissions::PagePermissionRequestKind::CameraAndMicrophone => {
+                        vec![
+                            PagePermissionKindView::Camera,
+                            PagePermissionKindView::Microphone,
+                        ]
+                    }
+                };
+                    if kinds.is_empty() {
+                        return None;
+                    }
+                    Some(PagePermissionPromptEntryView {
+                        profile_id: profile.to_string(),
+                        item_id: item.to_string(),
+                        request_id: format!("{:016x}", request.id.get()),
+                        origin: request.origin.to_string(),
+                        kinds,
+                        rememberable: self.page_permissions.visible_rememberable(),
+                        processing,
+                        in_sidebar: self.page_permission_in_sidebar(),
+                        blocked_by_system: request.blocked_by_system,
+                    })
+                });
+        self.page_permissions
+            .record_projected_placement(prompt.as_ref().map(|prompt| prompt.in_sidebar));
+        (self.emit)(Projection::PagePermissionPrompt(PagePermissionPromptView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            prompt,
+        }));
+    }
+
+    /// Projects only the focused profile and exact active tab. A missing or
+    /// stale native snapshot is represented by an empty replacement cohort;
+    /// old buttons can never survive a focus/surface transition by inference.
+    pub(super) fn project_extension_actions(&self, profile: ProfileId) {
+        let Some(window) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+        else {
+            return;
+        };
+        let surface = self
+            .extension_browser_surfaces
+            .published_surface(profile)
+            .filter(|surface| {
+                surface
+                    .windows()
+                    .first()
+                    .and_then(zephium_core::extensions::ExtensionBrowserWindow::active)
+                    == window.active
+            });
+        let tab = surface.and_then(|surface| {
+            surface
+                .windows()
+                .first()
+                .and_then(zephium_core::extensions::ExtensionBrowserWindow::active)
+                .map(|tab| (tab, surface.generation()))
+        });
+        let actions = tab.map_or_else(Vec::new, |(tab, generation)| {
+            self.extension_actions
+                .projected_actions(profile, tab, generation)
+        });
+        (self.emit)(Projection::ExtensionActions(ExtensionActionsView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            profile_id: profile.to_string(),
+            tab_id: tab.map(|(tab, _)| tab.to_string()),
+            actions,
+        }));
+    }
+
+    pub(super) fn project_extension_action_failure(
+        &self,
+        profile: ProfileId,
+        expected_tab: Option<ItemId>,
+        reason: zephium_core::extensions::ExtensionActionRejection,
+    ) {
+        let Some(tab) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+            .and_then(|window| window.active)
+            .filter(|tab| expected_tab.is_none_or(|expected| expected == *tab))
+        else {
+            return;
+        };
+        (self.emit)(Projection::ExtensionActionFailed(
+            ExtensionActionFailedView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                profile_id: profile.to_string(),
+                tab_id: tab.to_string(),
+                reason: extension_action_failure_view(reason),
+            },
+        ));
+    }
+
+    pub(super) fn project_extension_action_shortcut(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        tab: ItemId,
+        action_revision: zephium_core::extensions::ExtensionActionRevision,
+    ) {
+        let current = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == runtime.profile() && window.active == Some(tab))
+            .is_some();
+        if !current {
+            return;
+        }
+        (self.emit)(Projection::ExtensionActionShortcut(
+            ExtensionActionShortcutView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                profile_id: runtime.profile().to_string(),
+                tab_id: tab.to_string(),
+                runtime: ExtensionActionRuntimeView {
+                    install_id: runtime.install_id().to_string(),
+                    generation: format!("{:016x}", runtime.generation().get()),
+                },
+                action_revision: format!("{:016x}", action_revision.get()),
+            },
+        ));
+    }
+
+    pub(super) fn project_runtime_status(&self) {
+        (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
+            restart_required: self.runtime_restart_required,
+            // A profile's tabs already say why; the pill names the restart
+            // the person can act on, which then also adopts any new runtime.
+            restart_reason: self.runtime_restart_required.then_some(
+                if self.restart_profiles.is_empty() {
+                    zephium_ipc::RuntimeRestartReason::RuntimeUpdate
+                } else {
+                    zephium_ipc::RuntimeRestartReason::Profile
+                },
+            ),
+            session_set_aside: self.session_set_aside,
+            user_content_degraded_scope_count: self.user_content_status.degraded_scope_count(),
+            security_advisories: self
+                .engine
+                .runtime_security_advisories()
+                .iter()
+                .map(runtime_security_advisory_view)
+                .collect(),
+        }));
+    }
+
+    pub(super) fn reconcile_runtime_restart_requirement(&mut self) -> bool {
+        if self.runtime_restart_required || !self.engine.runtime_restart_required() {
+            return false;
+        }
+        self.runtime_restart_required = true;
+        self.project_runtime_status();
+        true
+    }
+
+    pub(super) fn project_items(&self) {
+        if let Some(window) = self.windows.focused() {
+            if let Some(profile) = self.profiles.get(window.profile) {
+                (self.emit)(Projection::PanelOwner(zephium_ipc::PanelOwner {
+                    private: profile.kind == zephium_core::profiles::ProfileKind::Incognito,
+                    window_id: window.id.to_string(),
+                    profile_id: profile.id.to_string(),
+                    profile_name: profile.name.clone(),
+                    space_id: window.space.to_string(),
+                }));
+            }
+        }
+        self.project_blocker_status();
+        self.project_media_player();
+        if let Some(snapshot) = self.items_snapshot() {
+            self.announce_icon_owner();
+            self.publish_icons();
+            if self.items_already_offered(&snapshot) {
+                return;
+            }
+            (self.emit)(Projection::Items(snapshot));
+        }
+    }
+
+    /// Every committed action used to resend the whole sidebar, though many
+    /// change nothing in it. Only the revision differs between equal
+    /// snapshots; a tab's own changes in between arrived as its deltas, and
+    /// the snapshot after one differs from the last offered.
+    fn items_already_offered(&self, snapshot: &ItemsState) -> bool {
+        let Ok(mut last) = self.presentation.last_items.try_borrow_mut() else {
+            return false;
+        };
+        let same = last.as_ref().is_some_and(|offered| {
+            offered.profile == snapshot.profile
+                && offered.spaces == snapshot.spaces
+                && offered.active_space_id == snapshot.active_space_id
+                && offered.nodes == snapshot.nodes
+                && offered.tabs == snapshot.tabs
+                && offered.active == snapshot.active
+                && offered.split_group == snapshot.split_group
+        });
+        if !same {
+            *last = Some(snapshot.clone());
+        }
+        same
+    }
+
+    /// Chrome lost what it held (its document reloaded): the next snapshot goes out whole.
+    pub(super) fn forget_offered_items(&self) {
+        if let Ok(mut last) = self.presentation.last_items.try_borrow_mut() {
+            *last = None;
+        }
+        if let Ok(mut last) = self.presentation.last_media_player.try_borrow_mut() {
+            *last = None;
+        }
+    }
+
+    pub(super) fn items_snapshot(&self) -> Option<ItemsState> {
+        let win = self.windows.focused()?;
+        self.select_icon_profile(zephium_ipc::IconSurface::Chrome, win.profile);
+        self.items_snapshot_from(
+            &self.profiles,
+            &self.spaces,
+            &self.items,
+            win.profile,
+            win.space,
+            win.active,
+            win.splits.as_ref(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // One projection of a single session scope.
+    fn items_snapshot_from(
+        &self,
+        profiles: &Profiles,
+        spaces: &Spaces,
+        items: &Items,
+        profile_id: ProfileId,
+        space_id: SpaceId,
+        active: Option<ItemId>,
+        splits: Option<&Pane>,
+    ) -> Option<ItemsState> {
+        let profile = profiles.get(profile_id)?;
+        let active_space = spaces
+            .get(space_id)
+            .filter(|space| space.profile == profile.id)?;
+
+        let profile_view = ProfileView {
+            id: profile.id.to_string(),
+            name: profile.name.clone(),
+            kind: match profile.kind {
+                ProfileKind::Default => ProfileKindView::Default,
+                ProfileKind::Named => ProfileKindView::Named,
+                ProfileKind::Incognito => ProfileKindView::Incognito,
+            },
+        };
+        let spaces = spaces
+            .iter()
+            .filter(|space| space.profile == profile.id)
+            .map(|space| self.space_view(space))
+            .collect();
+
+        let mut sidebar = SidebarProjection::default();
+        for (placement, section) in [
+            (
+                Placement::Favorites {
+                    space: active_space.id,
+                },
+                SidebarSectionView::Favorites,
+            ),
+            (
+                Placement::Space {
+                    space: active_space.id,
+                    section: SpaceSection::Pinned,
+                },
+                SidebarSectionView::Pinned,
+            ),
+            (
+                Placement::Space {
+                    space: active_space.id,
+                    section: SpaceSection::Today,
+                },
+                SidebarSectionView::Today,
+            ),
+        ] {
+            for id in items.roots(placement) {
+                self.project_sidebar_node(
+                    items,
+                    *id,
+                    None,
+                    placement,
+                    section,
+                    profile.id,
+                    &mut sidebar,
+                );
+            }
+        }
+
+        let split_group = splits.and_then(|tree| {
+            let members = tree.tabs();
+            let mut unique = HashSet::with_capacity(members.len());
+            let valid = (2..=MAX_VISIBLE_PANES).contains(&members.len())
+                && members
+                    .iter()
+                    .all(|id| unique.insert(*id) && sidebar.tab_ids.contains(id));
+            valid.then(|| SplitGroupView {
+                members: members.into_iter().map(|id| id.to_string()).collect(),
+            })
+        });
+        self.record_tab_projection_revisions(&sidebar.tabs);
+        if let Ok(mut views) = self.presentation.last_tab_views.try_borrow_mut() {
+            views.retain(|id, _| self.items.tab(*id).is_some());
+        }
+        Some(ItemsState {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            profile: Some(profile_view),
+            spaces,
+            active_space_id: Some(active_space.id.to_string()),
+            nodes: sidebar.nodes,
+            tabs: sidebar.tabs,
+            active: active
+                .filter(|id| sidebar.tab_ids.contains(id))
+                .map(|id| id.to_string()),
+            split_group,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)] // Bounded recursive projection retains its exact scope.
+    fn project_sidebar_node(
+        &self,
+        items: &Items,
+        id: ItemId,
+        parent: Option<ItemId>,
+        placement: Placement,
+        section: SidebarSectionView,
+        profile: ProfileId,
+        projection: &mut SidebarProjection,
+    ) {
+        let Some(item) = items
+            .get(id)
+            .filter(|item| item.parent == parent && item.placement == placement)
+        else {
+            return;
+        };
+        if !projection.visited_ids.insert(id) {
+            return;
+        }
+
+        let id_string = id.to_string();
+        let kind = match &item.kind {
+            ItemKind::Folder { name } => SidebarNodeKindView::Folder { name: name.clone() },
+            ItemKind::Tab(tab) => {
+                projection.tab_ids.insert(id);
+                projection
+                    .tabs
+                    .push(self.generic_tab_view(id, tab, Some(profile)));
+                SidebarNodeKindView::Tab {
+                    tab_id: id_string.clone(),
+                }
+            }
+        };
+        projection.nodes.push(SidebarNodeView {
+            id: id_string,
+            parent_id: parent.map(|id| id.to_string()),
+            section,
+            kind,
+        });
+
+        if matches!(item.kind, ItemKind::Folder { .. }) {
+            for child in items.children(id) {
+                self.project_sidebar_node(
+                    items,
+                    *child,
+                    Some(id),
+                    placement,
+                    section,
+                    profile,
+                    projection,
+                );
+            }
+        }
+    }
+
+    pub(super) fn project_tab(&self, id: ItemId) {
+        if let Some(window) = self.mini_window_of(id) {
+            self.project_mini(window);
+            return;
+        }
+        if self
+            .windows
+            .focused()
+            .is_some_and(|window| window.active == Some(id))
+        {
+            self.project_blocker_status();
+        }
+        let profile = self.profile_of_item(id);
+        if let Some(tab) = self.items.tab(id) {
+            let projection = self.generic_tab_view(id, tab, profile);
+            self.record_tab_projection_revision(id, &projection.projection_revision);
+            self.publish_icons();
+            (self.emit)(Projection::Tab(projection));
+        }
+        self.project_media_player();
+    }
+
+    fn record_tab_projection_revisions(&self, tabs: &[TabView]) {
+        let Ok(mut revisions) = self
+            .presentation
+            .last_tab_projection_revision
+            .try_borrow_mut()
+        else {
+            // The shell actor is single-threaded and these borrows never span
+            // callbacks. Retaining the older value fails closed by making an
+            // otherwise valid presentation callback stale.
+            return;
+        };
+        for tab in tabs {
+            if let Some(id) = ItemId::parse(&tab.id) {
+                revisions.insert(id, tab.projection_revision.clone());
+            }
+        }
+    }
+
+    pub(super) fn record_tab_projection_revision(&self, id: ItemId, revision: &str) {
+        if let Ok(mut revisions) = self
+            .presentation
+            .last_tab_projection_revision
+            .try_borrow_mut()
+        {
+            revisions.insert(id, revision.to_owned());
+        }
+    }
+
+    pub(super) fn generic_tab_view(
+        &self,
+        id: ItemId,
+        tab: &TabState,
+        profile: Option<ProfileId>,
+    ) -> TabView {
+        let mut view = self.presentation_tab_view(id, tab, self.tab_icon(id, tab, profile));
+        if self
+            .presentation
+            .deferred_first_content_layout
+            .contains(&id)
+        {
+            // A full Items snapshot may still be necessary for focus or tab
+            // topology. Preserve that delivery while ensuring the exact
+            // presentation eval remains the first URL-bearing projection.
+            view.url = None;
+            view.title = "New Tab".into();
+            view.loading = false;
+            view.can_go_back = false;
+            view.can_go_forward = false;
+            view.icon = None;
+            view.availability = None;
+            view.zoom = None;
+        }
+        self.stable_revision(id, view)
+    }
+
+    /// Keeps the revision of a tab whose view did not change since it was
+    /// last offered; a changed view keeps its new revision and is remembered.
+    fn stable_revision(&self, id: ItemId, view: TabView) -> TabView {
+        if let Ok(views) = self.presentation.last_tab_views.try_borrow() {
+            if let Some(previous) = views.get(&id) {
+                let unchanged = TabView {
+                    projection_revision: previous.projection_revision.clone(),
+                    ..view.clone()
+                };
+                if unchanged == *previous {
+                    return unchanged;
+                }
+            }
+        }
+        self.remember_tab_view(id, &view);
+        view
+    }
+
+    pub(super) fn remember_tab_view(&self, id: ItemId, view: &TabView) {
+        if let Ok(mut views) = self.presentation.last_tab_views.try_borrow_mut() {
+            views.insert(id, view.clone());
+        }
+    }
+
+    pub(super) fn presentation_tab_view(
+        &self,
+        id: ItemId,
+        tab: &TabState,
+        icon: Option<zephium_ipc::IconRef>,
+    ) -> TabView {
+        let mut view = tab_view(id, tab, icon, self.next_projection_revision());
+        view.zoom = self.zoom_view(id, tab);
+        view.audio = (tab.audio.muted || tab.audio.shown()).then(|| zephium_ipc::TabAudioView {
+            muted: tab.audio.muted,
+            can_mute: self.engine.can_mute(),
+        });
+        if self.crash.presentations.contains(&id) && view.failure.is_none() {
+            view.failure = view.url.clone().map(|url| zephium_ipc::TabFailure {
+                url,
+                reason: zephium_ipc::TabFailureReason::Crashed,
+                certificate: None,
+                can_continue: false,
+                blocked: None,
+                covers_page: false,
+            });
+        }
+        // A profile only a restart can trust again says so on every tab, in
+        // place of whatever its views last failed with.
+        if self
+            .profile_of_item(id)
+            .is_some_and(|profile| self.restart_profiles.contains(&profile))
+        {
+            view.failure = Some(zephium_ipc::TabFailure {
+                url: view
+                    .failure
+                    .take()
+                    .map(|failure| failure.url)
+                    .or_else(|| view.url.clone())
+                    .unwrap_or_default(),
+                reason: zephium_ipc::TabFailureReason::RestartRequired,
+                certificate: None,
+                can_continue: false,
+                blocked: None,
+                covers_page: true,
             });
         }
         view.certificate_exception = self.under_certificate_exception(id, tab);

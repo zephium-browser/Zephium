@@ -1,4 +1,229 @@
-<String>>(6)?,
+//! Compatibility storage readers, one-time migration, and legacy cleanup.
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+use zephium_core::ids::{ItemId, ProfileId, SpaceId};
+use zephium_core::item::{Placement, SpaceSection};
+use zephium_core::session::{
+    space_placements, PersistedItem, PersistedKind, PersistedSpace, SessionState,
+    MAX_ITEM_TREE_DEPTH,
+};
+
+use crate::{essentials, legacy, pane};
+
+use super::filesystem::{harden_registered_profile_files, regular_file_exists};
+use super::history::enforce_history_budget;
+use super::{invalid_data, Hub, MAX_NAME_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES};
+
+pub(crate) const LEGACY_IMPORT_STATE_KEY: &str = "internal.legacy_import_state";
+pub(crate) const LEGACY_HISTORY_MARKER: &str = "internal.legacy_history_imported";
+const LEGACY_SESSION_PURGE_MARKER: &str = "internal.legacy_session_purge_v1";
+pub(crate) const MAX_SPLIT_JSON_BYTES: usize = 256 * 1024;
+
+impl Hub {
+    #[allow(dead_code)] // retained only to read/migrate pre-v3 profile snapshots
+    fn save_profile(&mut self, profile: ProfileId, s: &SessionState) -> rusqlite::Result<()> {
+        let owns_item = |id: ItemId| {
+            s.items
+                .iter()
+                .find(|i| i.id == id)
+                .is_some_and(|i| owns_placement(profile, s, i.placement))
+        };
+        let focus_space = s
+            .active_space
+            .filter(|sp| s.spaces.iter().any(|x| x.id == *sp && x.profile == profile));
+        let focus_item = s.active_item.filter(|i| owns_item(*i));
+        let splits_json = s
+            .splits
+            .as_ref()
+            .filter(|t| t.tabs().iter().all(|id| owns_item(*id)))
+            .and_then(pane::to_json);
+
+        let conn = self.profile_conn(profile)?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM items", [])?;
+        tx.execute("DELETE FROM spaces", [])?;
+        {
+            let mut ins =
+                tx.prepare_cached("INSERT INTO spaces(id, name, position) VALUES (?1, ?2, ?3)")?;
+            for (i, sp) in s.spaces.iter().filter(|x| x.profile == profile).enumerate() {
+                ins.execute(params![sp.id.to_string(), sp.name, i as i64])?;
+            }
+        }
+        {
+            #[derive(PartialEq, Eq, Hash)]
+            enum Container {
+                Folder(ItemId),
+                Root(Placement),
+            }
+            let mut ins = tx.prepare_cached(
+                "INSERT INTO items(id, parent_id, space_id, section, position, kind, name, url, title, zoom)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            let mut counters: HashMap<Container, i64> = HashMap::new();
+            for item in s
+                .items
+                .iter()
+                .filter(|i| owns_placement(profile, s, i.placement))
+            {
+                let container = item
+                    .parent
+                    .map(Container::Folder)
+                    .unwrap_or(Container::Root(item.placement));
+                let pos = counters.entry(container).or_insert(0);
+                let (space_id, section) = match item.placement {
+                    Placement::Favorites { .. } => (None, "favorites"),
+                    Placement::Space { space, section } => {
+                        (Some(space.to_string()), section_to_str(section))
+                    }
+                    Placement::Mini { .. } => {
+                        return Err(invalid_data(
+                            "legacy session writer cannot encode a mini window page",
+                        ));
+                    }
+                };
+                let (kind, name, url, title, zoom) = match &item.kind {
+                    PersistedKind::Folder { name } => {
+                        ("folder", Some(name.as_str()), None, None, 1.0)
+                    }
+                    PersistedKind::Tab {
+                        url, title, zoom, ..
+                    } => ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom),
+                    PersistedKind::BrowserTab { .. } => {
+                        return Err(invalid_data(
+                            "legacy session writer cannot encode browser-owned tabs",
+                        ));
+                    }
+                };
+                ins.execute(params![
+                    item.id.to_string(),
+                    item.parent.map(|p| p.to_string()),
+                    space_id,
+                    section,
+                    *pos,
+                    kind,
+                    name,
+                    url,
+                    title,
+                    zoom
+                ])?;
+                *pos += 1;
+            }
+        }
+        tx.execute(
+            "INSERT INTO focus(id, active_space, active_item, splits) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET active_space = ?1, active_item = ?2, splits = ?3",
+            params![
+                focus_space.map(|x| x.to_string()),
+                focus_item.map(|x| x.to_string()),
+                splits_json
+            ],
+        )?;
+        tx.commit()
+    }
+
+    pub(super) fn load_profile(
+        &mut self,
+        profile: ProfileId,
+        out: &mut SessionState,
+        focused: bool,
+        space_budget: usize,
+        item_budget: usize,
+    ) -> rusqlite::Result<()> {
+        if let Some(dir) = &self.dir {
+            let path = dir.join(format!("profile-{profile}.sqlite"));
+            if !regular_file_exists(&path)? {
+                return Err(invalid_data("compatibility profile database is missing"));
+            }
+        }
+        let conn = self.profile_conn(profile)?;
+
+        let space_count = conn.query_row("SELECT count(*) FROM spaces", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        if !(0..=space_budget as i64).contains(&space_count) {
+            return Err(invalid_data(
+                "compatibility spaces exceed persistence limit",
+            ));
+        }
+        let spaces: Vec<PersistedSpace> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, name FROM spaces
+                 WHERE length(CAST(id AS BLOB)) <= 26
+                   AND length(CAST(name AS BLOB)) <= ?1
+                 ORDER BY position
+                 LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(params![MAX_NAME_BYTES as i64, space_budget as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+            let mut spaces = Vec::with_capacity(space_count as usize);
+            for row in rows {
+                let (raw, name) = row?;
+                let id = SpaceId::parse(&raw)
+                    .filter(|id| id.to_string() == raw)
+                    .ok_or_else(|| invalid_data("compatibility space has an invalid id"))?;
+                spaces.push(PersistedSpace {
+                    id,
+                    profile,
+                    name,
+                    look: Default::default(),
+                });
+            }
+            if spaces.len() != space_count as usize {
+                return Err(invalid_data(
+                    "compatibility space rows were filtered by persistence limits",
+                ));
+            }
+            spaces
+        };
+
+        struct Row {
+            id: ItemId,
+            parent: Option<ItemId>,
+            placement: Placement,
+            position: i64,
+            kind: PersistedKind,
+        }
+        let item_count =
+            conn.query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))?;
+        if !(0..=item_budget as i64).contains(&item_count) {
+            return Err(invalid_data("compatibility items exceed persistence limit"));
+        }
+        let rows: Vec<Row> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, parent_id, space_id, section, position, kind, name, url, title, zoom
+                 FROM items
+                 WHERE length(CAST(id AS BLOB)) <= 26
+                   AND (parent_id IS NULL OR length(CAST(parent_id AS BLOB)) <= 26)
+                   AND (space_id IS NULL OR length(CAST(space_id AS BLOB)) <= 26)
+                   AND length(CAST(section AS BLOB)) <= 16
+                   AND length(CAST(kind AS BLOB)) <= 16
+                   AND (name IS NULL OR length(CAST(name AS BLOB)) <= ?1)
+                   AND (url IS NULL OR length(CAST(url AS BLOB)) <= ?2)
+                   AND (title IS NULL OR length(CAST(title AS BLOB)) <= ?3)
+                 LIMIT ?4",
+            )?;
+            let mapped = stmt.query_map(
+                params![
+                    MAX_NAME_BYTES as i64,
+                    MAX_URL_BYTES as i64,
+                    MAX_TITLE_BYTES as i64,
+                    item_budget as i64
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, Option<String>>(6)?,
                         r.get::<_, Option<String>>(7)?,
                         r.get::<_, Option<String>>(8)?,
                         r.get::<_, f64>(9)?,

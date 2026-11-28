@@ -1,4 +1,1700 @@
- Serialize, Deserialize, Type)]
+//! Typed contract between the Rust core and the frame. Pure data, no tauri;
+//! the desktop crate maps `Projection` onto typed events and exports the TS
+//! bindings. ULIDs cross the boundary as strings.
+
+use serde::{Deserialize, Serialize};
+use specta::Type;
+
+pub mod page_assist;
+mod time;
+pub mod work;
+mod zoom;
+
+pub use time::*;
+pub use zoom::*;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct TabView {
+    pub id: String,
+    /// Process-local monotonically increasing projection revision, encoded as
+    /// fixed-width hexadecimal so JavaScript can compare it without losing
+    /// integer precision. Privileged chrome rejects an older per-tab delta
+    /// after a newer presentation barrier has applied.
+    pub projection_revision: String,
+    pub title: String,
+    pub url: Option<String>,
+    /// Explicit content owner. Internal pages never carry a navigable URL.
+    #[serde(default)]
+    pub content: TabContentView,
+    pub loading: bool,
+    /// What the page asked for that waits on the person.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request: Option<PageRequestView>,
+    /// Names the request shown, for its answer.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request_serial: Option<u32>,
+    /// Transient native residency state. It never replaces the committed URL
+    /// or title, and an explicit retry remains a fresh navigation intent.
+    #[serde(default)]
+    #[specta(optional)]
+    pub availability: Option<TabAvailability>,
+    /// The last navigation the person asked for that did not load, until the
+    /// next attempt or commit. Never carries native error text.
+    #[serde(default)]
+    #[specta(optional)]
+    pub failure: Option<TabFailure>,
+    /// The page is from an origin whose certificate the person chose to
+    /// continue past; chrome must never show it as secure.
+    #[serde(default)]
+    pub certificate_exception: bool,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub icon: Option<IconRef>,
+    /// A mark the person chose for an Essential. Chrome shows it instead of
+    /// the favicon, but never in place of the page title in labels.
+    #[serde(default)]
+    #[specta(optional)]
+    pub custom_icon: Option<SpaceIconView>,
+    #[serde(default)]
+    #[specta(optional)]
+    pub capture: Option<MediaCaptureView>,
+    /// The page's zoom in whole percent, while the tab has a page to zoom. It
+    /// is the level just asked for until the view reports it applied.
+    #[serde(default)]
+    #[specta(optional)]
+    pub zoom: Option<u16>,
+    /// Present while the page plays sound, and for as long as it is muted.
+    #[serde(default)]
+    #[specta(optional)]
+    pub audio: Option<TabAudioView>,
+}
+
+/// The sidebar's player: the media of the tab that most recently started
+/// playing off screen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MediaPlayerView {
+    pub tab_id: String,
+    /// The page's own name for what plays, else the tab's title.
+    pub title: String,
+    /// The page's artist, else the site.
+    pub artist: String,
+    pub icon: Option<IconRef>,
+    /// Seconds; absent while unknown and for a live stream.
+    pub duration: Option<f64>,
+    /// Seconds, as of this projection; chrome advances it by `rate` while
+    /// `playing` and not `waiting`.
+    pub position: f64,
+    pub rate: f64,
+    pub playing: bool,
+    pub waiting: bool,
+    pub can_pip: bool,
+    pub in_pip: bool,
+    pub muted: bool,
+    pub can_mute: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaPlayerAction {
+    Play,
+    Pause,
+    Seek {
+        seconds: f64,
+    },
+    PictureInPicture,
+    /// Brings the tab to front, in its own space.
+    Show,
+    /// Closes the player until the tab plays something else.
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabAudioView {
+    pub muted: bool,
+    /// The engine can mute this tab; without it the speaker only informs.
+    pub can_mute: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PageRequestView {
+    /// Open a link in another application. `app` is its name when the system
+    /// knows one; `scheme` names the kind of link otherwise.
+    ExternalApp {
+        site: Option<String>,
+        scheme: String,
+        app: Option<String>,
+    },
+    /// A new tab the page tried to open; `host` is set when it can be opened.
+    /// `site` is the host of the page asking, when its profile can always
+    /// allow that site's pop-ups.
+    Popup {
+        host: Option<String>,
+        site: Option<String>,
+    },
+    /// The native address was unreadable or too long. Dismissal only.
+    NavigationRefused { embedded: bool },
+    /// The site, or its proxy, asks to sign in. Never carries the server's
+    /// own text.
+    HttpAuth {
+        request: u32,
+        /// Host, with its port when not the scheme's default.
+        host: String,
+        /// Plain http: the password would cross the network readable.
+        insecure: bool,
+        proxy: bool,
+        /// The last username or password was wrong.
+        retry: bool,
+    },
+    /// The site wants to save a file. `allowed` says the site may already
+    /// download and only this unclicked download is asked about.
+    Download {
+        request: u32,
+        site: String,
+        filename: String,
+        allowed: bool,
+        unclicked: bool,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; `host` is the
+    /// page's host.
+    InsecureAutofill { host: String },
+    /// The page stopped responding: wait for it, or reload it.
+    Unresponsive,
+}
+
+/// What the person typed into a sign-in prompt. Deliberately not Debug or
+/// Clone: it moves straight into wiped storage.
+#[derive(Deserialize, Type)]
+pub struct SignInCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRequestAnswer {
+    Allow,
+    AlwaysAllow,
+    Dismiss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureDeviceStateView {
+    None,
+    Active,
+    Muted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MediaCaptureView {
+    pub navigation_id: String,
+    pub camera: CaptureDeviceStateView,
+    pub microphone: CaptureDeviceStateView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabFailure {
+    pub url: String,
+    pub reason: TabFailureReason,
+    /// For a refused certificate, what the engine could tell about it.
+    #[serde(default)]
+    #[specta(optional)]
+    pub certificate: Option<TabCertificateProblem>,
+    /// The refused certificate is on a host on the person's own network, so
+    /// they may continue past it. Never true for a public name.
+    #[serde(default)]
+    pub can_continue: bool,
+    /// For a page the filter lists refused, why.
+    #[serde(default)]
+    #[specta(optional)]
+    pub blocked: Option<TabBlockReason>,
+    /// The page that was showing is gone; the failure stands in its place
+    /// until another page opens, even while one loads.
+    #[serde(default)]
+    pub covers_page: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabCertificateProblem {
+    /// Expired, or not valid yet.
+    Expired,
+    /// Self-signed, or from an issuer the system does not trust.
+    Untrusted,
+    NameMismatch,
+    Revoked,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabFailureReason {
+    Offline,
+    HostNotFound,
+    Unreachable,
+    TimedOut,
+    Insecure,
+    /// The page's process ended and it could not be brought back on its own.
+    Crashed,
+    /// The profile's browser engine can be trusted again only after Zephium
+    /// restarts; every tab in it says so.
+    RestartRequired,
+    /// The filter lists refused the page; `blocked` says why.
+    Blocked,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TabAvailability {
+    Sleeping,
+    WaitingForCapacity { url: String },
+    BlockedByCapacity { url: String },
+}
+
+/// Browser chrome's bounded tab renderer choice. Future extension-owned
+/// documents can add a separate variant without treating them as page URLs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabContentView {
+    #[default]
+    Web,
+    Settings,
+    Extensions,
+    ExtensionOwned,
+    Source,
+}
+
+/// Names a cached site icon without carrying its pixels. Chrome keeps rasters
+/// by key and repaints only when `revision` changes, so a projection costs
+/// a short string per tab instead of a five-kilobyte raster.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct IconRef {
+    /// A site's origin, or one page of it (origin and path) that wears an icon
+    /// of its own. Chrome treats it as an opaque key.
+    pub origin: String,
+    pub revision: String,
+}
+
+/// One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
+/// decodes a page-controlled image format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FaviconEntry {
+    /// The key an `IconRef` names the raster by.
+    pub origin: String,
+    pub revision: String,
+    pub rgba: String,
+}
+
+/// Which privileged webview a raster is destined for. Each keeps its own
+/// cache, so delivery is tracked per surface rather than broadcast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum IconSurface {
+    Chrome,
+    Panel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FaviconsView {
+    pub surface: IconSurface,
+    pub profile_id: String,
+    pub entries: Vec<FaviconEntry>,
+}
+
+/// Non-authorizing identity for one live extension runtime. Privileged chrome
+/// may echo this value only as part of an action gesture; the Shell rejoins it
+/// to the focused profile, active tab, browser-surface generation, and current
+/// action revision before any native work is admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionRuntimeView {
+    pub install_id: String,
+    /// Process-local nonzero generation, encoded as fixed-width hexadecimal
+    /// so JavaScript never rounds a Rust `u64`.
+    pub generation: String,
+}
+
+/// One effective toolbar action for the focused profile's active logical tab.
+/// Labels and badges are bounded before this projection is constructed. The
+/// optional icon is the canonical base64 encoding of exactly 32x32 RGBA bytes;
+/// privileged chrome performs no extension-controlled image decoding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionView {
+    pub runtime: ExtensionActionRuntimeView,
+    pub revision: String,
+    pub label: String,
+    pub badge: String,
+    pub icon_rgba_base64: Option<String>,
+    pub enabled: bool,
+    pub presents_popup: bool,
+    pub unread_badge: bool,
+}
+
+/// Exact replacement action cohort. An empty `actions` collection removes all
+/// previously visible actions for this profile/tab. The frame additionally
+/// joins `profile_id` and `tab_id` to its current Items projection, so event
+/// reordering cannot expose a stale action after focus changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionsView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub tab_id: Option<String>,
+    pub actions: Vec<ExtensionActionView>,
+}
+
+/// Closed, sanitized reason why a trusted toolbar gesture could not complete.
+/// Native strings, extension content, URLs, and runtime identities are never
+/// forwarded through this transient user-notice channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActionFailure {
+    InvalidRequest,
+    RuntimeUnavailable,
+    RuntimeSuperseded,
+    TabUnavailable,
+    TabDiscarded,
+    ActionUnavailable,
+    ActionDisabled,
+    CapacityExceeded,
+    PopupUnavailable,
+    PopupCapacityExceeded,
+    NativeAdmissionFailed,
+    ShuttingDown,
+    UnsupportedPlatform,
+}
+
+/// Actor-ordered, context-bound transient failure notice. The revision lets
+/// privileged chrome discard a delayed eval and present each current failure
+/// at most once; the profile/tab join prevents a late native refusal from
+/// appearing after the user has switched context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionFailedView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub tab_id: String,
+    pub reason: ExtensionActionFailure,
+}
+
+/// One actor-ordered request for privileged chrome to invoke the exact
+/// browser-owned action button already projected for the focused tab. The
+/// frame contributes only that button's current geometry; every authorizing
+/// identity is revalidated by Shell and the native host on the normal action
+/// path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionShortcutView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub tab_id: String,
+    pub runtime: ExtensionActionRuntimeView,
+    pub action_revision: String,
+}
+
+/// Closed page capability names rendered by browser-owned chrome. Native
+/// permission strings and page-controlled labels never cross this boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PagePermissionKindView {
+    Camera,
+    Microphone,
+    Geolocation,
+}
+
+/// One exact, foreground page-permission request. Every identity is an opaque
+/// stale fence: privileged chrome may only echo it back to the Shell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PagePermissionPromptEntryView {
+    pub profile_id: String,
+    pub item_id: String,
+    pub request_id: String,
+    pub origin: String,
+    pub kinds: Vec<PagePermissionKindView>,
+    /// False for ephemeral profiles; chrome must not offer durable policy.
+    pub rememberable: bool,
+    /// True while an exact durable remember-decision transaction is pending.
+    pub processing: bool,
+    /// Shown as a card under the address field of the expanded sidebar, with
+    /// the page still on screen. Otherwise a window-modal sheet, with the
+    /// page taken off screen until it is answered.
+    pub in_sidebar: bool,
+    /// The operating system refuses Zephium this capability; chrome says
+    /// where to turn it on.
+    pub blocked_by_system: bool,
+}
+
+/// Exact replacement for the one process-wide page permission surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PagePermissionPromptView {
+    pub projection_revision: String,
+    pub prompt: Option<PagePermissionPromptEntryView>,
+}
+
+/// A kind of decision Site settings lists. Which kinds a platform keeps is
+/// in `SitePermissionsView::kinds`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SitePermissionKindView {
+    Camera,
+    Microphone,
+    Geolocation,
+    Notifications,
+    ClipboardRead,
+    Midi,
+    Sensors,
+    LocalFonts,
+    AutomaticDownloads,
+    Popups,
+    Downloads,
+    AppLinks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SitePermissionDecisionView {
+    Allow,
+    Block,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SitePermissionView {
+    /// Canonical origin, such as `https://meet.example`.
+    pub origin: String,
+    pub kind: SitePermissionKindView,
+    pub decision: SitePermissionDecisionView,
+    /// The kind of application link, for `app_links`.
+    pub scheme: Option<String>,
+}
+
+/// The focused profile's saved site decisions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SitePermissionsView {
+    /// A private profile saves nothing; its list is always empty.
+    pub private: bool,
+    /// False when some decisions could not be read right now.
+    pub complete: bool,
+    /// The kinds this platform keeps, in display order.
+    pub kinds: Vec<SitePermissionKindView>,
+    pub entries: Vec<SitePermissionView>,
+}
+
+/// An extension's run-time request for access, awaiting the user's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionAccessRequestView {
+    pub profile_id: String,
+    pub request: String,
+    pub extension_id: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+/// A person clicked the install button the browser showed on the Web Store
+/// listing in `tab_id`, which is still the active tab of the focused window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionStoreClickView {
+    pub tab_id: String,
+    pub extension_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRemovalView {
+    pub profile_id: String,
+    pub extension_id: String,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+/// The one retained split group owned by the focused window. Members are
+/// normalized references into [`ItemsState::tabs`] in native pane traversal
+/// order; geometry and mutable divider ratios remain native-only authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct SplitGroupView {
+    pub members: Vec<String>,
+}
+
+/// Focused profile metadata. Profile isolation and lifecycle remain native
+/// authority; this view is display-only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileView {
+    pub id: String,
+    pub name: String,
+    pub kind: ProfileKindView,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKindView {
+    Default,
+    Named,
+    Incognito,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAvatarStyleView {
+    Initials,
+    Symbol,
+    Photo,
+}
+
+/// How a profile is drawn. Colour and symbol index the frame's curated sets;
+/// a photo is served by native under its revision, never sent as bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileAvatarView {
+    pub style: ProfileAvatarStyleView,
+    pub color: u8,
+    pub symbol: u8,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileEntryView {
+    pub id: String,
+    pub name: String,
+    pub kind: ProfileKindView,
+    pub avatar: ProfileAvatarView,
+}
+
+/// Every persistent profile, in order, and the one the window browses as.
+/// `private` is set while the window shows its private scope instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfilesView {
+    pub current: Option<String>,
+    pub private: bool,
+    /// The tabs of the private window while one exists, shown or set aside
+    /// behind the regular tabs.
+    #[serde(default)]
+    pub private_tabs: Option<u32>,
+    pub profiles: Vec<ProfileEntryView>,
+}
+
+/// One ordered space owned by the focused profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SpaceView {
+    pub id: String,
+    pub name: String,
+    pub icon: Option<SpaceIconView>,
+    /// An avatar hue, shared with profiles.
+    pub color: u8,
+    /// Overrides the app theme for the whole window while the space is active.
+    pub theme: Option<SpaceThemeView>,
+    /// Pinned and open tabs, which deleting the space closes.
+    pub tabs: u32,
+    /// The icons of its first tabs in sidebar order, at most three, for the
+    /// switcher to stack beside the name. A tab with no icon yet is null.
+    pub previews: Vec<Option<IconRef>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceIconView {
+    /// An index into the frame's curated symbols.
+    Symbol {
+        index: u8,
+    },
+    Emoji {
+        text: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceThemeView {
+    Preset {
+        id: String,
+    },
+    /// Seeds in the shape of `ui.theme-custom`.
+    Custom {
+        seeds: String,
+    },
+}
+
+/// Stable display section for a sidebar node. Children inherit their
+/// authoritative placement from the native item aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarSectionView {
+    Favorites,
+    Pinned,
+    Today,
+}
+
+/// A folder carries bounded display metadata; a tab is a normalized reference
+/// into [`ItemsState::tabs`]. The node id and tab id intentionally match, but
+/// the explicit reference keeps consumers from inferring that invariant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SidebarNodeKindView {
+    Folder { name: String },
+    Tab { tab_id: String },
+}
+
+/// One pre-order entry in the focused sidebar tree. Parents always precede
+/// descendants, sibling order is native aggregate order, and `parent_id` is
+/// `None` only for a section root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SidebarNodeView {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub section: SidebarSectionView,
+    pub kind: SidebarNodeKindView,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct ItemsState {
+    pub projection_revision: String,
+    /// `None` is reserved for the frame's cold pre-bootstrap state. Native
+    /// snapshots are emitted only with an exact focused profile and space.
+    pub profile: Option<ProfileView>,
+    pub spaces: Vec<SpaceView>,
+    pub active_space_id: Option<String>,
+    pub nodes: Vec<SidebarNodeView>,
+    /// Every tab referenced by `nodes`, in the same pre-order traversal.
+    pub tabs: Vec<TabView>,
+    pub active: Option<String>,
+    pub split_group: Option<SplitGroupView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "type")]
+pub enum SearchAction {
+    OpenNote { id: String },
+    ActivateTab { id: String },
+    OpenUrl { url: String },
+    RunCommand { id: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Notes,
+    Tasks,
+    Ai,
+    History,
+    Downloads,
+    Bookmarks,
+    Time,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SearchContext {
+    pub window_id: String,
+    pub session_id: String,
+    pub request_id: String,
+    pub profile_id: String,
+    pub space_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PanelIntent {
+    /// The hidden renderer has settled its asynchronous work.
+    Idle {
+        revision: String,
+    },
+    Search,
+    Dismiss,
+    /// Hands a destination to the browser, which already hosts its views, and
+    /// puts the launcher away.
+    Open {
+        tool: ToolKind,
+    },
+}
+
+/// A rectangle in the launcher's own coordinates: CSS pixels from the top-left
+/// of its window, which are points on every platform.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct PanelRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// What the launcher is showing, reported by its content. Native sizes the
+/// window to `height` and, where it draws the material itself, places the
+/// field and result shapes behind the content.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct PanelLayout {
+    pub height: f64,
+    pub field: PanelRect,
+    pub sheet: Option<PanelRect>,
+}
+
+impl PanelRect {
+    pub fn bounded(&self) -> bool {
+        [self.x, self.y, self.width, self.height]
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=4096.0).contains(value))
+    }
+}
+
+impl PanelLayout {
+    pub fn bounded(&self) -> bool {
+        self.height.is_finite()
+            && (0.0..=4096.0).contains(&self.height)
+            && self.field.bounded()
+            && self.sheet.as_ref().is_none_or(PanelRect::bounded)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TabSwitcherAction {
+    Step {
+        reverse: bool,
+    },
+    Select {
+        index: u32,
+    },
+    Commit,
+    Cancel,
+    Close,
+    /// Leaves the switcher for a new tab in its window.
+    NewTab,
+    /// Leaves the switcher for this tab, whatever is selected by then.
+    Activate {
+        tab_id: String,
+    },
+    /// Closes this tab, whatever is selected by then, and stays open.
+    CloseTab {
+        tab_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherEntry {
+    pub tab_id: String,
+    pub title: String,
+    pub url_host: String,
+    pub favicon: Option<IconRef>,
+    pub preview_url: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherState {
+    pub session_id: String,
+    pub window_id: String,
+    pub entries: Vec<TabSwitcherEntry>,
+    pub selected: u32,
+    pub keyboard: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PanelState {
+    pub switcher: Option<TabSwitcherState>,
+    pub window_id: Option<String>,
+    pub revision: String,
+    pub session_id: String,
+    pub visible: bool,
+    pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub space_id: Option<String>,
+    pub error: bool,
+    pub corner_radius: u16,
+    /// The address the launcher opens on when it edits the current page's.
+    pub seed: Option<String>,
+    /// The tab whose address is being edited; it is no destination of its own.
+    pub seed_tab: Option<String>,
+    /// An address chosen in this presentation opens in a new mini window.
+    pub mini: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct SearchResult {
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub icon: Option<IconRef>,
+    pub action: SearchAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct SearchResults {
+    #[serde(default)]
+    #[specta(optional)]
+    pub shortcut: Option<String>,
+    pub pending: bool,
+    pub context: Option<SearchContext>,
+    pub query: String,
+    /// Host the field may complete the typed text to. Native decides what is
+    /// confident enough to offer; the field still refuses to apply one that
+    /// does not extend exactly what the user has typed.
+    pub completion: Option<String>,
+    pub results: Vec<SearchResult>,
+}
+
+/// One request from a history surface. Reads and deletions share one bounded
+/// entry point, as resource calls do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryCall {
+    /// `before` is the id of the last visit already seen. Row ids and unix
+    /// seconds cross as decimal strings; JavaScript never parses a Rust i64.
+    Page {
+        query: String,
+        /// How far back the list reaches. The same scope Clear operates on,
+        /// so clearing removes exactly what the reader is looking at.
+        range: HistoryRange,
+        before: Option<String>,
+        limit: u16,
+    },
+    Forget {
+        urls: Vec<String>,
+    },
+    Clear {
+        range: HistoryRange,
+    },
+    /// Clears the visits at or after `since` (unix seconds). Only the shell
+    /// sends it, for a range the history surfaces do not offer.
+    #[serde(skip)]
+    ClearSince {
+        since: i64,
+    },
+    /// The tabs most recently closed in this profile, newest first.
+    ClosedTabs,
+    /// Reopens one of them, named by the id `ClosedTabs` gave.
+    ReopenClosed {
+        id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryRange {
+    Hour,
+    Day,
+    Week,
+    Everything,
+}
+
+impl HistoryRange {
+    /// Seconds of history the range covers, or None for all of it.
+    pub fn window_seconds(self) -> Option<i64> {
+        match self {
+            Self::Hour => Some(3600),
+            Self::Day => Some(24 * 3600),
+            Self::Week => Some(7 * 24 * 3600),
+            Self::Everything => None,
+        }
+    }
+}
+
+pub const MAX_HISTORY_PAGE_LIMIT: u16 = 200;
+pub const MAX_HISTORY_QUERY_BYTES: usize = 512;
+pub const MAX_HISTORY_FORGET_URLS: usize = 100;
+const MAX_HISTORY_URL_BYTES: usize = 8 * 1024;
+
+impl HistoryCall {
+    pub fn validate(&self) -> bool {
+        match self {
+            Self::Page {
+                query,
+                before,
+                limit,
+                ..
+            } => {
+                query.len() <= MAX_HISTORY_QUERY_BYTES
+                    && *limit > 0
+                    && *limit <= MAX_HISTORY_PAGE_LIMIT
+                    && before
+                        .as_ref()
+                        .is_none_or(|cursor| cursor.parse::<i64>().is_ok_and(|id| id > 0))
+            }
+            Self::Forget { urls } => {
+                !urls.is_empty()
+                    && urls.len() <= MAX_HISTORY_FORGET_URLS
+                    && urls.iter().all(|url| {
+                        url.len() <= MAX_HISTORY_URL_BYTES
+                            && url::Url::parse(url).is_ok_and(|target| {
+                                target.as_str().len() <= MAX_HISTORY_URL_BYTES
+                                    && zephium_core::navigation::is_allowed(&target)
+                            })
+                    })
+            }
+            Self::Clear { .. } | Self::ClosedTabs => true,
+            Self::ClearSince { since } => *since > 0,
+            Self::ReopenClosed { id } => zephium_core::ids::ClosedSessionId::parse(id)
+                .is_some_and(|parsed| parsed.to_string() == *id),
+        }
+    }
+}
+
+/// One recorded visit. Visits are not deduplicated by address: a history list
+/// shows every time a page was opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct HistoryVisitView {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub visited_at: String,
+    pub icon: Option<IconRef>,
+}
+
+/// A closed tab that can be reopened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ClosedTabView {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub icon: Option<IconRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HistoryResponse {
+    Page {
+        visits: Vec<HistoryVisitView>,
+        /// Cursor for the following page, absent once the list is exhausted.
+        next: Option<String>,
+    },
+    Removed {
+        count: u32,
+    },
+    ClosedTabs {
+        tabs: Vec<ClosedTabView>,
+    },
+    Reopened,
+    Error {
+        error: HistoryError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryError {
+    Invalid,
+    Unavailable,
+    Capacity,
+}
+
+/// How far back a browsing data clear reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowsingDataRange {
+    Hour,
+    Day,
+    Week,
+    FourWeeks,
+    Everything,
+}
+
+impl BrowsingDataRange {
+    /// Seconds the range covers, or None for all of time.
+    pub fn window_seconds(self) -> Option<i64> {
+        match self {
+            Self::Hour => Some(3600),
+            Self::Day => Some(24 * 3600),
+            Self::Week => Some(7 * 24 * 3600),
+            Self::FourWeeks => Some(28 * 24 * 3600),
+            Self::Everything => None,
+        }
+    }
+}
+
+/// One request from the browsing data surfaces: clearing what a profile's
+/// pages stored, and the sites it stored it for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrowsingDataCall {
+    /// Removes the chosen kinds from `range` back. `cookies` is cookies and
+    /// site data; `downloads` is the download list, never the files.
+    Clear {
+        range: BrowsingDataRange,
+        history: bool,
+        cookies: bool,
+        cache: bool,
+        downloads: bool,
+    },
+    /// The sites the profile holds cookies and site data for.
+    Sites,
+    /// Everything stored for one site, named as `Sites` names it.
+    ForgetSite { site: String },
+    /// Everything stored for the site of one page, named by its origin
+    /// (`https://host[:port]`), for a command on the page in front.
+    ForgetPage { origin: String },
+}
+
+impl BrowsingDataCall {
+    pub fn validate(&self) -> bool {
+        match self {
+            Self::Clear {
+                history,
+                cookies,
+                cache,
+                downloads,
+                ..
+            } => *history || *cookies || *cache || *downloads,
+            Self::Sites => true,
+            Self::ForgetSite { site } => zephium_core::browsing_data::is_site_name(site),
+            Self::ForgetPage { origin } => zephium_core::browsing_data::page_origin_host(origin)
+                .is_some_and(|host| zephium_core::browsing_data::is_site_name(&host)),
+        }
+    }
+}
+
+/// A site the profile holds data for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SiteDataView {
+    pub site: String,
+    pub cookies: bool,
+    pub storage: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowsingDataResponse {
+    Cleared,
+    /// Removed, but some of the site's data may remain: the engine would not
+    /// delete everything, or could not reach every place it is kept.
+    PartlyCleared,
+    Sites {
+        sites: Vec<SiteDataView>,
+        /// The engine can only name sites by some of what it holds: sites
+        /// with only storage and no cookies are missing from the list.
+        partial: bool,
+    },
+    Error {
+        error: BrowsingDataError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowsingDataError {
+    Invalid,
+    Unavailable,
+    Capacity,
+    /// The engine took the request and did not complete it.
+    Failed,
+    /// A private window keeps nothing to clear.
+    Private,
+}
+
+/// Where a find in the page in front landed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FindResultView {
+    /// The search this answers; chrome ignores results for older text.
+    pub query: String,
+    pub matches: u32,
+    /// One-based position of the current match, when the engine knows it.
+    pub active: Option<u32>,
+}
+
+/// Bookmark ids are store row ids; they cross as decimal strings, like
+/// history ids, so JavaScript never parses a Rust i64.
+pub fn bookmark_id(id: &str) -> Option<i64> {
+    id.parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0 && value.to_string() == id)
+}
+
+/// Raw title input chrome may send; the store trims and bounds what it keeps.
+pub const MAX_BOOKMARK_TITLE_INPUT_BYTES: usize = 2048;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BookmarkCall {
+    /// A folder's contents and the folders above it; no `folder` is the top
+    /// level.
+    List {
+        folder: Option<String>,
+    },
+    /// The listing of whichever folder holds `id`, so it can be shown in place.
+    Reveal {
+        id: String,
+    },
+    Search {
+        query: String,
+    },
+    AddFolder {
+        parent: Option<String>,
+        title: String,
+    },
+    /// A page added by hand; an empty `title` takes the page's site.
+    AddLink {
+        parent: Option<String>,
+        title: String,
+        url: String,
+    },
+    Rename {
+        id: String,
+        title: String,
+    },
+    /// Moves `id` into `parent` at `index` among its new siblings.
+    Move {
+        id: String,
+        parent: Option<String>,
+        index: u32,
+    },
+    /// Removes a bookmark, or a folder with everything in it.
+    Remove {
+        id: String,
+    },
+}
+
+impl BookmarkCall {
+    pub fn validate(&self) -> bool {
+        let id = |id: &str| bookmark_id(id).is_some();
+        let parent = |parent: &Option<String>| parent.as_deref().is_none_or(id);
+        let title =
+            |title: &str| !title.trim().is_empty() && title.len() <= MAX_BOOKMARK_TITLE_INPUT_BYTES;
+        match self {
+            Self::List { folder } => parent(folder),
+            Self::Reveal { id: target } => id(target),
+            Self::Search { query } => {
+                !query.trim().is_empty() && query.len() <= zephium_core::bookmarks::MAX_QUERY_BYTES
+            }
+            Self::AddFolder {
+                parent: at,
+                title: name,
+            } => parent(at) && title(name),
+            Self::AddLink {
+                parent: at,
+                title: name,
+                url,
+            } => {
+                parent(at)
+                    && name.len() <= MAX_BOOKMARK_TITLE_INPUT_BYTES
+                    && !url.trim().is_empty()
+                    && url.len() <= zephium_core::bookmarks::MAX_URL_BYTES
+            }
+            Self::Rename {
+                id: target,
+                title: name,
+            } => id(target) && title(name),
+            Self::Move {
+                id: target,
+                parent: at,
+                ..
+            } => id(target) && parent(at),
+            Self::Remove { id: target } => id(target),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BookmarkView {
+    pub id: String,
+    pub title: String,
+    /// Absent for a folder.
+    pub url: Option<String>,
+    pub icon: Option<IconRef>,
+    /// Direct children, for a folder.
+    pub children: u32,
+    /// The folder it lives in; absent at the top level.
+    pub parent: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BookmarkCrumb {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BookmarkResponse {
+    Listing {
+        folder: Option<String>,
+        /// Folders from the top level down to `folder`, `folder` last.
+        path: Vec<BookmarkCrumb>,
+        items: Vec<BookmarkView>,
+    },
+    Results {
+        items: Vec<BookmarkView>,
+    },
+    /// A write applied; `id` names what an add created.
+    Saved {
+        id: Option<String>,
+    },
+    Error {
+        error: BookmarkError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BookmarkError {
+    Missing,
+    /// The profile holds the maximum, or the folder is nested too deep.
+    Full,
+    /// A folder cannot move into itself.
+    Cycle,
+    Invalid,
+    Unavailable,
+    Capacity,
+}
+
+/// Split divider hit-strip in window logical coordinates; the chrome renders
+/// these as drag targets on platforms without native stage dividers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct DividerView {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub vertical: bool,
+}
+
+/// The Work browser pane's applied native hole in window logical coordinates.
+/// `presented` is false while the pane's tab has no live view (crash, discard,
+/// or a modal prompt that removes content from the stage).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct WorkPaneLayout {
+    pub tab: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub presented: bool,
+    pub generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct WorkPaneRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkPaneTarget {
+    Tab { id: String },
+    Url { url: String },
+}
+
+/// Outcome of a native file import into the profile's media store.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaImportV1 {
+    Imported {
+        record: Box<zephium_core::resources::ResourceRecord>,
+    },
+    Cancelled,
+    Refused {
+        error: zephium_core::resources::ResourceError,
+    },
+}
+
+/// Outcome of admitting one public image for a subject on the canvas.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaAdmitV1 {
+    /// The media element now on the canvas, related to the subject.
+    Admitted {
+        element: zephium_core::work::WorkElementId,
+    },
+    Refused {
+        error: zephium_core::resources::ResourceError,
+    },
+}
+
+/// Outcome of admitting one folder the person dropped or named for a canvas.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkFolderAdmitV1 {
+    /// The canonical path and display name to place as a Folder element.
+    Admitted { path: String, name: String },
+    /// Outside the home folder, protected, or missing (`not_a_folder` false),
+    /// or an existing path that is not a folder.
+    Refused { not_a_folder: bool },
+}
+
+/// A mini window's chrome: its window and the one page in it, if any yet.
+/// The page's URL and title are untrusted and only ever shown as text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub tab: Option<TabView>,
+    /// Where "Open in Zephium" can put the page: its profile's spaces, in
+    /// sidebar order.
+    pub spaces: Vec<MiniSpaceView>,
+    /// The space "Open in Zephium" uses unless the person picks another.
+    pub space: Option<String>,
+    /// The window stays above other applications' windows.
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniSpaceView {
+    pub id: String,
+    pub name: String,
+}
+
+/// The shell made a mini window; the desktop builds its native window with
+/// this content size.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniOpenedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The shell let a mini window go. `reveal_main` brings the main window
+/// forward because the page just moved into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniClosedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub reveal_main: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct LayoutState {
+    pub dividers: Vec<DividerView>,
+    pub work_pane: Option<WorkPaneLayout>,
+}
+
+/// Immediate result returned by a privileged IPC command. `accepted` with an
+/// `operation_id` means the mutation was successfully and non-evictably
+/// admitted to the shell's process-local ordered FIFO; it does not claim that
+/// later native/store work succeeded or survive a process restart. `accepted`
+/// without an id is reserved for a fully applied, privileged-UI-only action
+/// such as toggling the launcher.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct OperationAdmission {
+    pub operation_id: Option<String>,
+    pub accepted: bool,
+}
+
+/// The bounded terminal classification the actor can establish while
+/// processing an admitted operation. `Deferred` means native work was queued,
+/// an exact discard acknowledgement is still required, or a durable write
+/// became indeterminate and entered explicit reconciliation; it never means a
+/// page load, renderer callback, or unknown store transaction succeeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationOutcome {
+    Applied,
+    NoOp,
+    Rejected,
+    NativeAdmissionFailed,
+    Deferred,
+}
+
+/// Stable, non-page-derived detail for an operation outcome. Keeping this an
+/// enum prevents native errors, URLs, or attacker-controlled strings from
+/// becoming an unbounded privileged IPC/logging surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationReason {
+    MutationApplied,
+    /// The address went to a mini window, so the main window stays behind.
+    OpenedInMini,
+    StateUnchanged,
+    InvalidScope,
+    NoFocusedWindow,
+    ItemLimitReached,
+    InvalidInput,
+    HistoryUnavailable,
+    LayoutUnavailable,
+    UnsupportedCommand,
+    NativeDispatchRejected,
+    NativeWorkPending,
+    DiscardCompletionPending,
+    StoreWorkPending,
+    StoreAdmissionRejected,
+    StoreConflict,
+    StoreOutcomeUnknown,
+    StoreReconciliationFailed,
+    ContentPolicyApplyFailed,
+    ContentPolicySourceUnavailable,
+    ContentPolicySourceRefreshPending,
+    ContentPolicySourceRefreshFailed,
+    ContentPolicySourcesRefreshed,
+    ProfileDeletionPolicyRejected,
+    ProfileDeletionInProgress,
+    ProfileDeletionCompleted,
+    /// Work and AI features are switched off.
+    FeatureDisabled,
+}
+
+/// The shell has processed an admitted operation in actor order. Consumers
+/// reconcile logical effects from authoritative projections. A deferred
+/// native navigation still resolves independently through engine events.
+/// Long-running profile deletion retains its id internally and emits this
+/// disposition exactly once, only after definitive rejection or both durable
+/// deletion phases complete; blocker preference mutations likewise retain
+/// their id through CAS and exact native settlement. Retry/reconciliation
+/// state is never mislabeled as successfully applied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct OperationDisposition {
+    pub operation_id: String,
+    pub outcome: OperationOutcome,
+    pub reason: OperationReason,
+}
+
+/// Process-local reconciliation state for an admitted mutation. Pending and
+/// processed entries are retained in a bounded fail-closed desktop ledger;
+/// processed entries remain queryable until privileged chrome acknowledges
+/// them. `Unknown` means the id was never admitted in this process, was already
+/// acknowledged, or belongs to a previous process lifetime.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OperationStatus {
+    Unknown,
+    Pending,
+    Processed { disposition: OperationDisposition },
+}
+
+/// Process-local browser-runtime status. Once `restart_required` becomes true
+/// it remains true until the whole application exits; recoverable bounded
+/// user-content degradation is projected independently in the same snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct RuntimeStatus {
+    pub restart_required: bool,
+    /// Why a restart is required; none while it is not.
+    pub restart_reason: Option<RuntimeRestartReason>,
+    /// The saved session could not be restored this launch: its bytes were
+    /// kept in a file and the browser started with fresh tabs.
+    pub session_set_aside: bool,
+    /// Bounded fail-closed aggregate of ownership scopes whose latest native
+    /// user-content observation was not exactly applied. An impossible
+    /// over-capacity observation contributes at most one sentinel. No script,
+    /// extension, profile, or native failure identity crosses this privileged
+    /// projection.
+    pub user_content_degraded_scope_count: u16,
+    /// Canonically ordered closed-vocabulary set. Rust emits at most six
+    /// entries and privileged chrome must replace, never append, projections.
+    pub security_advisories: Vec<RuntimeSecurityAdvisory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRestartReason {
+    /// A newer browser runtime is installed; only a restart adopts it.
+    RuntimeUpdate,
+    /// A profile's browser engine can be trusted again only after a restart.
+    Profile,
+}
+
+/// Non-fatal, process-local classification produced before native WebView
+/// construction. Hard admission failures never reach privileged chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSecurityAdvisoryKind {
+    ReviewOverdue,
+    UpdateRecommended,
+    UnreviewedRuntime,
+    CleanupOverdue,
+}
+
+/// Fixed destination of the recommended maintenance action. No page or
+/// network response can select this value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSecurityUpdateTarget {
+    Zephium,
+    OperatingSystem,
+    BrowserRuntime,
+}
+
+/// Sanitized advisory delivered only to privileged main chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct RuntimeSecurityAdvisory {
+    pub kind: RuntimeSecurityAdvisoryKind,
+    pub update_target: RuntimeSecurityUpdateTarget,
+}
+
+/// Effective protection for the focused profile's exact native policy.
+/// This is derived in Rust from both desired and retained state. Privileged
+/// chrome must not infer protection from a pending preference and accidentally
+/// present a retained allow-all generation as active blocking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerProtection {
+    Disabled,
+    Pending,
+    Active,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerPhase {
+    Unavailable,
+    Uninitialized,
+    Compiling,
+    Installing,
+    Ready,
+    Failed,
+    Retired,
+}
+
+/// Authority of the focused profile's durable blocker preference.
+/// `Reconciling` and `Unavailable` are intentionally distinct from native
+/// policy state: the browser may still know which generation is installed
+/// while refusing to guess what durable preference should replace it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerPreferenceState {
+    Authoritative,
+    Updating,
+    Reconciling,
+    Unavailable,
+}
+
+/// Sanitized state of the authenticated filter-package supply chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSourcePhase {
+    NotConfigured,
+    DurableActivationUnsupported,
+    StorageUnavailable,
+    ClockUnsafe,
+    Idle,
+    Fresh,
+    Stale,
+    Refreshing,
+    Failed,
+    Shutdown,
+}
+
+/// Authority which admitted the displayed filter package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSourceProvenance {
+    ReleaseBundle,
+    TufRepository,
+    OfficialHttps,
+}
+
+/// Stable package-refresh failure category. Endpoint, parser, and native
+/// strings are intentionally never forwarded to privileged JavaScript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerSourceFailure {
+    Transport,
+    Metadata,
+    Clock,
+    Manifest,
+    Target,
+    License,
+    Rollback,
+    Storage,
+    Catalog,
+    Internal,
+}
+
+/// Stable diagnostics classification. Native/parser text and filter content
+/// never cross the privileged IPC boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerFailure {
+    SitePreferencesUnavailable,
+    GenerationExhausted,
+    CompilerDispatchRejected,
+    CompilerUnavailable,
+    CompileSourceUnavailable,
+    CompileInvalidSource,
+    CompileResourceLimit,
+    CompileInternal,
+    CompiledArtifactMismatch,
+    NativeDispatchRejected,
+    NativeUnsupported,
+    NativeUnsupportedArtifact,
+    NativeInvalidArtifact,
+    NativeCompilation,
+    NativeInstallation,
+    NativeCleanup,
+    NativeSuperseded,
+    ContradictoryNativeSettlement,
+}
+
+/// Exact coverage of the generation which native code proved applied.
+/// Counts are bounded far below JavaScript's exact-integer ceiling by the
+/// blocker compiler's hard rule limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerRuleCoverage {
+    pub source_rules: u32,
+    pub accepted_rules: u32,
+    pub rejected_rules: u32,
+    pub platform_omitted_rules: u32,
+    pub platform_approximated_rules: u32,
+    pub platform_resource_approximated_rules: u32,
+    pub platform_source_kind_approximated_rules: u32,
+    pub platform_attribution_approximated_rules: u32,
+    pub blocking_rule_entries: u32,
+}
+
+/// Volatile, process-local health counters for the exact applied runtime
+/// matcher. Decimal strings preserve the full saturating `u64` range in
+/// JavaScript. These counters are never persisted and contain no request,
+/// origin, URL, profile, or rule identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerRuntimeDiagnostics {
+    pub total_decisions: String,
+    pub candidate_budget_exhausted: String,
+    pub matcher_unavailable: String,
+    pub matcher_unprepared: String,
+    pub attribution_unavailable: String,
+    pub evaluation_errors: String,
+}
+
+/// Exact authenticated identities for source-package transition diagnostics.
+/// This is boxed in [`BlockerStatusView`] so infrequent debug strings do not
+/// inflate every application projection on the shell actor's hot path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerSourceIdentities {
+    pub package_manifest_sha256: Option<String>,
+    pub candidate_revision: Option<String>,
+    pub candidate_manifest_sha256: Option<String>,
+    pub installed_manifest_sha256: Option<String>,
+}
+
+/// Host-initiated picker controls, available only to privileged main chrome.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlockerPickerAction {
+    Start,
+    Read { session: String },
+    Preview { session: String, enabled: bool },
+    Stop { session: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct BlockerPickerView {
+    pub session: String,
+    pub active: bool,
+    pub selection: Option<BlockerSelectionView>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct BlockerSelectionView {
+    pub identity: String,
+    pub label: String,
+    pub count: u32,
+    pub positional: bool,
+}
+
+/// Exact privileged site-control context; never accepted from ordinary page IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct BlockerSiteContext {
+    pub profile: String,
+    pub tab: String,
+    pub site: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PersonalHideView {
     pub id: String,
     pub label: String,
