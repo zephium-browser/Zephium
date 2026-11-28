@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "L'avvio rapido si apre sopra qualsiasi app. Trova una scheda, una pagina della cronologia, una nota o il web, senza cambiare finestra.",
   "onb_launcher_try": "Provalo ora, da qualsiasi app.",
   "onb_launcher_browser_try": "Per l’indirizzo di una pagina in Zephium.",
+  "onb_launcher_ask": "Fai una domanda a Zephium sulla pagina che stai visualizzando.",
   "onb_launcher_switch": "Passa alla scheda",
   "onb_launcher_history": "Cronologia",
   "onb_launcher_web": "Cerca sul web “{query}”",

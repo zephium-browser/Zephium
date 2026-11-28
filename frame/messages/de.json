@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "Der Launcher öffnet sich über jeder App. Finde einen Tab, eine Seite aus deinem Verlauf, eine Notiz oder das Web, ohne das Fenster zu wechseln.",
   "onb_launcher_try": "Probier es jetzt, aus jeder App.",
   "onb_launcher_browser_try": "Für die Adresse einer Seite in Zephium.",
+  "onb_launcher_ask": "Frag Zephium nach der Seite, die du gerade ansiehst.",
   "onb_launcher_switch": "Zu Tab wechseln",
   "onb_launcher_history": "Verlauf",
   "onb_launcher_web": "Im Web nach „{query}“ suchen",

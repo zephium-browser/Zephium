@@ -1552,6 +1552,7 @@
   "onb_launcher_body": "The launcher opens over any app. Find a tab, a page from your history, a note or the web, without switching windows.",
   "onb_launcher_try": "Try it now, from any app.",
   "onb_launcher_browser_try": "For a page’s address in Zephium.",
+  "onb_launcher_ask": "Ask Zephium about the page in front of you.",
   "onb_launcher_switch": "Switch to tab",
   "onb_launcher_history": "History",
   "onb_launcher_web": "Search the web for \"{query}\"",

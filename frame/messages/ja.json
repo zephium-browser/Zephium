@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "ランチャーは、どのアプリの上にも開きます。ウインドウを切り替えずに、タブ、履歴のページ、メモ、ウェブを見つけられます。",
   "onb_launcher_try": "どのアプリからでも、今すぐ試してみましょう。",
   "onb_launcher_browser_try": "Zephium でページのアドレスを編集。",
+  "onb_launcher_ask": "表示中のページについて Zephium に質問できます。",
   "onb_launcher_switch": "タブに切り替え",
   "onb_launcher_history": "履歴",
   "onb_launcher_web": "「{query}」をウェブで検索",

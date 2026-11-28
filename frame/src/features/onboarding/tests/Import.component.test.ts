@@ -178,6 +178,24 @@ test("a refusal by macOS says what to turn on and offers the setting", async () 
   expect(opened).toEqual(["chrome"]);
 });
 
+test("the Import action stands apart from the Bookmarks and History chips", async () => {
+  const fake = importer();
+  browserImport.provide(fake.adapter);
+  await browserImport.detect();
+  const screen = await render(Import);
+  await screen.getByRole("radio", { name: "Chrome" }).click();
+
+  const start = screen.getByRole("button", { name: "Import", exact: true });
+  const chip = screen.getByRole("button", { name: "Bookmarks", exact: true });
+  await expect.element(start).toHaveAttribute("data-variant", "primary");
+  await expect.element(start).toHaveAttribute("data-size", "large");
+  await expect.element(chip).toHaveAttribute("aria-pressed", "true");
+  expect(chip.element()).not.toHaveAttribute("data-variant", "primary");
+  expect(getComputedStyle(start.element()).backgroundColor).not.toBe(
+    getComputedStyle(chip.element()).backgroundColor,
+  );
+});
+
 test("a locked browser is not asked about access", async () => {
   const fake = importer();
   browserImport.provide(fake.adapter);
