@@ -291,6 +291,47 @@ test("a download started during a history read survives an older empty page", as
   expect(session.entries).toEqual([entry]);
 });
 
+test.each([false, true])(
+  "live updates recover after a failed read (transport error: %s)",
+  async (transportError) => {
+    const { DownloadSession } = await import("../downloads.svelte");
+    const session = new DownloadSession(profile);
+    if (transportError) host.call.mockRejectedValueOnce(new Error("native call failed"));
+    else host.call.mockResolvedValueOnce({ kind: "error", error: "unavailable" });
+    await session.refresh();
+    expect(session.error).toBe("unavailable");
+
+    host.call.mockResolvedValueOnce({
+      kind: "updates",
+      entries: [entry],
+      removed: [],
+      cleanup: { running: false, error: null },
+    });
+    await session.refresh();
+    expect(session.entries).toEqual([entry]);
+    expect(session.error).toBeNull();
+  },
+);
+
+test("live reads cannot replace or dismiss a failed download action", async () => {
+  const { DownloadSession } = await import("../downloads.svelte");
+  const session = new DownloadSession(profile);
+  host.call.mockResolvedValueOnce({ kind: "error", error: "destination" });
+  await session.perform({ kind: "resume", id: entry.id });
+  host.call.mockResolvedValueOnce({ kind: "error", error: "unavailable" });
+  await session.refresh();
+  expect(session.error).toBe("destination");
+
+  host.call.mockResolvedValueOnce({
+    kind: "updates",
+    entries: [entry],
+    removed: [],
+    cleanup: { running: false, error: null },
+  });
+  await session.refresh();
+  expect(session.error).toBe("destination");
+});
+
 test("cleanup failures remain visible without hiding history and retries request native cleanup", async () => {
   host.call.mockImplementation((_profile, call) =>
     Promise.resolve(

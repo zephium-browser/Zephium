@@ -22,13 +22,14 @@ export class DownloadSession {
   readonly profile: string;
   entries = $state.raw<DownloadView[]>([]);
   preferences = $state.raw<DownloadPreferences | null>(null);
-  error = $state<DownloadError | null>(null);
   supported = $state(true);
   cleanup = $state.raw<DownloadCleanup>({ running: false, error: null });
   siteDownloadsRequireConfirmation = $state(false);
   loading = $state(false);
   busy = $state(false);
   next = $state<string | null>(null);
+  private requestError = $state<DownloadError | null>(null);
+  private updateError = $state<DownloadError | null>(null);
   private generation = 0;
   private active = false;
   private stopListening: (() => void) | null = null;
@@ -41,6 +42,10 @@ export class DownloadSession {
 
   constructor(profile: string) {
     this.profile = profile;
+  }
+
+  get error() {
+    return this.requestError ?? this.updateError;
   }
 
   get canLoadMore() {
@@ -67,13 +72,14 @@ export class DownloadSession {
     } catch {
       if (generation === this.generation) {
         this.active = false;
-        this.error = "unavailable";
+        this.requestError = "unavailable";
       }
     }
   }
 
   async retry() {
     if (!this.active) await this.start();
+    else if (!this.requestError && this.updateError) await this.refresh();
     else await this.reload();
   }
 
@@ -83,6 +89,8 @@ export class DownloadSession {
     this.stopListening?.();
     this.stopListening = null;
     this.entries = [];
+    this.requestError = null;
+    this.updateError = null;
     this.cleanup = { running: false, error: null };
     this.cleanupUpdatedDuringLoad = false;
     this.removedDuringLoad.clear();
@@ -121,11 +129,12 @@ export class DownloadSession {
         this.entries = [...records.values()]
           .sort((a, b) => b.id.localeCompare(a.id))
           .slice(0, MAX_HISTORY_ENTRIES);
+        this.updateError = null;
       } else if (response.kind === "error") {
-        this.error = response.error;
+        this.updateError = response.error;
       }
     } catch {
-      if (generation === this.generation) this.error = "unavailable";
+      if (generation === this.generation) this.updateError = "unavailable";
     } finally {
       if (generation === this.generation) {
         this.updating = false;
@@ -187,12 +196,12 @@ export class DownloadSession {
             this.next = oldestRetained;
           }
         }
-        this.error = null;
+        this.requestError = null;
       } else if (response.kind === "error") {
-        this.error = response.error;
+        this.requestError = response.error;
       }
     } catch {
-      if (generation === this.generation) this.error = "unavailable";
+      if (generation === this.generation) this.requestError = "unavailable";
     } finally {
       if (generation === this.generation) {
         this.loading = false;
@@ -216,12 +225,12 @@ export class DownloadSession {
     if (this.busy) return;
     const generation = this.generation;
     this.busy = true;
-    this.error = null;
+    this.requestError = null;
     try {
       const response = await commands.downloadCall(this.profile, call);
       if (generation !== this.generation) return;
       if (response.kind === "error") {
-        if (response.error !== "cancelled") this.error = response.error;
+        if (response.error !== "cancelled") this.requestError = response.error;
       } else if (response.kind === "preferences") {
         this.preferences = response.preferences;
         this.siteDownloadsRequireConfirmation = response.site_downloads_require_confirmation;
@@ -242,7 +251,7 @@ export class DownloadSession {
         await this.reload();
       }
     } catch {
-      if (generation === this.generation) this.error = "unavailable";
+      if (generation === this.generation) this.requestError = "unavailable";
     } finally {
       if (generation === this.generation) this.busy = false;
     }
