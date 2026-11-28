@@ -4281,6 +4281,7 @@ struct OpenAiExtractionFormatWire<'a> {
 enum OpenAiContinuationInputWire<'a> {
     Message(OpenAiInputMessageWire<'a>),
     Reasoning(OpenAiReasoningReplayWire<'a>),
+    #[cfg(feature = "provider-transport")]
     ModelTurn(ModelTurnReplayWire<'a>),
     FunctionCall(OpenAiFunctionCallWire<'a>),
     FunctionCallOutput(OpenAiFunctionCallOutputWire<'a>),
@@ -4288,9 +4289,11 @@ enum OpenAiContinuationInputWire<'a> {
 }
 
 /// Input item of a chosen model's own turn; only its translator reads it.
+#[cfg(feature = "provider-transport")]
 pub(super) const MODEL_TURN_ITEM: &str = "zephium_model_turn";
 
 /// A chosen model's own turn, read back only by the chosen-model translator.
+#[cfg(feature = "provider-transport")]
 #[derive(Serialize)]
 struct ModelTurnReplayWire<'a> {
     r#type: &'static str,
@@ -4530,6 +4533,7 @@ fn push_openai_replay_items<'a>(
                     encrypted_content,
                 },
             )),
+            #[cfg(feature = "provider-transport")]
             OpenAiResponseReplayItem::ModelTurn { call_id, parts } => input.push(
                 OpenAiContinuationInputWire::ModelTurn(ModelTurnReplayWire {
                     r#type: MODEL_TURN_ITEM,
@@ -5663,7 +5667,7 @@ fn encode_anthropic_screenshot_continuation_body(
 }
 
 /// The screenshot encoder's own tool-result item, for translation tests.
-#[cfg(test)]
+#[cfg(all(test, feature = "provider-transport"))]
 pub(in crate::agent_provider) fn screenshot_result_item_for_test(
     call_id: &str,
     png: &[u8],

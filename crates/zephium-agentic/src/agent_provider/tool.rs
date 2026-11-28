@@ -40,8 +40,11 @@ const MAX_AGENT_BROWSER_TOOL_JSON_DEPTH: u8 = 16;
 pub(super) const MAX_OPENAI_ENCRYPTED_REASONING_ITEM_BYTES: usize = 128 * 1024;
 pub(super) const MAX_OPENAI_ENCRYPTED_REASONING_AGGREGATE_BYTES: usize = 192 * 1024;
 const MAX_OPENAI_REPLAY_ITEMS: usize = 16;
+#[cfg(feature = "provider-transport")]
 const MAX_MODEL_TURN_PARTS: usize = 16;
+#[cfg(feature = "provider-transport")]
 const MAX_MODEL_TURN_BYTES: usize = 64 * 1024;
+#[cfg(feature = "provider-transport")]
 const MAX_MODEL_CALL_ID_BYTES: usize = 256;
 
 /// Private exact-order output item retained only for OpenAI stateless replay.
@@ -54,6 +57,7 @@ pub(super) enum OpenAiResponseReplayItem {
     FunctionCall,
     /// A chosen model's own parts around its one tool call and the call
     /// identity it gave, returned to its wire verbatim on the next call.
+    #[cfg(feature = "provider-transport")]
     ModelTurn {
         call_id: String,
         parts: Vec<Value>,
@@ -93,14 +97,18 @@ impl OpenAiResponseReplay {
         let mut retained_bytes = 0_usize;
         let mut reasoning_ids: Vec<&str> = Vec::new();
         let mut encrypted_items: Vec<&str> = Vec::new();
-        let model_turns = items
-            .iter()
-            .filter(|item| matches!(item, OpenAiResponseReplayItem::ModelTurn { .. }))
-            .count();
-        if model_turns > 1 {
-            return None;
+        #[cfg(feature = "provider-transport")]
+        {
+            let model_turns = items
+                .iter()
+                .filter(|item| matches!(item, OpenAiResponseReplayItem::ModelTurn { .. }))
+                .count();
+            if model_turns > 1 {
+                return None;
+            }
         }
         for item in &items {
+            #[cfg(feature = "provider-transport")]
             if let OpenAiResponseReplayItem::ModelTurn { call_id, parts } = item {
                 let part_bytes = parts.iter().try_fold(0_usize, |total, part| {
                     total.checked_add(serde_json::to_vec(part).ok()?.len())
