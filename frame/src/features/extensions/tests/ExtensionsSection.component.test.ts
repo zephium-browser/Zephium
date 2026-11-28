@@ -38,7 +38,6 @@ vi.mock("$domain/webext", () => ({
       pinned: native.pinned.includes(install),
     }),
     pinnedCount: () => native.pinned.length,
-    MAX_PINNED: 3,
     setPinned: native.setPinned,
   },
 }));
@@ -159,11 +158,11 @@ test("the way to manage them heads a row for each extension", async () => {
   }
 });
 
-test("a row pins its extension to the address field, up to three", async () => {
-  native.actions = [action("a"), action("b"), action("c"), action("d")];
-  native.pinned = ["b", "c", "d"];
+test("a row pins its extension however many are already pinned", async () => {
+  native.actions = ["a", "b", "c", "d", "e", "f"].map((id) => action(id));
+  native.pinned = ["b", "c", "d", "e", "f"];
   const screen = await render(ExtensionsSection);
-  await expect.element(screen.getByRole("button", { name: "Pin to sidebar" })).toBeDisabled();
+  await expect.element(screen.getByRole("button", { name: "Pin to sidebar" })).toBeEnabled();
   const unpin = screen.getByRole("button", { name: "Unpin from sidebar" }).first();
   await expect.element(unpin).toHaveAttribute("aria-pressed", "true");
   await unpin.click();

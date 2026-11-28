@@ -24,7 +24,6 @@ vi.mock("$domain/webext", () => ({
   webext: {
     byInstall: (install: string) => native.extensions.get(install) ?? null,
     pinnedCount: () => native.pinnedCount,
-    MAX_PINNED: 3,
     setPinned: native.setPinned,
     openOptions: native.openOptions,
     requestRemoval: native.requestRemoval,
@@ -94,7 +93,7 @@ test("right-clicking a pinned extension opens the browser's own entries under it
   ]);
 });
 
-test("an unpinned extension offers to pin while there is room, and no options it lacks", async () => {
+test("an unpinned extension always offers to pin, and no options it lacks", async () => {
   installed("install-a", { pinned: false, has_options: false });
   // The tray's rows render the same openMenu; drive the helper directly.
   const { openButtonMenu } = await import("../lib/button-menu");
@@ -102,22 +101,18 @@ test("an unpinned extension offers to pin while there is room, and no options it
 
   native.pinnedCount = 2;
   openButtonMenu("profile", action("install-a") as never, anchor);
-  native.pinnedCount = 3;
+  native.pinnedCount = 12;
   openButtonMenu("profile", action("install-a") as never, anchor);
 
-  const [room, full] = native.popup.mock.calls.map((call) => call[1]);
-  expect(room).toEqual([
+  const expected = [
     { kind: "item", choice: "pin", label: "Pin to sidebar", enabled: true },
     { kind: "separator" },
     { kind: "item", choice: "manage", label: "Manage extensions", enabled: true },
     { kind: "item", choice: "remove", label: "Remove…", enabled: true },
-  ]);
-  expect((full as unknown[])[0]).toEqual({
-    kind: "item",
-    choice: "pin",
-    label: "Unpin one to pin another",
-    enabled: false,
-  });
+  ];
+  for (const entries of native.popup.mock.calls.map((call) => call[1])) {
+    expect(entries).toEqual(expected);
+  }
   expect(native.popup.mock.calls[0]?.slice(2)).toEqual([10, 50]);
 });
 

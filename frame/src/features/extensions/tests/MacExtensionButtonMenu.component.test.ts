@@ -33,7 +33,6 @@ vi.mock("$domain/webext", () => ({
     byInstall: (install: string) =>
       native.catalogReady && install === action.runtime.install_id ? extension : null,
     pinnedCount: () => 1,
-    MAX_PINNED: 3,
     requestRemoval: native.requestRemoval,
   },
 }));
