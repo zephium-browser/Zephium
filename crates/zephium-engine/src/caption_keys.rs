@@ -20,6 +20,21 @@ pub(crate) fn classify(key: u32, ctrl: bool, shift: bool, alt: bool) -> Option<C
     }
 }
 
+/// Whether a WebView2 accelerator may end fullscreen before the page sees
+/// the key. None may: other browsers leave a normal page fullscreen on a
+/// bare Escape, and a page's own element fullscreen is handled by WebView2
+/// itself. The browser's window fullscreen is left through the
+/// `window.fullscreen` command (F11), matched as an ordinary shortcut with
+/// the person's own binding.
+pub(crate) fn accelerator_exits_fullscreen(
+    _key: u32,
+    _ctrl: bool,
+    _shift: bool,
+    _alt: bool,
+) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,6 +49,20 @@ mod tests {
             classify(VK_SPACE, false, false, true),
             Some(CaptionKey::SystemMenu)
         );
+    }
+
+    #[test]
+    fn no_accelerator_key_forces_a_fullscreen_exit() {
+        // Escape is the page's key; F11 is the window.fullscreen shortcut,
+        // which toggles fullscreen once through the command path.
+        for (key, ctrl, shift, alt) in [
+            (0x1B, false, false, false), // bare Escape
+            (0x1B, true, false, false),
+            (0x7A, false, false, false), // F11
+            (VK_F10, false, false, false),
+        ] {
+            assert!(!accelerator_exits_fullscreen(key, ctrl, shift, alt));
+        }
     }
 
     #[test]

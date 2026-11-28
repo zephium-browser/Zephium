@@ -174,9 +174,7 @@ use webview2_com::{
     ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
     ZoomFactorChangedEventHandler,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
@@ -2225,12 +2223,11 @@ pub fn install_accelerators(
         let ctrl = down(VK_CONTROL.0 as i32);
         let shift = down(VK_SHIFT.0 as i32);
         let alt = down(VK_MENU.0 as i32);
-        // Escape always leaves fullscreen, whatever the page does with the
-        // key; the page still receives it.
-        if key == u32::from(VK_ESCAPE.0)
-            && !ctrl
-            && !shift
-            && !alt
+        // A bare Escape stays with the page: browsers do not collapse a
+        // normal page's fullscreen for it, and WebView2 handles the page's
+        // own element fullscreen. Window fullscreen is left through the
+        // `window.fullscreen` shortcut (F11), matched just below.
+        if crate::caption_keys::accelerator_exits_fullscreen(key, ctrl, shift, alt)
             && controller
                 .as_ref()
                 .and_then(|controller| unsafe { controller.CoreWebView2() }.ok())
