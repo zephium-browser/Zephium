@@ -3491,6 +3491,7 @@
   "space_name": "Ad",
   "space_name_placeholder": "Çalışma, Okuma, Yan proje…",
   "space_icon": "Simge",
+  "essential_icon_title": "Simgeyi değiştir",
   "space_symbol": "Sembol {index}",
   "space_emoji_placeholder": "Ya da bir emoji yazın",
   "space_color": "Renk",

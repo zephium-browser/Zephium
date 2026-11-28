@@ -925,6 +925,9 @@ impl Shell {
             } => {
                 let _ = self.operation_set_tab_essential(id, essential, before);
             }
+            Command::SetTabIcon { id, icon } => {
+                let _ = self.operation_set_tab_icon(id, icon);
+            }
             Command::KeepSite(id) => {
                 let _ = self.operation_keep_site(&id);
             }

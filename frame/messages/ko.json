@@ -3491,6 +3491,7 @@
   "space_name": "이름",
   "space_name_placeholder": "작업, 읽기, 사이드 프로젝트…",
   "space_icon": "아이콘",
+  "essential_icon_title": "아이콘 변경",
   "space_symbol": "기호 {index}",
   "space_emoji_placeholder": "또는 이모지 입력",
   "space_color": "색상",

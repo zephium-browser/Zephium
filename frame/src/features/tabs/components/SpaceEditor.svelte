@@ -8,7 +8,7 @@
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import { onMount, untrack } from "svelte";
-  import "./space-hue.css";
+  import "$shared/ui/space-hue.css";
   import { SPACE_COLORS, SPACE_SYMBOLS, emojiOf } from "../lib/space-look";
 
   let {

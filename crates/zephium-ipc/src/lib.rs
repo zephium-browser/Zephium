@@ -52,6 +52,11 @@ pub struct TabView {
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+    /// A mark the person chose for an Essential. Chrome shows it instead of
+    /// the favicon, but never in place of the page title in labels.
+    #[serde(default)]
+    #[specta(optional)]
+    pub custom_icon: Option<SpaceIconView>,
     #[serde(default)]
     #[specta(optional)]
     pub capture: Option<MediaCaptureView>,

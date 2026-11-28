@@ -3534,6 +3534,7 @@
   "space_name": "Name",
   "space_name_placeholder": "Work, Reading, Side project…",
   "space_icon": "Icon",
+  "essential_icon_title": "Change icon",
   "space_symbol": "Symbol {index}",
   "space_emoji_placeholder": "Or type an emoji",
   "space_color": "Color",

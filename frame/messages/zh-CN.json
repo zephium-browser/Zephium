@@ -3491,6 +3491,7 @@
   "space_name": "名称",
   "space_name_placeholder": "工作、阅读、个人项目…",
   "space_icon": "图标",
+  "essential_icon_title": "更改图标",
   "space_symbol": "符号 {index}",
   "space_emoji_placeholder": "或输入表情符号",
   "space_color": "颜色",

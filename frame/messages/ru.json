@@ -3491,6 +3491,7 @@
   "space_name": "Название",
   "space_name_placeholder": "Работа, Чтение, Побочный проект…",
   "space_icon": "Значок",
+  "essential_icon_title": "Изменить значок",
   "space_symbol": "Символ {index}",
   "space_emoji_placeholder": "Или введите эмодзи",
   "space_color": "Цвет",

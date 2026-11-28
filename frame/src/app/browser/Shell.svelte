@@ -10,12 +10,12 @@
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
-  import { commands, type TabView } from "$shared/ipc/bindings";
+  import { commands, type SpaceIconView, type TabView } from "$shared/ipc/bindings";
   import { newTabImage } from "$session/newtab-background.svelte";
   import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadClearSiteData, loadSettings } from "$features/settings";
-  import { EssentialTile } from "$features/essentials";
+  import { EssentialTile, loadEssentialIconPicker } from "$features/essentials";
   import { AddressField, SiteDetails, SiteHead, findInPage } from "$features/address";
   import { SidebarPagePermission } from "$features/permissions";
   import { Dock } from "$features/dock";
@@ -331,6 +331,23 @@
       void loadClearSiteData().then((module) => (ClearSiteData = module.default));
   });
 
+  // The native tab menu offers Change Icon only on an Essential. It hands the
+  // arm to this sheet, which opens the picker over the dock and sends the
+  // chosen mark back through native; the tile's label stays the page title.
+  let EssentialIconPicker = $state.raw<Component<{
+    id: string;
+    title: string;
+    current: SpaceIconView | null;
+    onclose: () => void;
+  }> | null>(null);
+  let iconPicker = $state<{ id: string; title: string; current: SpaceIconView | null } | null>(
+    null,
+  );
+  $effect(() => {
+    if (iconPicker && !untrack(() => EssentialIconPicker))
+      void loadEssentialIconPicker().then((module) => (EssentialIconPicker = module.default));
+  });
+
   let handledCommand = 0;
   $effect(() => {
     const command = ui.uiCommand();
@@ -340,6 +357,13 @@
       if (command.id === "split.choose") chooseSplit();
       if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
       if (command.id === "page.copyLink") void tabs.copyActiveLink().then(linkCopied);
+      if (command.id === "tab.changeIcon") {
+        const id = tabs.takeIconTarget();
+        if (id !== null) {
+          const tab = tabs.tabs().find((candidate) => candidate.id === id);
+          if (tab) iconPicker = { id, title: tab.title, current: tab.custom_icon ?? null };
+        }
+      }
       if (command.id === "tab.clearSiteData") clearRequest.ask(tabs.takeMenuTargetUrl());
       if (command.id === "page.clearSiteData") clearRequest.ask(tabs.activeTab()?.url);
       if (command.id === "find.show") findInPage.show(tabs.activeId());
@@ -795,6 +819,12 @@
   </div>
 </div>
 {#if ClearSiteData}<ClearSiteData />{/if}
+{#if iconPicker && EssentialIconPicker}<EssentialIconPicker
+    id={iconPicker.id}
+    title={iconPicker.title}
+    current={iconPicker.current}
+    onclose={() => (iconPicker = null)}
+  />{/if}
 
 <style>
   .stage-column {

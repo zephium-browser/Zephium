@@ -38,6 +38,7 @@ fn tab(id: u128, space: SpaceId, url: &str) -> PersistedItem {
             title: "T".into(),
             zoom: 1.0,
             last_active_ms: None,
+            custom_icon: None,
         },
     }
 }
@@ -317,6 +318,7 @@ fn sample() -> SessionState {
                     title: "Docs".into(),
                     zoom: 1.5,
                     last_active_ms: None,
+                    custom_icon: None,
                 },
             },
             tab(10, space, "https://example.com/"),
@@ -3265,6 +3267,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
                 title: "\\".repeat(zephium_core::item::MAX_PAGE_TITLE_CHARS),
                 zoom: 1.0,
                 last_active_ms: None,
+                custom_icon: None,
             },
         })
         .collect();

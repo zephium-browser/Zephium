@@ -256,6 +256,8 @@ export const commands = {
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
 	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
 	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
+	/**  A mark belongs to an Essential alone. The shell repeats that check before committing; native only converts the typed icon into a validated value. */
+	tabsSetTabIcon: (id: string, icon: SpaceIconView | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_tab_icon", { id, icon }),
 	/**
 	 *  Onboarding keeps a site by its catalog id; native owns the address and
 	 *  the mark, so chrome can never pin an arbitrary URL through this path.
@@ -3376,6 +3378,8 @@ export type TabMenuContext = {
 	page: boolean,
 	can_split: boolean,
 	essential: boolean,
+	/**  A mark the person chose for this Essential, so Reset can be offered. */
+	custom_icon: boolean,
 	/**  Other open tabs exist to close. */
 	others: boolean,
 	/**  Open tabs follow this one. */
@@ -3452,6 +3456,8 @@ export type TabView = {
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,
+	/**  A mark the person chose for an Essential. Chrome shows it instead of the favicon, but never in place of the page title in labels. */
+	custom_icon?: SpaceIconView | null,
 	capture?: MediaCaptureView | null,
 	/**
 	 *  The page's zoom in whole percent, while the tab has a page to zoom. It

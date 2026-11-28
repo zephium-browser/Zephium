@@ -1,0 +1,63 @@
+/* A space's hue: `--space-hue` fills a point of it, `--space-ink` draws a
+   glyph in it, dark enough to read on light glass and light enough on dark.
+   Graphite is no hue at all: its glyphs keep the column's own ink. */
+[data-space-hue] {
+  --space-hue: var(--color-faint);
+  --space-ink: var(--color-label-secondary);
+}
+
+[data-space-hue="1"] {
+  --space-hue: var(--avatar-1-top);
+  --space-ink: var(--avatar-1-bottom);
+}
+
+[data-space-hue="2"] {
+  --space-hue: var(--avatar-2-top);
+  --space-ink: var(--avatar-2-bottom);
+}
+
+[data-space-hue="3"] {
+  --space-hue: var(--avatar-3-top);
+  --space-ink: var(--avatar-3-bottom);
+}
+
+[data-space-hue="4"] {
+  --space-hue: var(--avatar-4-top);
+  --space-ink: var(--avatar-4-bottom);
+}
+
+[data-space-hue="5"] {
+  --space-hue: var(--avatar-5-top);
+  --space-ink: var(--avatar-5-bottom);
+}
+
+[data-space-hue="6"] {
+  --space-hue: var(--avatar-6-top);
+  --space-ink: var(--avatar-6-bottom);
+}
+
+[data-space-hue="7"] {
+  --space-hue: var(--avatar-7-top);
+  --space-ink: var(--avatar-7-bottom);
+}
+
+[data-space-hue="8"] {
+  --space-hue: var(--avatar-8-top);
+  --space-ink: var(--avatar-8-bottom);
+}
+
+[data-space-hue="9"] {
+  --space-hue: var(--avatar-9-top);
+  --space-ink: var(--avatar-9-bottom);
+}
+
+:root[data-theme="dark"] [data-space-hue]:not([data-space-hue="0"]) {
+  --space-ink: var(--space-hue);
+}
+
+@media (forced-colors: active) {
+  [data-space-hue] {
+    --space-hue: CanvasText;
+    --space-ink: CanvasText;
+  }
+}

@@ -12,7 +12,7 @@ use crate::item::{
 };
 use crate::navigation;
 use crate::ports::engine::NavigationRequestId;
-use crate::spaces::RemovedProfileSpaces;
+use crate::spaces::{RemovedProfileSpaces, SpaceIcon};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -310,9 +310,38 @@ impl Items {
             .unwrap_or(target.len());
         target.insert(index, id);
         if let Some(item) = self.items.get_mut(&id) {
+            // A mark belongs to the Essential, not to the tab's site: once
+            // the tab leaves Favorites it wears its favicon again.
+            if matches!(item.placement, Placement::Favorites { .. })
+                && !matches!(placement, Placement::Favorites { .. })
+            {
+                if let Some(tab) = item.tab_mut() {
+                    tab.custom_icon = None;
+                }
+            }
             item.parent = None;
             item.placement = placement;
         }
+        true
+    }
+
+    /// Sets or clears an Essential's own mark. Native and restored state both
+    /// go through here, so a symbol index or emoji is admitted only when it
+    /// validates and only a tab kept in Favorites can carry one.
+    pub fn set_custom_icon(&mut self, id: ItemId, icon: Option<SpaceIcon>) -> bool {
+        if icon.as_ref().is_some_and(|icon| !icon.valid()) {
+            return false;
+        }
+        let Some(item) = self.items.get_mut(&id) else {
+            return false;
+        };
+        if !matches!(item.placement, Placement::Favorites { .. }) {
+            return false;
+        }
+        let Some(tab) = item.tab_mut() else {
+            return false;
+        };
+        tab.custom_icon = icon;
         true
     }
 
@@ -935,6 +964,30 @@ mod tests {
             space: SpaceId::from(1),
             section: SpaceSection::Today,
         }
+    }
+
+    fn favorites() -> Placement {
+        Placement::Favorites {
+            space: SpaceId::from(1),
+        }
+    }
+
+    #[test]
+    fn an_essential_can_carry_a_valid_mark_and_loses_it_when_unpinned() {
+        let mut items = Items::default();
+        let tab = id(901);
+        assert!(items.insert_tab(tab, today()));
+        assert!(!items.set_custom_icon(tab, Some(SpaceIcon::Symbol(3))));
+        assert!(items.move_tab_to_root(tab, favorites(), None));
+        assert!(!items.set_custom_icon(tab, Some(SpaceIcon::Symbol(200))));
+        assert!(items.set_custom_icon(tab, Some(SpaceIcon::Emoji("🚀".into()))));
+        assert_eq!(
+            items.tab(tab).unwrap().custom_icon,
+            Some(SpaceIcon::Emoji("🚀".into()))
+        );
+        assert!(items.move_tab_to_root(tab, today(), None));
+        assert_eq!(items.tab(tab).unwrap().custom_icon, None);
+        assert!(!items.set_custom_icon(tab, Some(SpaceIcon::Symbol(1))));
     }
 
     #[test]

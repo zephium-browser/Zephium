@@ -21,6 +21,7 @@ impl Shell {
                 essential,
                 before,
             } => self.operation_set_tab_essential(id, essential, before),
+            Command::SetTabIcon { id, icon } => self.operation_set_tab_icon(id, icon),
             Command::KeepSite(id) => self.operation_keep_site(&id),
             Command::ReleaseSite(id) => self.operation_release_site(&id),
             Command::RenameFocusedProfile(name) => self.operation_rename_focused_profile(&name),
@@ -158,6 +159,17 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         if !self.items.move_tab_to_root(id, placement, before) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
+        mutation_result(self.commit(Vec::new()))
+    }
+
+    pub(super) fn operation_set_tab_icon(
+        &mut self,
+        id: ItemId,
+        icon: Option<zephium_core::spaces::SpaceIcon>,
+    ) -> OperationDisposition {
+        if !self.item_in_focused_scope(id) || !self.items.set_custom_icon(id, icon) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
         mutation_result(self.commit(Vec::new()))

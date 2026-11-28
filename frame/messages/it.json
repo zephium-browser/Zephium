@@ -3491,6 +3491,7 @@
   "space_name": "Nome",
   "space_name_placeholder": "Lavoro, Lettura, Progetto…",
   "space_icon": "Icona",
+  "essential_icon_title": "Cambia icona",
   "space_symbol": "Simbolo {index}",
   "space_emoji_placeholder": "Oppure scrivi un’emoji",
   "space_color": "Colore",

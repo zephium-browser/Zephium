@@ -12,6 +12,7 @@
   import CaptureControl from "$shared/ui/CaptureControl";
   import AudioControl from "$shared/ui/AudioControl";
   import { favicons } from "$domain/favicons";
+  import IconMark from "$shared/ui/IconMark";
 
   let {
     entries,
@@ -88,15 +89,17 @@
         onpointercancel={(event) => drag.cancel(event)}
         onclick={() => !drag.swallowClick() && onSelect(tab.id)}
       >
-        <FavIcon
-          image={favicons.image(tab.icon)}
-          tone={favicons.tone(tab.icon)}
-          loading={tab.loading}
-          size={16}
-          lit
-          fallback={Globe02Icon}
-          notched={!!tab.audio}
-        />
+        {#if tab.custom_icon}<span class="rail-mark" data-custom-icon
+            ><IconMark icon={tab.custom_icon} color={0} size={16} /></span
+          >{:else}<FavIcon
+            image={favicons.image(tab.icon)}
+            tone={favicons.tone(tab.icon)}
+            loading={tab.loading}
+            size={16}
+            lit
+            fallback={Globe02Icon}
+            notched={!!tab.audio}
+          />{/if}
         <span data-zephium-tab-label class="sr-only">{tab.title}</span>
       </button>
       {#if tab.audio}<AudioControl
@@ -132,6 +135,11 @@
 <style>
   .rail-sites > li {
     position: relative;
+  }
+
+  .rail-mark {
+    display: grid;
+    place-items: center;
   }
 
   .capture-badge {

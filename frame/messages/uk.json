@@ -3491,6 +3491,7 @@
   "space_name": "Назва",
   "space_name_placeholder": "Робота, Читання, Побічний проєкт…",
   "space_icon": "Значок",
+  "essential_icon_title": "Змінити значок",
   "space_symbol": "Символ {index}",
   "space_emoji_placeholder": "Або введіть емодзі",
   "space_color": "Колір",

@@ -113,6 +113,8 @@ enum BoundedKind {
         zoom: f64,
         #[serde(default)]
         last_active_ms: Option<u64>,
+        #[serde(default)]
+        custom_icon: Option<zephium_core::spaces::SpaceIcon>,
     },
     BrowserTab {
         page: zephium_core::item::BrowserOwnedTab,
@@ -145,12 +147,25 @@ where
         match &item.kind {
             BoundedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
             BoundedKind::Tab {
-                url, title, zoom, ..
+                url,
+                title,
+                zoom,
+                custom_icon,
+                ..
             } => {
                 url.len() <= MAX_SESSION_URL_BYTES
                     && title.len() <= MAX_TITLE_BYTES
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
+                    && custom_icon.as_ref().is_none_or(|icon| {
+                        icon.valid()
+                            && match icon {
+                                zephium_core::spaces::SpaceIcon::Emoji(text) => {
+                                    text.len() <= zephium_core::spaces::MAX_SPACE_EMOJI_BYTES
+                                }
+                                _ => true,
+                            }
+                    })
             }
             BoundedKind::BrowserTab { .. } => true,
         }
@@ -231,11 +246,13 @@ impl BoundedSessionState {
                         title,
                         zoom,
                         last_active_ms,
+                        custom_icon,
                     } => PersistedKind::Tab {
                         url,
                         title,
                         zoom,
                         last_active_ms,
+                        custom_icon,
                     },
                     BoundedKind::BrowserTab { page } => PersistedKind::BrowserTab { page },
                 },
@@ -535,6 +552,7 @@ mod qa_settings_recovery_tests {
                         title: "Example".into(),
                         zoom: 1.0,
                         last_active_ms: None,
+                        custom_icon: None,
                     },
                 },
                 PersistedItem {
@@ -2725,6 +2743,7 @@ mod essentials_per_space_tests {
                 title: url.into(),
                 zoom: 1.0,
                 last_active_ms: None,
+                custom_icon: None,
             },
         }
     }

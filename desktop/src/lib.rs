@@ -196,6 +196,7 @@ use zephium_core::ports::engine::{Engine as _, UserContent, UserContentGeneratio
 #[cfg(not(target_os = "macos"))]
 use zephium_core::ports::engine::{ScriptOwner, UserStyle};
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
+use zephium_core::spaces::{SpaceIcon, MAX_SPACE_EMOJI_BYTES};
 use zephium_core::split::Axis;
 use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
 use zephium_ipc::Projection;
@@ -2084,6 +2085,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_activate,
             tabs_close,
             tabs_set_essential,
+            tabs_set_tab_icon,
             essentials_keep,
             essentials_release,
             profile_rename,
@@ -3246,6 +3248,44 @@ fn tabs_set_essential(
             essential,
             before,
         },
+    )
+}
+
+/// A mark belongs to an Essential alone. The shell repeats that check before
+/// committing; native only converts the typed icon into a validated value.
+#[tauri::command]
+#[specta::specta]
+fn tabs_set_tab_icon(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+    icon: Option<zephium_ipc::SpaceIconView>,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_set_tab_icon")
+        || !bounded(&id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(id) = ItemId::parse(&id) else {
+        return rejected_operation();
+    };
+    let icon = match icon {
+        Some(zephium_ipc::SpaceIconView::Symbol { index }) => Some(SpaceIcon::Symbol(index)),
+        Some(zephium_ipc::SpaceIconView::Emoji { text })
+            if bounded(&text, MAX_SPACE_EMOJI_BYTES) =>
+        {
+            Some(SpaceIcon::Emoji(text))
+        }
+        Some(_) => return rejected_operation(),
+        None => None,
+    };
+    if icon.as_ref().is_some_and(|icon| !icon.valid()) {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::SetTabIcon { id, icon },
     )
 }
 
@@ -4503,6 +4543,21 @@ fn execute_tab_menu_action(
         } else {
             rejected_operation()
         };
+    }
+    if action == "changeIcon" {
+        // The picker is frame UI: native only tells privileged chrome which
+        // armed Essential to open it for.
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &TAB_MENU_CHANGE_ICON_COMMAND) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
+    if action == "resetIcon" {
+        let Some(shell) = app.try_state::<Handle>() else {
+            return rejected_operation();
+        };
+        return dispatch_operation(app, &shell, Command::SetTabIcon { id, icon: None });
     }
     let Some(shell) = app.try_state::<Handle>() else {
         return rejected_operation();
@@ -6701,6 +6756,7 @@ fn build_add_menu(
 /// armed tab. Native code never handles page-derived text for the clipboard.
 const TAB_MENU_COPY_LINK_COMMAND: &str = "tab.copyLink";
 const TAB_MENU_CLEAR_SITE_DATA_COMMAND: &str = "tab.clearSiteData";
+const TAB_MENU_CHANGE_ICON_COMMAND: &str = "tab.changeIcon";
 
 /// Registry command delivered to the frame, which owns sidebar presentation.
 const SIDEBAR_COMPACT_COMMAND: &str = "sidebar.toggleCompact";
@@ -6733,7 +6789,7 @@ const BOOKMARK_MENU_ACTION_IDS: [&str; 6] = [
     "bookmarkmenu.removeFolder",
 ];
 
-const TAB_MENU_ACTION_IDS: [&str; 14] = [
+const TAB_MENU_ACTION_IDS: [&str; 16] = [
     "tabmenu.reload",
     "tabmenu.duplicate",
     "tabmenu.copyLink",
@@ -6748,8 +6804,12 @@ const TAB_MENU_ACTION_IDS: [&str; 14] = [
     "tabmenu.unmute",
     "tabmenu.stopCapture",
     "tabmenu.clearSiteData",
+    "tabmenu.changeIcon",
+    "tabmenu.resetIcon",
 ];
 const TAB_MENU_CLEAR_SITE_DATA: usize = 13;
+const TAB_MENU_CHANGE_ICON: usize = 14;
+const TAB_MENU_RESET_ICON: usize = 15;
 
 /// What the tab menu can offer for the tab it opens on, as the sidebar sees
 /// it. Only availability: the shell checks every action again.
@@ -6763,6 +6823,8 @@ struct TabMenuContext {
     others: bool,
     /// Open tabs follow this one.
     below: bool,
+    /// A mark the person chose for this Essential, so Reset can be offered.
+    custom_icon: bool,
     /// The person muted this tab.
     muted: bool,
     /// The document whose camera or microphone is in use.
@@ -6944,6 +7006,15 @@ fn build_tab_menu(
     } else {
         item(4, "Add to Essentials", context.page)?
     };
+    let change_icon = context
+        .essential
+        .then(|| item(TAB_MENU_CHANGE_ICON, "Change Icon…", true))
+        .transpose()?;
+    let reset_icon = if context.essential && context.custom_icon {
+        Some(item(TAB_MENU_RESET_ICON, "Reset Icon", true)?)
+    } else {
+        None
+    };
     let split = item(6, "Open in Split View", context.can_split)?;
     let mute = if !zephium_engine::page_mute_supported() {
         None
@@ -6979,6 +7050,12 @@ fn build_tab_menu(
         &keep,
         &split,
     ];
+    if let Some(change_icon) = &change_icon {
+        items.push(change_icon);
+    }
+    if let Some(reset_icon) = &reset_icon {
+        items.push(reset_icon);
+    }
     if let Some(move_to) = &move_to {
         items.push(move_to);
     }
@@ -9702,7 +9779,9 @@ mod tests {
                 "tabmenu.mute",
                 "tabmenu.unmute",
                 "tabmenu.stopCapture",
-                "tabmenu.clearSiteData"
+                "tabmenu.clearSiteData",
+                "tabmenu.changeIcon",
+                "tabmenu.resetIcon"
             ]
         );
         assert_eq!(
@@ -9717,6 +9796,20 @@ mod tests {
                 "tab-menu action shadows a registered command: {id}"
             );
         }
+        // The icon items are offered only for an Essential, and Reset only
+        // once one is marked. The picker itself is frame UI; native only
+        // relays the arm and applies the mark the person chose.
+        assert_eq!(
+            super::TAB_MENU_ACTION_IDS[super::TAB_MENU_CHANGE_ICON],
+            "tabmenu.changeIcon"
+        );
+        assert_eq!(
+            super::TAB_MENU_ACTION_IDS[super::TAB_MENU_RESET_ICON],
+            "tabmenu.resetIcon"
+        );
+        let source = include_str!("lib.rs");
+        assert!(source.contains(r#"TAB_MENU_CHANGE_ICON_COMMAND"#));
+        assert!(source.contains(r#"Command::SetTabIcon { id, icon: None }"#));
     }
 
     #[test]

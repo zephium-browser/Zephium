@@ -724,6 +724,17 @@ fn failed_pane_title(tab: &TabState) -> Option<String> {
         .flatten()
 }
 
+fn space_icon_view(icon: &zephium_core::spaces::SpaceIcon) -> zephium_ipc::SpaceIconView {
+    match icon {
+        zephium_core::spaces::SpaceIcon::Symbol(index) => {
+            zephium_ipc::SpaceIconView::Symbol { index: *index }
+        }
+        zephium_core::spaces::SpaceIcon::Emoji(text) => {
+            zephium_ipc::SpaceIconView::Emoji { text: text.clone() }
+        }
+    }
+}
+
 fn tab_view(
     id: ItemId,
     tab: &TabState,
@@ -852,6 +863,7 @@ fn tab_view(
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
         icon,
+        custom_icon: tab.custom_icon.as_ref().map(space_icon_view),
         capture: tab.capture.filter(|(_, state)| state.is_capturing()).map(
             |(navigation, state)| {
                 let device = |value| match value {

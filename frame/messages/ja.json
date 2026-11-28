@@ -3491,6 +3491,7 @@
   "space_name": "名前",
   "space_name_placeholder": "ワーク、読書、サイドプロジェクト…",
   "space_icon": "アイコン",
+  "essential_icon_title": "アイコンを変更",
   "space_symbol": "シンボル {index}",
   "space_emoji_placeholder": "または絵文字を入力",
   "space_color": "カラー",

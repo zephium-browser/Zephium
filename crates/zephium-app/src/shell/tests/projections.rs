@@ -19,6 +19,7 @@ fn tab(id: ItemId, parent: Option<ItemId>, placement: Placement, host: &str) -> 
             title: host.into(),
             zoom: 1.0,
             last_active_ms: None,
+            custom_icon: None,
         },
     }
 }

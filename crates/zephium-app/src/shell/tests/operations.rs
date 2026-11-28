@@ -946,6 +946,62 @@ fn essential_move_preserves_the_active_native_tab_and_can_be_reversed() {
 }
 
 #[test]
+fn an_essential_mark_is_set_and_cleared_but_unpinned_tabs_are_refused() {
+    use zephium_core::spaces::SpaceIcon;
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    // An ordinary tab refuses a mark before it is kept.
+    let denied = shell.handle_operation(Command::SetTabIcon {
+        id,
+        icon: Some(SpaceIcon::Symbol(1)),
+    });
+    assert_eq!(denied.outcome, OperationOutcome::Rejected);
+    assert_eq!(shell.items.tab(id).unwrap().custom_icon, None);
+
+    let result = shell.handle_operation(Command::SetTabEssential {
+        id,
+        essential: true,
+        before: None,
+    });
+    assert!(matches!(
+        result.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    let result = shell.handle_operation(Command::SetTabIcon {
+        id,
+        icon: Some(SpaceIcon::Emoji("🚀".into())),
+    });
+    assert!(matches!(
+        result.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert_eq!(
+        shell.items.tab(id).unwrap().custom_icon,
+        Some(SpaceIcon::Emoji("🚀".into()))
+    );
+
+    let result = shell.handle_operation(Command::SetTabIcon { id, icon: None });
+    assert!(matches!(
+        result.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert_eq!(shell.items.tab(id).unwrap().custom_icon, None);
+
+    shell.handle_operation(Command::SetTabIcon {
+        id,
+        icon: Some(SpaceIcon::Symbol(200)),
+    });
+    assert_eq!(shell.items.tab(id).unwrap().custom_icon, None);
+    shell.handle_operation(Command::SetTabEssential {
+        id,
+        essential: false,
+        before: None,
+    });
+    assert_eq!(shell.items.tab(id).unwrap().custom_icon, None);
+}
+
+#[test]
 fn essential_move_rejects_foreign_and_invalid_drop_targets() {
     let (mut shell, _, screen) = setup();
     shell.handle(Command::Bootstrap);
@@ -1373,6 +1429,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
         title: host.into(),
         zoom: 1.0,
         last_active_ms: None,
+        custom_icon: None,
     };
     let pinned = Placement::Space {
         space,

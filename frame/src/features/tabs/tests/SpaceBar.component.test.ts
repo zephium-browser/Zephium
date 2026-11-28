@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
+import { flushSync } from "svelte";
 import "$styles/global.css";
 import type { ItemsState, SidebarNodeView } from "$shared/ipc/bindings";
 import { emitNativeEvent } from "$shared/testing/native-events";
@@ -19,6 +20,9 @@ const native = vi.hoisted(() => ({
   update: vi.fn(),
   remove: vi.fn(),
   reorder: vi.fn(),
+  setEssential: vi.fn(),
+  leaveSplit: vi.fn(),
+  dragOver: vi.fn(),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -34,6 +38,9 @@ vi.mock("$shared/ipc/bindings", async () => {
     spacesUpdate: native.update.mockImplementation(ok),
     spacesDelete: native.remove.mockImplementation(ok),
     spacesReorder: native.reorder.mockImplementation(ok),
+    tabsSetEssential: native.setEssential.mockImplementation(ok),
+    tabsLeaveSplit: native.leaveSplit.mockImplementation(ok),
+    tabDragOver: native.dragOver.mockImplementation(async () => undefined),
     keymapEntries: async () => [],
   });
 });
@@ -512,4 +519,88 @@ test("a private window has one space and no switcher", async () => {
   project({ profile: { id: "x", name: "Private", kind: "incognito" }, spaces: [HOME] });
   await expect.element(screen.getByRole("button", { name: "New tab" })).toBeVisible();
   expect(screen.container.querySelector(".space-bar")).toBeNull();
+});
+
+async function mountPrivate() {
+  await page.viewport(420, 760);
+  await tabs.init();
+  await uiCommands.init();
+  const open = ["a", "b", "c"].map((id) => tabFixture({ id, title: `Tab ${id}` }));
+  const node = (id: string, section: "pinned" | "today"): SidebarNodeView => ({
+    id,
+    parent_id: null,
+    section,
+    kind: { type: "tab", tab_id: id },
+  });
+  project({
+    profile: { id: "x", name: "Private", kind: "incognito" },
+    spaces: [],
+    active_space_id: null,
+    nodes: [node("a", "pinned"), node("b", "today"), node("c", "today")],
+    tabs: open,
+    active: "b",
+  });
+  flushSync();
+  const tree = sidebarTree(tabs.sidebarNodes(), tabs.tabs());
+  return render(SidebarBody, {
+    pinned: tree.pinned,
+    today: tree.today,
+    splitting: false,
+    onSelect: () => {},
+  });
+}
+
+test("without spaces New tab follows the last row, with pinned tabs still above the rule", async () => {
+  const screen = await mountPrivate();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:600px";
+  const scroller = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const button = screen
+    .getByRole("button", { name: "New tab", exact: true })
+    .element() as HTMLButtonElement;
+  expect(scroller.contains(button)).toBe(true);
+  expect(button.closest(".new-tab-slot")?.parentElement).toBe(scroller);
+  expect(screen.container.querySelector(".space-bar")).toBeNull();
+
+  const sections = [...scroller.children]
+    .filter(
+      (child) => child.classList.contains("tab-list") || child.classList.contains("tab-divider"),
+    )
+    .map((child) =>
+      child.classList.contains("tab-divider") ? "divider" : child.getAttribute("aria-label"),
+    );
+  expect(sections).toEqual(["Pinned tabs", "divider", "Open tabs"]);
+  const rows = [...scroller.querySelectorAll<HTMLElement>("[data-zephium-tab-id]")];
+  expect(rows.map((row) => row.dataset.zephiumTabId)).toEqual(["a", "b", "c"]);
+  expect(button.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+    rows.at(-1)!.getBoundingClientRect().bottom,
+  );
+
+  await button.click();
+  expect(native.open).toHaveBeenCalledOnce();
+});
+
+test("dropping a tab in the room below the last row appends it in a private window", async () => {
+  const screen = await mountPrivate();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:600px";
+  const scroller = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const handle = screen.container.querySelector<HTMLElement>(
+    '.browse-tab[data-zephium-tab-id="b"] .tab-open',
+  )!;
+  const from = handle.getBoundingClientRect();
+  const init = { bubbles: true, pointerId: 1, button: 0, isPrimary: true };
+  const start = { x: from.left + 20, y: from.top + from.height / 2 };
+  handle.dispatchEvent(
+    new PointerEvent("pointerdown", { ...init, clientX: start.x, clientY: start.y }),
+  );
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { ...init, clientX: start.x, clientY: start.y + 8 }),
+  );
+  const room = scroller.getBoundingClientRect();
+  const to = { x: room.left + 40, y: room.bottom - 8 };
+  handle.dispatchEvent(new PointerEvent("pointermove", { ...init, clientX: to.x, clientY: to.y }));
+  await frame();
+  handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
+  expect(native.setEssential).toHaveBeenCalledExactlyOnceWith("b", false, null);
+  expect(screen.container.querySelectorAll(".tab-divider")).toHaveLength(1);
 });
