@@ -202,6 +202,7 @@ pub(super) struct ResidencyState {
     pub(super) recent: Vec<ItemId>,
     pub(super) last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
     pub(super) resident_since: std::collections::HashMap<ItemId, std::time::Instant>,
+    pub(super) awaiting_media_activation: std::cell::RefCell<std::collections::HashSet<ItemId>>,
     pub(super) inactive_since: std::collections::HashMap<ItemId, std::time::Instant>,
     last_protected: std::collections::HashSet<ItemId>,
     last_shown: std::collections::HashSet<ItemId>,
@@ -247,6 +248,7 @@ impl Default for ResidencyState {
             recent: Vec::new(),
             last_focus: std::collections::HashMap::new(),
             resident_since: std::collections::HashMap::new(),
+            awaiting_media_activation: Default::default(),
             inactive_since: std::collections::HashMap::new(),
             last_protected: std::collections::HashSet::new(),
             last_shown: std::collections::HashSet::new(),
@@ -1322,7 +1324,13 @@ impl Shell {
             .max()
     }
 
-    pub(super) fn record_view_creation(&mut self, id: ItemId) {
+    pub(super) fn record_view_creation(&mut self, id: ItemId, hold_media: bool) {
+        if hold_media {
+            self.residency
+                .awaiting_media_activation
+                .get_mut()
+                .insert(id);
+        }
         self.residency.inactive_since.remove(&id);
         self.residency
             .resident_since
@@ -1377,6 +1385,10 @@ impl Shell {
 
     pub(super) fn record_view_retirement(&mut self, id: ItemId) {
         self.tab_previews.invalidate_capture(id);
+        self.residency
+            .awaiting_media_activation
+            .get_mut()
+            .remove(&id);
         self.residency.resident_since.remove(&id);
         self.residency.inactive_since.remove(&id);
         self.residency.suspend_refused.remove(&id);

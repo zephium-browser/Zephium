@@ -26,6 +26,19 @@ pub(super) fn focus_shuts(gate: &SharedFocusGate, target: &str) -> bool {
 }
 
 impl EngineHost {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn activate_tab_media(&mut self, id: ItemId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        if view.event_permit.active_token().is_none() {
+            return;
+        }
+        if view.initial_media_held.replace(false) && !view.focus_media_suspended.get() {
+            crate::platform::imp::set_media_suspended(view, false);
+        }
+    }
+
     pub(crate) fn set_focus_gate(&mut self, gate: Option<FocusGate>) {
         *self
             .focus_gate
@@ -38,6 +51,12 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             if let Some(audio) = &view.audio_observer {
                 audio.set_focus_muted(suspended);
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            if view.focus_media_suspended.replace(suspended) == suspended
+                || view.initial_media_held.get()
+            {
                 return;
             }
             crate::platform::imp::set_media_suspended(view, suspended);

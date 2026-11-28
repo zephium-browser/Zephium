@@ -213,6 +213,10 @@ struct ObservedView {
     insecure_autofill: Cell<Option<crate::navigation_epoch::NavigationEpoch>>,
     // The media watch's generation, and whether it is running.
     media_watch: Cell<(u64, bool)>,
+    #[cfg(target_os = "macos")]
+    initial_media_held: Cell<bool>,
+    #[cfg(target_os = "macos")]
+    focus_media_suspended: Cell<bool>,
     replay_safety: Rc<discard::ReplaySafety>,
     discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
     #[cfg(target_os = "macos")]

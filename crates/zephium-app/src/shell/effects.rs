@@ -172,10 +172,14 @@ impl Shell {
                     }
                     self.clear_capacity_status(id);
                     let url = self.https_first(id, &url).unwrap_or(url);
-                    if !self
-                        .engine
-                        .create_view(id, self.partition_of(id), &url, bounds)
-                    {
+                    let hold_media = !self.discard_protected_leaves().contains(&id);
+                    if !self.engine.create_view_with_media_policy(
+                        id,
+                        self.partition_of(id),
+                        &url,
+                        bounds,
+                        hold_media,
+                    ) {
                         crate::diagnostic!("view-create: native dispatch refused");
                         // Dispatch rejection is synchronous and must not rely
                         // on a callback entering an already-overloaded queue.
@@ -185,7 +189,7 @@ impl Shell {
                         native.rejected = true;
                         continue;
                     }
-                    self.record_view_creation(id);
+                    self.record_view_creation(id, hold_media);
                     self.restore_tab_mute(id);
                     logical_residents += 1;
                     native.scheduled = true;

@@ -185,6 +185,9 @@ impl Shell {
             work_pane,
         }));
         let applied = self.engine.set_content(win.id, tree, l.content);
+        if applied == NativeDispatch::Scheduled {
+            self.activate_selected_tab_media();
+        }
         self.reconcile_page_permission_placement();
         applied
     }

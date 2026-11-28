@@ -922,7 +922,7 @@ impl Shell {
             let _ = self.items.remove(child);
             return;
         }
-        self.record_view_creation(child);
+        self.record_view_creation(child, !foreground);
         self.items.clear_blocked_popup(source);
         self.project_tab(source);
         self.native_openers.insert(
