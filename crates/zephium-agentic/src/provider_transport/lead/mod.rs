@@ -144,6 +144,9 @@ pub struct LeadTarget {
     cloud: bool,
     /// Native search calls one request may make, as Cloud's catalog row says.
     search_calls: Option<u32>,
+    /// OpenCode Go's profile inside the Compatible provider. Only a base
+    /// ending in `/inference/go/openai/v1` opts into it.
+    go: bool,
 }
 
 impl LeadTarget {
@@ -169,18 +172,22 @@ impl LeadTarget {
             base: Url::parse(base).map_err(|_| WorkModelError::BadRequest)?,
             cloud: false,
             search_calls: None,
+            go: false,
         })
     }
 
     /// A person-configured OpenAI-compatible chat endpoint, such as
     /// `https://host/v1`. Plain HTTP is accepted only on this Mac.
     pub fn compatible(base: &str) -> Result<Self, WorkModelError> {
+        let base = compatible_base(base).ok_or(WorkModelError::BadRequest)?;
+        let go = is_go_base(&base);
         Ok(Self {
             wire: WorkModelWire::ChatCompletions,
             upstream: WorkModelProvider::Compatible,
-            base: compatible_base(base).ok_or(WorkModelError::BadRequest)?,
+            base,
             cloud: false,
             search_calls: None,
+            go,
         })
     }
 
@@ -209,7 +216,47 @@ impl LeadTarget {
             base: join(&root, path)?,
             cloud: true,
             search_calls: None,
+            go: false,
         })
+    }
+
+    /// Whether the configured base is OpenCode Go's compatible endpoint.
+    pub(super) fn is_go(&self) -> bool {
+        self.go
+    }
+
+    /// The catalog for this endpoint. Go serves its models one directory
+    /// above the OpenAI-compatible chat base; every other compatible base
+    /// keeps the usual `/models` path.
+    pub(super) fn catalog_url(&self) -> Result<Url, WorkModelError> {
+        if !self.go {
+            return join(&self.base, "models");
+        }
+        let mut url = self.base.clone();
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|_| WorkModelError::BadRequest)?;
+            // Drop `v1` and `openai`; Go's catalog lives under `.../go/v1`.
+            path.pop_if_empty().pop().pop().push("v1").push("models");
+        }
+        Ok(url)
+    }
+
+    /// Go routes a call by a session hint derived from the conversation's
+    /// stable cache key. It carries no prompt text and is not a secret.
+    pub(super) fn go_session(&self, request: &WorkModelRequest) -> Option<HeaderValue> {
+        if !self.go {
+            return None;
+        }
+        let id = request.cache_key.as_deref()?.strip_prefix("zk_")?;
+        let valid = (1..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        valid
+            .then(|| HeaderValue::from_str(&format!("ses_{id}")).ok())
+            .flatten()
     }
 
     /// The wire this target speaks.
@@ -306,6 +353,17 @@ impl LeadTarget {
         }
         Ok(())
     }
+}
+
+/// Only the exact Go Chat Completions suffix selects the Go profile. A
+/// trailing slash and the URL's query/fragment are already rejected or
+/// normalised by `compatible_base`.
+fn is_go_base(base: &Url) -> bool {
+    let segments: Vec<&str> = base
+        .path_segments()
+        .map(|path| path.filter(|part| !part.is_empty()).collect())
+        .unwrap_or_default();
+    segments.ends_with(&["inference", "go", "openai", "v1"])
 }
 
 fn join(base: &Url, path: &str) -> Result<Url, WorkModelError> {
@@ -455,9 +513,11 @@ impl LeadClient {
                 return Err(WorkModelError::ContextTooLong);
             }
             let strict = self.target.strict_tools(&request);
+            let session = self.target.go_session(&request);
             let generation = self.attempt(
                 &request.model.model,
                 &body,
+                session.as_ref(),
                 strict,
                 events,
                 image_fence.as_ref(),
@@ -545,6 +605,7 @@ impl LeadClient {
         &self,
         model: &str,
         body: &[u8],
+        session: Option<&HeaderValue>,
         strict: bool,
         events: &(dyn Fn(WorkModelEvent) + Send + Sync),
         image_fence: Option<&Arc<dyn WorkModelImageFence>>,
@@ -563,6 +624,9 @@ impl LeadClient {
             headers.insert("accept-encoding", HeaderValue::from_static("identity"));
             self.target.authorize(&mut headers, &secret)?;
             drop(secret);
+            if let Some(session) = session {
+                headers.insert("x-opencode-session", session.clone());
+            }
             if self.target.cloud {
                 headers.insert("idempotency-key", key.clone());
             }
@@ -729,7 +793,7 @@ impl LeadClient {
         S: futures_util::Stream<Item = Result<B, reqwest::Error>> + Unpin,
         B: AsRef<[u8]>,
     {
-        let mut decoder = WireDecoder::new(self.target.wire);
+        let mut decoder = WireDecoder::for_target(self.target.wire, self.target.is_go());
         let mut frames = Vec::new();
         let mut out = Vec::new();
         let mut emitted = false;
@@ -1079,11 +1143,15 @@ enum WireDecoder {
 
 impl WireDecoder {
     fn new(wire: WorkModelWire) -> Self {
+        Self::for_target(wire, false)
+    }
+
+    fn for_target(wire: WorkModelWire, go: bool) -> Self {
         match wire {
             WorkModelWire::OpenAiResponses => Self::OpenAi(Default::default()),
             WorkModelWire::AnthropicMessages => Self::Anthropic(Default::default()),
             WorkModelWire::Gemini => Self::Gemini(Default::default()),
-            WorkModelWire::ChatCompletions => Self::Chat(Default::default()),
+            WorkModelWire::ChatCompletions => Self::Chat(chat::Decoder::new(go)),
         }
     }
 

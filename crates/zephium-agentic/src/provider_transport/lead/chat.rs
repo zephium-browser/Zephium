@@ -180,6 +180,20 @@ pub(super) fn body(
             body.insert("parallel_tool_calls".into(), json!(false));
         }
     }
+    // Go takes every effort the catalog advertises, named as in the core
+    // enum. Other compatible endpoints keep their own effort conventions.
+    if upstream == WorkModelProvider::Compatible && target.is_go() {
+        if let Some(reasoning) = request.reasoning {
+            let effort = match reasoning {
+                WorkModelReasoning::Low => "low",
+                WorkModelReasoning::Medium => "medium",
+                WorkModelReasoning::High => "high",
+                WorkModelReasoning::XHigh => "xhigh",
+                WorkModelReasoning::Max => "max",
+            };
+            body.insert("reasoning_effort".into(), json!(effort));
+        }
+    }
     // DeepSeek's thinking mode does not take a forced tool.
     let forced = !request.tools.is_empty() && request.tool_choice != WorkModelToolChoice::Auto;
     let reasoning = request
@@ -252,6 +266,8 @@ struct PendingCall {
 
 #[derive(Default)]
 pub(super) struct Decoder {
+    /// OpenCode Go reports its plan charge as `usage.opencode.allowance`.
+    go: bool,
     text: String,
     reasoning: String,
     /// Mistral's reasoning, which it wants back as a thinking chunk.
@@ -264,6 +280,13 @@ pub(super) struct Decoder {
 }
 
 impl Decoder {
+    pub(super) fn new(go: bool) -> Self {
+        Self {
+            go,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn event(
         &mut self,
         frame: &SseEvent,
@@ -295,6 +318,26 @@ impl Decoder {
                 .and_then(Value::as_f64)
                 .filter(|cost| cost.is_finite() && *cost >= 0.0)
                 .map(|cost| (cost * 1_000_000.0).round() as u64);
+            // Inside a Go plan `usage.cost` is always zero; the normalised
+            // charge is the allowance debited for this call.
+            if self.go && self.cost_micros.is_none_or(|cost| cost == 0) {
+                let billed = usage
+                    .pointer("/opencode/billing_source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| matches!(source, "go" | "go-plus"));
+                let allowance = usage
+                    .pointer("/opencode/allowance")
+                    .and_then(|value| {
+                        value
+                            .as_f64()
+                            .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
+                    })
+                    .filter(|amount| amount.is_finite() && *amount >= 0.0)
+                    .map(|amount| (amount * 1_000_000.0).round() as u64);
+                if billed {
+                    self.cost_micros = allowance;
+                }
+            }
         }
         let Some(choice) = data.pointer("/choices/0") else {
             return Ok(Flow::Continue);

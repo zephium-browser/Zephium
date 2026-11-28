@@ -1020,3 +1020,64 @@ fn usage_counters_saturate_across_turns() {
     assert_eq!(total.searches, u32::MAX);
     assert_eq!(total.provider_cost_micros, Some(u64::MAX));
 }
+
+#[test]
+fn go_chat_forwards_every_effort_and_records_the_plan_allowance() {
+    let go = LeadTarget::compatible("https://api.opencode.ai/inference/go/openai/v1").unwrap();
+    let mut request = request(WorkModelWire::ChatCompletions, "glm-5.3-flash");
+    request.model.provider = WorkModelProvider::Compatible;
+    request.reasoning = Some(WorkModelReasoning::XHigh);
+    let body = chat::body(&request, &go).unwrap();
+    assert_eq!(body["reasoning_effort"], "xhigh");
+    request.reasoning = Some(WorkModelReasoning::Max);
+    assert_eq!(
+        chat::body(&request, &go).unwrap()["reasoning_effort"],
+        "max"
+    );
+    // A non-Go compatible endpoint keeps its old request shape.
+    let plain = LeadTarget::compatible("https://host.example/v1").unwrap();
+    assert!(chat::body(&request, &plain)
+        .unwrap()
+        .get("reasoning_effort")
+        .is_none());
+
+    let stream = data(&[json!({
+        "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0,
+                  "opencode": {"billing_source": "go-plus", "allowance": 0.00042}}
+    })]);
+    let mut decoder = WireDecoder::for_target(WorkModelWire::ChatCompletions, true);
+    let mut framer = sse::SseFramer::default();
+    let mut frames = Vec::new();
+    for chunk in stream.as_bytes().chunks(29) {
+        framer.push(chunk, &mut frames).unwrap();
+    }
+    framer.finish(&mut frames).unwrap();
+    let mut out = Vec::new();
+    for frame in frames {
+        if matches!(decoder.event(&frame, &mut out), Ok(Flow::Done)) {
+            break;
+        }
+    }
+    let decoded = decoder.finish(&mut out).unwrap();
+    assert_eq!(decoded.provider_cost_micros, Some(420));
+
+    // An ordinary compatible endpoint never reads Go's usage metadata.
+    let mut other = WireDecoder::new(WorkModelWire::ChatCompletions);
+    let mut framer = sse::SseFramer::default();
+    let mut frames = Vec::new();
+    for chunk in stream.as_bytes().chunks(29) {
+        framer.push(chunk, &mut frames).unwrap();
+    }
+    framer.finish(&mut frames).unwrap();
+    let mut out = Vec::new();
+    for frame in frames {
+        if matches!(other.event(&frame, &mut out), Ok(Flow::Done)) {
+            break;
+        }
+    }
+    assert_eq!(
+        other.finish(&mut out).unwrap().provider_cost_micros,
+        Some(0)
+    );
+}

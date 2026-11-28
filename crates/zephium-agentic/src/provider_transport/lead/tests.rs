@@ -523,6 +523,7 @@ async fn a_rate_limited_call_retries_after_the_hint_then_streams() {
         base: Url::parse(&base).unwrap(),
         cloud: false,
         search_calls: None,
+        go: false,
     };
     let client = LeadClient::new(
         target,
@@ -562,6 +563,7 @@ async fn an_unauthorized_call_fails_closed_without_retrying() {
         base: Url::parse(&base).unwrap(),
         cloud: false,
         search_calls: None,
+        go: false,
     };
     let client = LeadClient::new(
         target,

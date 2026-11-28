@@ -36,7 +36,13 @@ async fn get(
     query: Option<&str>,
     secret: &LeadSecret,
 ) -> Result<(u16, Vec<u8>), WorkModelError> {
-    let mut url = join(&target.base, path)?;
+    // Go's compatible base returns 404 on `<base>/models`; its catalog is
+    // one directory above the OpenAI path.
+    let mut url = if path == "models" {
+        target.catalog_url()?
+    } else {
+        join(&target.base, path)?
+    };
     url.set_query(query);
     let mut headers = HeaderMap::new();
     target.authorize(&mut headers, secret)?;
@@ -226,6 +232,7 @@ pub async fn fetch_cloud_catalog(
         base: join(&root, "v1")?,
         cloud: true,
         search_calls: None,
+        go: false,
     };
     let (status, body) = get(&target, "models", None, secret).await?;
     match status {
@@ -251,7 +258,7 @@ pub(super) fn parse_list(target: &LeadTarget, body: &Value) -> Vec<WorkModelEntr
         .unwrap_or_default();
     let mut entries: Vec<WorkModelEntry> = rows
         .iter()
-        .filter_map(|row| row_entry(provider, target.wire, row))
+        .filter_map(|row| row_entry(provider, target.wire, target.is_go(), row))
         .collect();
     entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     entries.dedup_by(|a, b| a.id == b.id);
@@ -262,8 +269,12 @@ pub(super) fn parse_list(target: &LeadTarget, body: &Value) -> Vec<WorkModelEntr
 fn row_entry(
     provider: WorkModelProvider,
     wire: WorkModelWire,
+    go: bool,
     row: &Value,
 ) -> Option<WorkModelEntry> {
+    if go && provider == WorkModelProvider::Compatible {
+        return go_entry(wire, row);
+    }
     if row.get("deprecated").and_then(Value::as_bool) == Some(true)
         || row.get("deprecation").is_some_and(|value| !value.is_null())
         || matches!(
@@ -422,6 +433,126 @@ fn row_entry(
             ),
         },
         price,
+    })
+}
+
+/// One model from OpenCode Go's catalog. Its own limits and prices replace
+/// the generic compatible defaults; nothing else in the listing changes.
+fn go_entry(wire: WorkModelWire, row: &Value) -> Option<WorkModelEntry> {
+    let id = row.get("id").and_then(Value::as_str)?;
+    if !valid_text(id, 160) || deprecated(WorkModelProvider::Compatible, id) {
+        return None;
+    }
+    let name = row.get("name").and_then(Value::as_str).unwrap_or(id);
+    if !valid_text(name, 96) {
+        return None;
+    }
+    let number = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    let context = number(row.pointer("/limit/context"));
+    let input = number(row.pointer("/limit/input"));
+    let output = number(row.pointer("/limit/output")).or_else(|| {
+        context
+            .zip(input)
+            .and_then(|(context, input)| context.checked_sub(input))
+    });
+    let vision = row
+        .pointer("/modalities/input")
+        .and_then(Value::as_array)
+        .is_some_and(|modalities| modalities.iter().any(|m| m.as_str() == Some("image")));
+    let tools = row
+        .pointer("/capabilities/tools")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        && row
+            .get("supported_parameters")
+            .and_then(Value::as_array)
+            .map(|parameters| {
+                parameters
+                    .iter()
+                    .any(|parameter| matches!(parameter.as_str(), Some("tools" | "tool_calls")))
+            })
+            .unwrap_or(true);
+    // A non-empty effort list is the catalog's statement that the model
+    // reasons. The effort names themselves are forwarded from the request.
+    let reasoning = match row.pointer("/capabilities/reasoning/effort") {
+        Some(Value::Array(efforts)) => !efforts.is_empty(),
+        Some(Value::Object(efforts)) => !efforts.is_empty(),
+        Some(Value::String(effort)) => !effort.is_empty(),
+        _ => false,
+    };
+    let mut roles = vec![WorkModelRole::Lead, WorkModelRole::Light];
+    if vision {
+        roles.insert(1, WorkModelRole::Page);
+    }
+    Some(WorkModelEntry {
+        id: entry_id(WorkModelProvider::Compatible, id),
+        model: WorkModelRef {
+            provider: WorkModelProvider::Compatible,
+            wire,
+            model: id.to_owned(),
+        },
+        display_name: name.to_owned(),
+        roles,
+        recommended: false,
+        context_window: context.unwrap_or(128_000),
+        max_output: output.unwrap_or(16_384),
+        supports: WorkModelSupports {
+            tools,
+            vision,
+            prompt_cache: false,
+            reasoning,
+            native_search: false,
+        },
+        price: go_price(row),
+    })
+}
+
+/// Go prices text per million tokens. Long-context tiers override the base
+/// rate; for reservation we keep the highest applicable rate, so a long call
+/// is never charged at the entry price.
+fn go_price(row: &Value) -> Option<WorkModelPrice> {
+    let text = row.pointer("/cost/text")?;
+    let micros = |value: Option<&Value>| -> Option<u64> {
+        let amount = value.and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
+        })?;
+        (amount.is_finite() && amount >= 0.0)
+            .then(|| (amount * 1_000_000.0).min(u64::MAX as f64).round() as u64)
+    };
+    let mut input = micros(text.get("input"))?;
+    let mut output = micros(text.get("output"))?;
+    let mut cached = micros(text.get("cached_input"))
+        .or_else(|| micros(text.pointer("/cache/read")))
+        .unwrap_or(input);
+    for tier in text
+        .get("overrides")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let rates = tier.get("cost").unwrap_or(tier);
+        if let Some(rate) = micros(rates.get("input")) {
+            input = input.max(rate);
+        }
+        if let Some(rate) = micros(rates.get("output")) {
+            output = output.max(rate);
+        }
+        if let Some(rate) =
+            micros(rates.get("cached_input")).or_else(|| micros(rates.pointer("/cache/read")))
+        {
+            cached = cached.max(rate);
+        }
+    }
+    Some(WorkModelPrice {
+        input,
+        cached_input: cached,
+        output,
     })
 }
 
@@ -622,6 +753,82 @@ mod tests {
             );
             server.await.unwrap();
         }
+    }
+
+    #[test]
+    fn go_profile_derives_its_catalog_and_session_hint() {
+        let go = LeadTarget::compatible("https://api.opencode.ai/inference/go/openai/v1").unwrap();
+        assert!(go.is_go());
+        assert_eq!(
+            go.catalog_url().unwrap().as_str(),
+            "https://api.opencode.ai/inference/go/v1/models"
+        );
+        assert_eq!(
+            go.call_url("glm-5.3-flash", false).unwrap().as_str(),
+            "https://api.opencode.ai/inference/go/openai/v1/chat/completions"
+        );
+        let mut request = super::super::tests::request(WorkModelWire::ChatCompletions, "go-model");
+        request.cache_key = Some("zk_0123456789abcdef".into());
+        assert_eq!(
+            go.go_session(&request).unwrap().to_str().unwrap(),
+            "ses_0123456789abcdef"
+        );
+        request.cache_key = Some("not-a-cache-key".into());
+        assert!(go.go_session(&request).is_none());
+
+        let plain = LeadTarget::compatible("https://host.example/v1").unwrap();
+        assert!(!plain.is_go());
+        assert_eq!(
+            plain.catalog_url().unwrap().as_str(),
+            "https://host.example/v1/models"
+        );
+        assert!(plain.go_session(&request).is_none());
+    }
+
+    #[test]
+    fn go_catalog_rows_carry_limits_modalities_reasoning_and_tiered_prices() {
+        let go = LeadTarget::compatible("https://api.opencode.ai/inference/go/openai/v1").unwrap();
+        let listed = parse_list(
+            &go,
+            &json!({"data": [
+                {"id": "glm-5.3-flash", "name": "GLM 5.3 Flash",
+                 "limit": {"context": 1_000_000, "input": 500_000, "output": 64_000},
+                 "modalities": {"input": ["text", "image"]},
+                 "capabilities": {"tools": true,
+                                  "reasoning": {"effort": ["low", "medium", "high", "xhigh", "max"]}},
+                 "cost": {"text": {"input": "2", "output": "8", "cached_input": "0.5",
+                     "overrides": [
+                         {"up_to": 200000, "input": "2", "output": "8"},
+                         {"input": "6", "output": "24", "cached_input": "1.5"}]}}},
+                {"id": "text-only",
+                 "limit": {"context": 128000, "input": 100000},
+                 "capabilities": {"reasoning": {"effort": []}}}
+            ]}),
+        );
+        assert_eq!(listed.len(), 2);
+        let vision = listed
+            .iter()
+            .find(|entry| entry.model.model == "glm-5.3-flash")
+            .unwrap();
+        assert_eq!(vision.context_window, 1_000_000);
+        assert_eq!(vision.max_output, 64_000);
+        assert!(vision.roles.contains(&WorkModelRole::Page));
+        assert!(vision.supports.vision && vision.supports.tools && vision.supports.reasoning);
+        assert_eq!(
+            vision.price,
+            Some(WorkModelPrice {
+                input: 6_000_000,
+                cached_input: 1_500_000,
+                output: 24_000_000,
+            })
+        );
+        let plain = listed
+            .iter()
+            .find(|entry| entry.model.model == "text-only")
+            .unwrap();
+        assert!(!plain.supports.vision && !plain.supports.reasoning);
+        assert_eq!(plain.max_output, 28_000);
+        assert!(plain.price.is_none());
     }
 
     #[test]
