@@ -228,7 +228,7 @@ The owner creates these exact SignPath resources:
   Authenticode signing and timestamping. NSIS is treated as a PE file; this signs
   the downloaded setup, and does not claim signatures on its embedded payload.
 - Artifact configuration **`windows-nsis-arm64`**: the same, but containing
-  exactly one PE `Zephium_*_aarch64-setup.exe` for the native ARM64 build.
+  exactly one PE `Zephium_*_arm64-setup.exe` for the native ARM64 build.
 - Install the SignPath GitHub App and grant this repository access as required
   by SignPath's origin verification policy.
 

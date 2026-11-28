@@ -499,7 +499,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signpath-unsigned-windows-arm64
-          path: target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${{ env.VERSION }}_aarch64-setup.exe
+          path: target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${{ env.VERSION }}_arm64-setup.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -527,7 +527,7 @@ jobs:
           SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $name = "Zephium_${env:VERSION}_aarch64-setup.exe"
+          $name = "Zephium_${env:VERSION}_arm64-setup.exe"
           $signed = Join-Path $env:RUNNER_TEMP "signpath-signed/$name"
           $signature = Get-AuthenticodeSignature -LiteralPath $signed
           if ($signature.Status -ne 'Valid' -or
@@ -543,12 +543,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: >-
           cargo run --locked -p xtask -- sign-windows-updater
-          "target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${VERSION}_aarch64-setup.exe"
+          "target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${VERSION}_arm64-setup.exe"
           "${VERSION}" windows-aarch64-nsis
 
       - name: Stage release assets
         run: |
-          setup="target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${VERSION}_aarch64-setup.exe"
+          setup="target/aarch64-pc-windows-msvc/release/bundle/nsis/Zephium_${VERSION}_arm64-setup.exe"
           test -s "${setup}"
           test -s "${setup}.sig"
           mkdir dist
@@ -594,6 +594,7 @@ jobs:
         working-directory: dist
         run: |
           expected="Zephium-Windows-x64-setup.exe Zephium-Windows-x64-setup.exe.sig Zephium-Windows-arm64-setup.exe Zephium-Windows-arm64-setup.exe.sig Zephium-macOS-arm64.app.tar.gz Zephium-macOS-arm64.app.tar.gz.sig Zephium-macOS-arm64.dmg"
+          expected="$(printf '%s\n' ${expected} | LC_ALL=C sort | paste -sd ' ')"
           actual="$(printf '%s\n' * | LC_ALL=C sort | paste -sd ' ')"
           if [[ "${actual}" != "${expected}" ]]; then
             echo "::error title=Unexpected release assets::Got [${actual}]."

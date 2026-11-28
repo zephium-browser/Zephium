@@ -116,7 +116,12 @@ fn check_assets(
     let public = PublicKeyBox::from_string(&decode(public)?)
         .and_then(|key| key.into_public_key())
         .map_err(|_| "invalid updater public key")?;
-    for entry in platforms.values() {
+    for (platform, entry) in platforms {
+        let windows_target = match platform.as_str() {
+            "windows-x86_64" | "windows-x86_64-nsis" => Some(TARGET),
+            "windows-aarch64" | "windows-aarch64-nsis" => Some(ARM_TARGET),
+            _ => None,
+        };
         let asset = entry
             .get("url")
             .and_then(|url| url.as_str())
@@ -129,6 +134,12 @@ fn check_assets(
             .ok_or("updater signature is missing")?;
         let signature = minisign::SignatureBox::from_string(&decode(signature)?)
             .map_err(|_| "invalid updater signature")?;
+        if let Some(target) = windows_target {
+            let comment = format!("zephium-updater-v1 version={version} target={target}");
+            if signature.trusted_comment().ok() != Some(comment.as_str()) {
+                return Err("updater signature is not bound to this release version and target");
+            }
+        }
         minisign::verify(
             &public,
             &signature,
@@ -271,7 +282,14 @@ mod tests {
         ] {
             let path = directory.join(asset);
             std::fs::write(&path, format!("harmless fixture: {asset}")).unwrap();
-            let signature = sign(&path, "1.2.4", &secret, String::new(), &public, TARGET).unwrap();
+            let target = if keys.iter().any(|key| key.starts_with("windows-aarch64")) {
+                ARM_TARGET
+            } else if keys.iter().any(|key| key.starts_with("windows-x86_64")) {
+                TARGET
+            } else {
+                ""
+            };
+            let signature = sign(&path, "1.2.4", &secret, String::new(), &public, target).unwrap();
             std::fs::write(directory.join(format!("{asset}.sig")), &signature).unwrap();
             for key in keys {
                 platforms.insert(key.into(), serde_json::json!({
@@ -345,6 +363,41 @@ mod tests {
             );
             std::fs::write(&asset, bytes).unwrap();
         }
+        // A valid signature whose trusted comment names another target or
+        // version must not pass the release check.
+        for (keys, wrong_target, wrong_version) in [
+            (&["windows-x86_64", "windows-x86_64-nsis"][..], ARM_TARGET, "1.2.4"),
+            (&["windows-aarch64", "windows-aarch64-nsis"][..], TARGET, "1.2.4"),
+            (&["windows-x86_64", "windows-x86_64-nsis"][..], TARGET, "1.2.3"),
+        ] {
+            let asset = if keys[0].starts_with("windows-aarch64") {
+                "Zephium-Windows-arm64-setup.exe"
+            } else {
+                "Zephium-Windows-x64-setup.exe"
+            };
+            let sig_path = directory.join(format!("{asset}.sig"));
+            let original_sig = std::fs::read(&sig_path).unwrap();
+            let signature = sign(
+                &directory.join(asset),
+                wrong_version,
+                &secret,
+                String::new(),
+                &public,
+                wrong_target,
+            )
+            .unwrap();
+            std::fs::write(&sig_path, &signature).unwrap();
+            let mut bad = good.clone();
+            for key in keys {
+                bad["platforms"][*key]["signature"] = signature.clone().into();
+            }
+            assert_eq!(
+                check(&bad),
+                Err("updater signature is not bound to this release version and target"),
+                "wrong binding for {keys:?}"
+            );
+            std::fs::write(&sig_path, original_sig).unwrap();
+        }
         // Keep each original signature while changing only its downloaded bytes.
         for asset in [
             "Zephium-macOS-arm64.app.tar.gz",
@@ -408,6 +461,14 @@ mod tests {
         )
         .is_err());
         assert!(sign(&path, "v1.2.4", &secret, String::new(), &public, TARGET).is_err());
+        assert_eq!(
+            run(&[
+                "installer.exe".into(),
+                "1.2.4".into(),
+                "windows-aarch64".into()
+            ]),
+            Err("unsupported Windows updater target")
+        );
         let encrypted =
             minisign::KeyPair::generate_encrypted_keypair(Some("fixture password".into())).unwrap();
         let secret = encode(encrypted.sk.to_box(None).unwrap().to_string());
