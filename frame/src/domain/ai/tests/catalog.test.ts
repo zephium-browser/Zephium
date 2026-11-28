@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import type { WorkModelEntry, WorkModelsV1 } from "$shared/ipc/bindings";
 import {
+  compatiblePresets,
   contextSize,
+  keyedProviders,
   dollars,
   effortLevels,
   locked,
@@ -121,5 +123,30 @@ describe("the picker's details", () => {
     expect(effortLevels(view, "deepseek/deepseek-v4-pro")).toEqual(["low", "high"]);
     expect(effortLevels(view, "nobody/none")).toEqual([]);
     expect(view.effort).toBe("high");
+  });
+});
+
+describe("OpenAI-compatible endpoint presets", () => {
+  test("the requested gateways are clearly labelled with https addresses and model ids", () => {
+    expect(compatiblePresets.map((preset) => preset.label)).toEqual([
+      "z.ai / GLM",
+      "Alibaba / Qwen",
+      "OrcaRouter",
+    ]);
+    for (const preset of compatiblePresets) {
+      expect(new URL(preset.base).protocol).toBe("https:");
+      expect(preset.models.length).toBeGreaterThan(0);
+      expect(preset.models.every((id) => id.trim().length > 0)).toBe(true);
+    }
+  });
+
+  test("presets carry no credentials and stay inside the existing Custom provider", () => {
+    for (const preset of compatiblePresets) {
+      expect(JSON.stringify(preset)).not.toMatch(/api[_-]?key|token|password/iu);
+    }
+    expect(keyedProviders).toContain("compatible");
+    expect(keyedProviders).not.toContain("z_ai");
+    expect(keyedProviders).not.toContain("qwen");
+    expect(keyedProviders).not.toContain("orcarouter");
   });
 });

@@ -39,6 +39,37 @@ export function providerName(provider: WorkModelProvider): string {
   return names[provider];
 }
 
+/**
+ * Starting points for the "Custom" (OpenAI-compatible) provider. These are
+ * addresses and published model ids only: no credentials are stored here, and
+ * the person still supplies their own key in Settings → AI. A gateway's own
+ * `/v1/models` listing remains authoritative for which models it serves.
+ */
+export type CompatiblePreset = {
+  label: string;
+  base: string;
+  models: readonly string[];
+};
+
+export const compatiblePresets: readonly CompatiblePreset[] = [
+  {
+    label: "z.ai / GLM",
+    // Coding-plan keys use https://api.z.ai/api/coding/paas/v4 instead.
+    base: "https://api.z.ai/api/paas/v4",
+    models: ["glm-4.6"],
+  },
+  {
+    label: "Alibaba / Qwen",
+    base: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    models: ["qwen3-coder-plus", "qwen-plus"],
+  },
+  {
+    label: "OrcaRouter",
+    base: "https://api.orcarouter.ai/v1",
+    models: ["openai/gpt-5"],
+  },
+];
+
 /** The model's name as the trigger shows it: the mark beside it says the family. */
 export function shortName(entry: WorkModelEntry): string {
   const name = entry.display_name;

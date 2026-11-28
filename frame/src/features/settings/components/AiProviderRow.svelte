@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { commands } from "$shared/ipc/bindings";
   import type { WorkLocalServerV1, WorkModelProvider } from "$shared/ipc/bindings";
-  import { type ModelsSession, keyState, providerName } from "$domain/ai";
+  import { compatiblePresets, type ModelsSession, keyState, providerName } from "$domain/ai";
   import ProviderMark from "$shared/ui/ProviderMark";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
@@ -258,9 +258,25 @@
           type="url"
           autocomplete="off"
           spellcheck="false"
-          bind:value={address}
+          value={address}
+          oninput={(event) => {
+            address = event.currentTarget.value;
+            secret = "";
+          }}
           onkeydown={escape}
         />{/if}
+      {#if custom}<div class="presets" role="group" aria-label={m.connections_presets()}>
+          {#each compatiblePresets as preset (preset.base)}<button
+              type="button"
+              class="preset"
+              aria-pressed={address.trim() === preset.base}
+              title={preset.models.join(", ")}
+              onclick={() => {
+                address = preset.base;
+                secret = "";
+              }}>{preset.label}</button
+            >{/each}
+        </div>{/if}
       <Field
         label={custom ? m.ai_endpoint_key() : m.ai_key_field({ provider: name })}
         labelHidden={!custom}
@@ -425,6 +441,27 @@
       opacity: 0;
       translate: 0 -4px;
     }
+  }
+
+  .presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .preset {
+    padding: 4px 8px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-control-compact);
+    background: var(--color-fill);
+    color: var(--color-muted);
+    cursor: pointer;
+    font-size: var(--text-caption);
+  }
+
+  .preset[aria-pressed="true"] {
+    border-color: var(--color-accent);
+    color: var(--color-text);
   }
 
   .buttons {
