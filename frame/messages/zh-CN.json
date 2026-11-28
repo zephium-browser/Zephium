@@ -3802,6 +3802,7 @@
   "native_hard_reload_second_alternate": "强制重新载入 (第二备用)",
   "native_developer_tools_alternate": "开发者工具 (备用)",
   "native_full_screen": "全屏幕",
+  "native_open_location_alternate": "打开位置 (备用)",
   "native_back_alternate": "返回 (备用)",
   "native_forward_alternate": "前进 (备用)",
   "native_next_tab_alternate": "下一个标签页 (备用)",

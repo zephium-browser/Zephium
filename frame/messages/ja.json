@@ -3802,6 +3802,7 @@
   "native_hard_reload_second_alternate": "強制再読み込み (代替 2)",
   "native_developer_tools_alternate": "開発者ツール (代替)",
   "native_full_screen": "フルスクリーン",
+  "native_open_location_alternate": "場所を開く (代替)",
   "native_back_alternate": "戻る (代替)",
   "native_forward_alternate": "進む (代替)",
   "native_next_tab_alternate": "次のタブ (代替)",

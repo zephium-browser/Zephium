@@ -3802,6 +3802,7 @@
   "native_hard_reload_second_alternate": "Actualisation forcée (Seconde alternative)",
   "native_developer_tools_alternate": "Outils de développement (Alternative)",
   "native_full_screen": "Plein écran",
+  "native_open_location_alternate": "Ouvrir une adresse (Alternative)",
   "native_back_alternate": "Page précédente (Alternative)",
   "native_forward_alternate": "Page suivante (Alternative)",
   "native_next_tab_alternate": "Onglet suivant (Alternative)",

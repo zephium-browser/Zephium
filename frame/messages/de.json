@@ -3802,6 +3802,7 @@
   "native_hard_reload_second_alternate": "Neu laden ohne Cache (Zweite Alternative)",
   "native_developer_tools_alternate": "Entwicklerwerkzeuge (Alternative)",
   "native_full_screen": "Vollbild",
+  "native_open_location_alternate": "Adresse öffnen (Alternative)",
   "native_back_alternate": "Zurück (Alternative)",
   "native_forward_alternate": "Vorwärts (Alternative)",
   "native_next_tab_alternate": "Nächster Tab (Alternative)",
