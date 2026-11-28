@@ -136,7 +136,7 @@ fn check_assets(
             .map_err(|_| "invalid updater signature")?;
         if let Some(target) = windows_target {
             let comment = format!("zephium-updater-v1 version={version} target={target}");
-            if signature.trusted_comment().ok() != Some(comment.as_str()) {
+            if signature.trusted_comment().ok() != Some(comment) {
                 return Err("updater signature is not bound to this release version and target");
             }
         }
