@@ -15,6 +15,7 @@ pub enum SearchEngine {
     DuckDuckGo,
     Bing,
     Brave,
+    Kagi,
     Custom,
 }
 
@@ -25,6 +26,7 @@ impl SearchEngine {
             "duckduckgo" => Some(Self::DuckDuckGo),
             "bing" => Some(Self::Bing),
             "brave" => Some(Self::Brave),
+            "kagi" => Some(Self::Kagi),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -37,6 +39,7 @@ impl SearchEngine {
             Self::DuckDuckGo => "duckduckgo",
             Self::Bing => "bing",
             Self::Brave => "brave",
+            Self::Kagi => "kagi",
             Self::Custom => "custom",
         }
     }
@@ -47,6 +50,7 @@ impl SearchEngine {
             Self::DuckDuckGo => "DuckDuckGo",
             Self::Bing => "Bing",
             Self::Brave => "Brave Search",
+            Self::Kagi => "Kagi",
             Self::Custom => "Custom search",
         }
     }
@@ -59,6 +63,7 @@ impl SearchEngine {
             Self::DuckDuckGo => "https://duckduckgo.com/",
             Self::Bing => "https://www.bing.com/search",
             Self::Brave => "https://search.brave.com/search",
+            Self::Kagi => "https://kagi.com/search",
             Self::Custom => return None,
         };
         let mut url = Url::parse(base).ok()?;
@@ -79,7 +84,8 @@ impl SearchEngine {
             Self::DuckDuckGo => ("https://duckduckgo.com/ac/", "q", &[("type", "list")]),
             Self::Bing => ("https://www.bing.com/osjson.aspx", "query", &[]),
             Self::Brave => ("https://search.brave.com/api/suggest", "q", &[]),
-            Self::Custom => return None,
+            // Kagi has no public OpenSearch suggestion endpoint.
+            Self::Kagi | Self::Custom => return None,
         };
         let mut url = Url::parse(base).ok()?;
         {
@@ -92,9 +98,15 @@ impl SearchEngine {
         Some(url)
     }
 
-    pub fn configured_search(self, query: &str, template: &str) -> Option<Url> {
+    /// `token` is a private session value, appended only for Kagi; no caller
+    /// may put it in a diagnostic or share it with another engine.
+    pub fn configured_search(self, query: &str, template: &str, token: &str) -> Option<Url> {
         if self != Self::Custom {
-            return self.search(query);
+            let mut url = self.search(query)?;
+            if self == Self::Kagi && !token.is_empty() {
+                url.query_pairs_mut().append_pair("token", token.trim());
+            }
+            return Some(url);
         }
         navigation::search_query(query)?;
         if !valid_template(template) {
@@ -106,9 +118,9 @@ impl SearchEngine {
         navigation::is_allowed(&url).then_some(url)
     }
 
-    pub fn configured_classify(self, input: &str, template: &str) -> Option<Url> {
+    pub fn configured_classify(self, input: &str, template: &str, token: &str) -> Option<Url> {
         if navigation::is_query(input) {
-            self.configured_search(input, template)
+            self.configured_search(input, template, token)
         } else {
             navigation::classify(input)
         }
@@ -334,6 +346,7 @@ mod tests {
             SearchEngine::DuckDuckGo,
             SearchEngine::Bing,
             SearchEngine::Brave,
+            SearchEngine::Kagi,
         ] {
             assert_eq!(SearchEngine::from_id(engine.id()), Some(engine));
             let url = engine.search("rust & svelte 日本").unwrap();
@@ -356,6 +369,46 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn kagi_carries_its_session_token_only_when_selected() {
+        let engine = SearchEngine::Kagi;
+        assert_eq!(SearchEngine::from_id(engine.id()), Some(engine));
+        assert_eq!(engine.name(), "Kagi");
+        assert_eq!(
+            engine.search("rust & svelte").unwrap().as_str(),
+            "https://kagi.com/search?q=rust+%26+svelte"
+        );
+        assert!(engine.suggestions("rust").is_none());
+        let token = "secret-session-token";
+        let url = engine.configured_search("rust", "", token).unwrap();
+        assert_eq!(url.host_str(), Some("kagi.com"));
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "token")
+                .map(|(_, value)| value.into_owned()),
+            Some(token.to_owned())
+        );
+        assert_eq!(
+            engine.configured_search("rust", "", "").unwrap().query_pairs().count(),
+            1
+        );
+        for other in [
+            SearchEngine::Google,
+            SearchEngine::DuckDuckGo,
+            SearchEngine::Bing,
+            SearchEngine::Brave,
+            SearchEngine::Custom,
+        ] {
+            let template = "https://example.com/search?q={searchTerms}";
+            let url = other.configured_search("rust", template, token).unwrap();
+            assert!(
+                url.query_pairs().all(|(key, _)| key != "token"),
+                "{} must not carry the token",
+                other.id()
+            );
+        }
+    }
+
     #[test]
     fn relevance_prefers_exact_and_prefix_matches() {
         assert!(
@@ -498,20 +551,20 @@ mod policy_tests {
             assert!(!valid_template(bad));
         }
         let url = SearchEngine::Custom
-            .configured_search("a&admin=true", template)
+            .configured_search("a&admin=true", template, "")
             .unwrap();
         assert_eq!(url.query_pairs().count(), 1);
         assert_eq!(url.query_pairs().next().unwrap().1, "a&admin=true");
         assert_eq!(
             ShortcutRegistry::default()
-                .resolve("!d example.com", SearchEngine::DuckDuckGo, "")
+                .resolve("!d example.com", SearchEngine::DuckDuckGo, "", "")
                 .unwrap()
                 .host_str(),
             Some("duckduckgo.com")
         );
         assert_eq!(
             ShortcutRegistry::default()
-                .resolve("!g example.com", SearchEngine::DuckDuckGo, "")
+                .resolve("!g example.com", SearchEngine::DuckDuckGo, "", "")
                 .unwrap()
                 .host_str(),
             Some("www.google.com")
@@ -524,7 +577,13 @@ pub fn is_search_url(value: &str) -> bool {
     Url::parse(value).is_ok_and(|url| {
         matches!(
             url.host_str(),
-            Some("www.google.com" | "duckduckgo.com" | "www.bing.com" | "search.brave.com")
+            Some(
+                "www.google.com"
+                    | "duckduckgo.com"
+                    | "www.bing.com"
+                    | "search.brave.com"
+                    | "kagi.com"
+            )
         ) && url.query_pairs().any(|(key, _)| key == "q")
     })
 }

@@ -49,8 +49,8 @@ async fn search_backend(
     models: &WorkLeadModels,
 ) -> Result<Box<dyn zephium_core::work::search::WorkPublicSearchProvider>, WorkError> {
     let fallback = provider_search(profile, models).await?;
-    let (engine, template) = search_engine().await;
-    let Ok(browser) = zephium_agentic::BrowserSearch::try_new(engine, &template) else {
+    let (engine, template, token) = search_engine().await;
+    let Ok(browser) = zephium_agentic::BrowserSearch::try_new(engine, &template, &token) else {
         return Ok(match fallback {
             Some((search, _)) => search,
             None => {
@@ -78,7 +78,7 @@ async fn search_backend(
 
 /// The engine the person searches with in the address bar, and their
 /// custom engine's address.
-async fn search_engine() -> (zephium_core::search::SearchEngine, String) {
+async fn search_engine() -> (zephium_core::search::SearchEngine, String, String) {
     use zephium_core::ports::store::Store;
     tauri::async_runtime::spawn_blocking(|| {
         let store = crate::APP_STORE.get()?;
@@ -89,6 +89,7 @@ async fn search_engine() -> (zephium_core::search::SearchEngine, String) {
                 .and_then(zephium_core::search::SearchEngine::from_id)
                 .unwrap_or_default(),
             store.app_setting("search.custom-url").unwrap_or_default(),
+            store.app_setting("search.kagi-token").unwrap_or_default(),
         ))
     })
     .await

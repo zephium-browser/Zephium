@@ -39,6 +39,24 @@
   let saved = $derived(preferences.value("search.custom-url"));
   let engine = $derived(preferences.value("search.engine"));
 
+  let token = $state(untrack(() => preferences.value("search.kagi-token")));
+  let editingToken = $state(false);
+  $effect(() => {
+    const value = preferences.value("search.kagi-token");
+    if (!editingToken) token = value;
+  });
+  let tokenInvalid = $derived(
+    token.length > 0 && !/^[A-Za-z0-9_.-]{1,256}$/u.test(token.trim()),
+  );
+
+  async function saveToken(event: SubmitEvent) {
+    event.preventDefault();
+    if (tokenInvalid || preferences.saving()) return;
+    const submitted = token.trim();
+    await preferences.set("search.kagi-token", submitted);
+    if (token.trim() === submitted && !preferences.saveFailed()) editingToken = false;
+  }
+
   async function saveCustomUrl(event: SubmitEvent) {
     event.preventDefault();
     if (invalid || preferences.saving()) return;
@@ -64,6 +82,7 @@
         { value: "duckduckgo", label: "DuckDuckGo" },
         { value: "bing", label: "Bing" },
         { value: "brave", label: "Brave Search" },
+        { value: "kagi", label: m.search_kagi() },
         { value: "custom", label: m.search_custom(), disabled: !saved },
       ]}
       onchange={(value) => void preferences.set("search.engine", value)}
@@ -87,6 +106,35 @@
       onchange={(value) => void preferences.set("search.suggestions", String(value))}
     />
   </SettingsRow>
+
+  {#if engine === "kagi"}
+    <SettingsRow
+      settingId="search.kagi-token"
+      title={m.search_kagi_token_label()}
+      description={m.search_kagi_token_description()}
+    >
+      <form onsubmit={saveToken}>
+        <Field
+          label={m.search_kagi_token_label()}
+          labelHidden
+          type="password"
+          autocomplete="off"
+          spellcheck={false}
+          value={token}
+          maxlength={256}
+          error={tokenInvalid ? m.search_kagi_token_invalid() : undefined}
+          hint={m.search_kagi_token_hint()}
+          oninput={(event) => {
+            editingToken = true;
+            token = event.currentTarget.value;
+          }}
+        />
+        <Button type="submit" disabled={preferences.saving() || tokenInvalid}
+          >{m.search_save()}</Button
+        >
+      </form>
+    </SettingsRow>
+  {/if}
 
   <PreferenceSwitch id="search.history" preference="search.history" />
   <SettingsRow

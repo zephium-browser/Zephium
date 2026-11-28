@@ -4,6 +4,7 @@ pub const KEYS: &[&str] = &[
     "search.engine",
     "search.shortcuts",
     "search.custom-url",
+    "search.kagi-token",
     "search.suggestions",
     "sidebar.mode",
     "sidebar.width",
@@ -206,6 +207,15 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "search.shortcuts" => crate::search::ShortcutRegistry::from_setting(value).is_some(),
         "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
+        // A Kagi session token is a secret carried in a query parameter. Keep
+        // it bounded and free of characters that could change the query.
+        "search.kagi-token" => {
+            value.is_empty()
+                || (value.len() <= 256
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
+        }
         "appearance" => matches!(value, "system" | "light" | "dark"),
         "sidebar.mode" => matches!(value, "default" | "compact" | "hidden"),
         "sidebar.width" => value
@@ -355,6 +365,21 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kagi_token_is_a_bounded_url_safe_secret() {
+        assert!(KEYS.contains(&"search.kagi-token"));
+        assert!(value_allowed("search.kagi-token", ""));
+        assert!(value_allowed("search.kagi-token", "abc123-DEF_456.789"));
+        for value in [
+            "token with space",
+            "token\nline",
+            "a=b&c=d",
+            "javascript:alert(1)",
+            &"x".repeat(257),
+        ] {
+            assert!(!value_allowed("search.kagi-token", value), "{value}");
+        }
+    }
     #[test]
     fn newtab_customization_accepts_only_local_images_and_closed_choices() {
         for key in [

@@ -23,6 +23,7 @@ pub(super) struct SearchState {
     pub(super) supplementary_pending: bool,
     pub(super) query: String,
     pub(super) custom_url: String,
+    pub(super) kagi_token: String,
     pub(super) engine: zephium_core::search::SearchEngine,
     pub(super) shortcuts: zephium_core::search::ShortcutRegistry,
     /// Pages visited before are offered as places to go. An explicit
@@ -461,6 +462,7 @@ impl Shell {
                         query,
                         self.search.engine,
                         &self.search.custom_url,
+                        &self.search.kagi_token,
                     )
                 })
                 .flatten()

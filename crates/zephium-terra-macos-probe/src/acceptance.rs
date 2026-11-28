@@ -2299,7 +2299,7 @@ pub(super) async fn lead_workflow(
         .and_then(|id| zephium_core::search::SearchEngine::from_id(&id))
         .unwrap_or_default();
     say(format_args!("lead-run: search engine={}", engine.id()));
-    let search = zephium_agentic::BrowserSearch::try_new(engine, "")
+    let search = zephium_agentic::BrowserSearch::try_new(engine, "", "")
         .and_then(|browser| {
             browser.with_fallback(
                 Box::new(fallback),

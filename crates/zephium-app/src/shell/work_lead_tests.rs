@@ -1912,7 +1912,7 @@ impl WorkPublicSearchProvider for Fallback {
 }
 
 fn browser_search(asked: &Arc<std::sync::atomic::AtomicUsize>) -> zephium_agentic::BrowserSearch {
-    zephium_agentic::BrowserSearch::try_new(zephium_core::search::SearchEngine::DuckDuckGo, "")
+    zephium_agentic::BrowserSearch::try_new(zephium_core::search::SearchEngine::DuckDuckGo, "", "")
         .unwrap()
         .with_fallback(
             Box::new(Fallback(asked.clone())),

@@ -43,7 +43,7 @@
   } = $props();
 
   /** The engines a search can go to by default, which are shortcuts too. */
-  const ENGINES = ["google", "duckduckgo", "bing", "brave"];
+  const ENGINES = ["google", "duckduckgo", "bing", "brave", "kagi"];
 
   let shortcuts = $derived(preferences.searchShortcuts());
   let engine = $derived(preferences.value("search.engine"));

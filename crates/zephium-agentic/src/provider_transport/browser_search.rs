@@ -72,6 +72,8 @@ const FRESHNESS: [(&str, [Param; 4]); 4] = [
 pub struct BrowserSearch {
     engine: SearchEngine,
     template: String,
+    /// A private Kagi session token. Never included in a diagnostic.
+    token: String,
     fallback: Option<(Box<dyn WorkPublicSearchProvider>, WorkSearchFallbackV1)>,
     fallbacks: AtomicU8,
 }
@@ -79,13 +81,18 @@ pub struct BrowserSearch {
 impl BrowserSearch {
     /// `template` is the person's custom engine address with
     /// `{searchTerms}`; it is refused for a custom engine without a valid one.
-    pub fn try_new(engine: SearchEngine, template: &str) -> Result<Self, WorkError> {
+    pub fn try_new(
+        engine: SearchEngine,
+        template: &str,
+        token: &str,
+    ) -> Result<Self, WorkError> {
         if engine == SearchEngine::Custom && !zephium_core::search::valid_template(template) {
             return Err(WorkError::Unavailable);
         }
         Ok(Self {
             engine,
             template: template.to_owned(),
+            token: token.trim().to_owned(),
             fallback: None,
             fallbacks: AtomicU8::new(0),
         })
@@ -121,12 +128,14 @@ impl BrowserSearch {
                     SearchEngine::DuckDuckGo => 1,
                     SearchEngine::Bing => 2,
                     SearchEngine::Brave => 3,
-                    SearchEngine::Custom => return Some((base, None)),
+                    SearchEngine::Kagi | SearchEngine::Custom => return Some((base, None)),
                 };
                 Some((base, params[slot]))
             })
             .unwrap_or((query, None));
-        let mut url = self.engine.configured_search(query, &self.template)?;
+        let mut url = self
+            .engine
+            .configured_search(query, &self.template, &self.token)?;
         if let Some((key, value)) = fresh {
             url.query_pairs_mut().append_pair(key, value);
         }

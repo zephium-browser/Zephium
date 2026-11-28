@@ -187,6 +187,7 @@ impl Rules<'_> {
             SearchEngine::Bing => on("bing.com") || on("bing.net"),
             SearchEngine::DuckDuckGo => on("duckduckgo.com") || on("duck.com"),
             SearchEngine::Brave => on("search.brave.com"),
+            SearchEngine::Kagi => on("kagi.com"),
             SearchEngine::Custom => self.own.is_some_and(on),
         }
     }

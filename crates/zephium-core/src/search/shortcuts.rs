@@ -244,12 +244,18 @@ impl ShortcutRegistry {
         }
     }
 
-    pub fn resolve(&self, input: &str, engine: SearchEngine, template: &str) -> Option<Url> {
+    pub fn resolve(
+        &self,
+        input: &str,
+        engine: SearchEngine,
+        template: &str,
+        token: &str,
+    ) -> Option<Url> {
         let parsed = self.parse(input);
         if let Some(shortcut) = parsed.shortcut.and_then(|id| self.get(id)) {
             return shortcut.resolve(&parsed.query);
         }
-        engine.configured_classify(input, template)
+        engine.configured_classify(input, template, token)
     }
 }
 
@@ -469,39 +475,39 @@ mod tests {
     fn resolution_preserves_query_encoding_home_and_default_engine() {
         let registry = ShortcutRegistry::default();
         let url = registry
-            .resolve("yt café & cats? #/", SearchEngine::Bing, "")
+            .resolve("yt café & cats? #/", SearchEngine::Bing, "", "")
             .unwrap();
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
             [("search_query".into(), "café & cats? #/".into())]
         );
         let url = registry
-            .resolve("!gm a b/c", SearchEngine::Bing, "")
+            .resolve("!gm a b/c", SearchEngine::Bing, "", "")
             .unwrap();
         assert!(url.as_str().ends_with("/a%20b%2Fc"));
         assert_eq!(
             registry
-                .resolve("yt ", SearchEngine::Bing, "")
+                .resolve("yt ", SearchEngine::Bing, "", "")
                 .unwrap()
                 .as_str(),
             "https://www.youtube.com/"
         );
         assert_eq!(
             registry
-                .resolve("!yt", SearchEngine::Bing, "")
+                .resolve("!yt", SearchEngine::Bing, "", "")
                 .unwrap()
                 .as_str(),
             "https://www.youtube.com/"
         );
         assert_eq!(
             registry
-                .resolve("cats", SearchEngine::Bing, "")
+                .resolve("cats", SearchEngine::Bing, "", "")
                 .unwrap()
                 .host_str(),
             Some("www.bing.com")
         );
         assert!(registry
-            .resolve("yt file:///secret", SearchEngine::Bing, "")
+            .resolve("yt file:///secret", SearchEngine::Bing, "", "")
             .is_none());
     }
 

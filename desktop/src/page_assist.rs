@@ -888,8 +888,9 @@ mod product {
                 .and_then(zephium_core::search::SearchEngine::from_id)
                 .unwrap_or_default();
             let template = self.1.app_setting("search.custom-url").unwrap_or_default();
+            let token = self.1.app_setting("search.kagi-token").unwrap_or_default();
             engine
-                .configured_search(query, &template)
+                .configured_search(query, &template, &token)
                 .or_else(|| zephium_core::search::SearchEngine::default().search(query))
                 .map(String::from)
         }

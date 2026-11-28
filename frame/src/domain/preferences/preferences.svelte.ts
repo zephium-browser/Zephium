@@ -10,6 +10,7 @@ const defaults = {
   "search.shortcuts": "",
   "search.engine": "duckduckgo",
   "search.custom-url": "",
+  "search.kagi-token": "",
   "search.suggestions": "true",
   "sidebar.mode": "default",
   "ui.accent": "graphite",

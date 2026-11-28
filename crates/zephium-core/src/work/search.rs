@@ -53,7 +53,14 @@ pub fn supported_public_search_model(model: &str) -> bool {
 
 /// The engines a browser search can name, as the `search.engine` preference
 /// stores them.
-pub const BROWSER_SEARCH_ENGINES: [&str; 5] = ["google", "duckduckgo", "bing", "brave", "custom"];
+pub const BROWSER_SEARCH_ENGINES: [&str; 6] = [
+    "google",
+    "duckduckgo",
+    "bing",
+    "brave",
+    "kagi",
+    "custom",
+];
 /// Results one browser search's evidence holds at most.
 pub const BROWSER_SEARCH_MAX_RESULTS: usize = 16;
 pub const BROWSER_SEARCH_SNIPPET_BYTES: usize = 1024;

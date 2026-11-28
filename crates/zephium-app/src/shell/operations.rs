@@ -355,7 +355,12 @@ impl Shell {
         let Some(input) = self
             .search
             .shortcuts
-            .resolve(&input, self.search.engine, &self.search.custom_url)
+            .resolve(
+                &input,
+                self.search.engine,
+                &self.search.custom_url,
+                &self.search.kagi_token,
+            )
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -530,7 +535,12 @@ impl Shell {
         let Some(input) = self
             .search
             .shortcuts
-            .resolve(&input, self.search.engine, &self.search.custom_url)
+            .resolve(
+                &input,
+                self.search.engine,
+                &self.search.custom_url,
+                &self.search.kagi_token,
+            )
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -680,7 +690,12 @@ impl Shell {
         let Some(input) = self
             .search
             .shortcuts
-            .resolve(&input, self.search.engine, &self.search.custom_url)
+            .resolve(
+                &input,
+                self.search.engine,
+                &self.search.custom_url,
+                &self.search.kagi_token,
+            )
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -959,6 +974,9 @@ impl Shell {
         }
         if key == "search.custom-url" {
             self.search.custom_url = value.clone();
+        }
+        if key == "search.kagi-token" {
+            self.search.kagi_token = value.clone();
         }
         if key == "search.engine" {
             self.search.engine =

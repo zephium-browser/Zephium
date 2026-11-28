@@ -549,6 +549,7 @@ impl Shell {
                     .and_then(zephium_core::search::ShortcutRegistry::from_setting)
                     .unwrap_or_default(),
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
+                kagi_token: store.app_setting("search.kagi-token").unwrap_or_default(),
                 engine: store
                     .app_setting("search.engine")
                     .as_deref()

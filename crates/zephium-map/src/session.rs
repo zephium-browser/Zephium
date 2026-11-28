@@ -303,7 +303,7 @@ impl Session {
         }
         let url = cfg
             .engine
-            .configured_search(query_text, &cfg.custom_template)
+            .configured_search(query_text, &cfg.custom_template, "")
             .ok_or(QueryError::Search)?;
         let kind = query.kind().clone();
         let mut s = Self::new(cfg, Some(query));
@@ -640,7 +640,7 @@ impl Session {
             if let Some(url) = self
                 .cfg
                 .engine
-                .configured_search(&query, &self.cfg.custom_template)
+                .configured_search(&query, &self.cfg.custom_template, "")
             {
                 let queued = self.queue.len();
                 self.enqueue(Work::Anonymous(side, query), url);
