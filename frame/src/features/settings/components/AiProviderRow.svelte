@@ -258,7 +258,11 @@
           type="url"
           autocomplete="off"
           spellcheck="false"
-          bind:value={address}
+          value={address}
+          oninput={(event) => {
+            address = event.currentTarget.value;
+            secret = "";
+          }}
           onkeydown={escape}
         />{/if}
       {#if custom}<div class="presets" role="group" aria-label={m.connections_presets()}>
@@ -267,7 +271,10 @@
               class="preset"
               aria-pressed={address.trim() === preset.base}
               title={preset.models.join(", ")}
-              onclick={() => (address = preset.base)}>{preset.label}</button
+              onclick={() => {
+                address = preset.base;
+                secret = "";
+              }}>{preset.label}</button
             >{/each}
         </div>{/if}
       <Field
