@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "啟動器會覆蓋在任何 App 上方開啟。不必切換視窗，就能找到分頁、瀏覽記錄中的網頁、備忘錄或網路內容。",
   "onb_launcher_try": "現在就從任何 App 試試看。",
   "onb_launcher_browser_try": "用於編輯 Zephium 中的網頁位址。",
+  "onb_launcher_ask": "向 Zephium 詢問目前網頁的內容。",
   "onb_launcher_switch": "切換到分頁",
   "onb_launcher_history": "瀏覽記錄",
   "onb_launcher_web": "在網路上搜尋「{query}」",

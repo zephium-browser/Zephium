@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "启动器会浮现在任何 App 之上。无需切换窗口，即可找到标签页、历史记录中的页面、备忘录或网页。",
   "onb_launcher_try": "现在就在任何 App 中试一试。",
   "onb_launcher_browser_try": "用于编辑 Zephium 中的网页地址。",
+  "onb_launcher_ask": "向 Zephium 询问当前网页的内容。",
   "onb_launcher_switch": "切换到标签页",
   "onb_launcher_history": "历史记录",
   "onb_launcher_web": "在网页上搜索“{query}”",

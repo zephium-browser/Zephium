@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { preferences } from "$domain/preferences";
   import * as m from "$shared/i18n/messages";
   import { commands, type LauncherTrigger } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
@@ -87,13 +88,11 @@
         <p>{m.onb_launcher_browser_try()}</p>
       </div>
     {/if}
-    {#if ask}
+    {#if ask && preferences.commandOffered("tool.ai")}
       <div class="shortcut">
         <div class="keys" aria-label={askKeys.join(" ")}>
           {#each askKeys as key, index (index)}
-            <kbd data-down={askDown[index] ?? false} data-lit={real} data-wide={key.length > 2}
-              >{key}</kbd
-            >
+            <kbd data-down={askDown[index] ?? false} data-wide={key.length > 2}>{key}</kbd>
           {/each}
         </div>
         <p>{m.onb_launcher_ask()}</p>
@@ -116,10 +115,18 @@
     animation: lift 640ms var(--ease-emphasized) 320ms backwards;
   }
 
+  .try:has(> .shortcut:nth-child(3)) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
   .shortcut {
     display: grid;
     justify-items: center;
     gap: 12px;
+  }
+
+  .shortcut:first-child {
+    grid-column: 1 / -1;
   }
 
   .keys {

@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "Le lanceur s'ouvre au-dessus de n'importe quelle app. Trouvez un onglet, une page de votre historique, une note ou le Web, sans changer de fenêtre.",
   "onb_launcher_try": "Essayez-le maintenant, depuis n'importe quelle app.",
   "onb_launcher_browser_try": "Pour l’adresse d’une page dans Zephium.",
+  "onb_launcher_ask": "Posez une question à Zephium sur la page que vous consultez.",
   "onb_launcher_switch": "Passer à l'onglet",
   "onb_launcher_history": "Historique",
   "onb_launcher_web": "Rechercher « {query} » sur le Web",

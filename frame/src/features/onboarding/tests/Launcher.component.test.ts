@@ -8,7 +8,11 @@ import Launcher from "../components/steps/Launcher.svelte";
 const native = vi.hoisted(() => ({
   location: "CmdOrCtrl+L" as string | null,
   ask: "CmdOrCtrl+E" as string | null,
+  aiEnabled: true,
   registered: true,
+}));
+vi.mock("$domain/preferences", () => ({
+  preferences: { commandOffered: () => native.aiEnabled },
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -48,23 +52,33 @@ vi.mock("$shared/ipc/bindings", async () => {
 beforeEach(() => {
   native.location = "CmdOrCtrl+L";
   native.ask = "CmdOrCtrl+E";
+  native.aiEnabled = true;
   native.registered = true;
 });
 
 test("shows the person's own Ask the page binding from the keymap", async () => {
-  native.ask = "CmdOrCtrl+Alt+E";
+  native.ask = IS_MAC ? "Cmd+F8" : "Ctrl+F8";
   const screen = await render(Launcher);
   await expect
     .element(screen.getByLabelText(acceleratorKeys(native.ask, IS_MAC).join(" "), { exact: true }))
     .toBeVisible();
-  await expect
-    .element(screen.getByText("Ask Zephium about the page in front of you."))
-    .toBeVisible();
+  const askHint = screen.getByText("Ask Zephium about the page in front of you.");
+  const locationHint = screen.getByText("For a page’s address in Zephium.");
+  await expect.element(askHint).toBeVisible();
+  await expect.element(locationHint).toBeVisible();
+  expect(askHint.element().getBoundingClientRect().top).toBe(
+    locationHint.element().getBoundingClientRect().top,
+  );
 });
 
-test("does not advertise Ask the page when it has no binding", async () => {
-  native.ask = null;
+test.each([
+  { reason: "it has no binding", ask: null, aiEnabled: true },
+  { reason: "AI is disabled", ask: "CmdOrCtrl+E", aiEnabled: false },
+])("does not advertise Ask the page when $reason", async ({ ask, aiEnabled }) => {
+  native.ask = ask;
+  native.aiEnabled = aiEnabled;
   const screen = await render(Launcher);
+  await expect.element(screen.getByText("For a page’s address in Zephium.")).toBeVisible();
   await expect
     .element(screen.getByText("Ask Zephium about the page in front of you."))
     .not.toBeInTheDocument();

@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "El lanzador se abre sobre cualquier app. Encuentra una pestaña, una página de tu historial, una nota o la web, sin cambiar de ventana.",
   "onb_launcher_try": "Pruébalo ahora, desde cualquier app.",
   "onb_launcher_browser_try": "Para la dirección de una página en Zephium.",
+  "onb_launcher_ask": "Pregúntale a Zephium sobre la página que estás viendo.",
   "onb_launcher_switch": "Cambiar a pestaña",
   "onb_launcher_history": "Historial",
   "onb_launcher_web": "Buscar en la web “{query}”",

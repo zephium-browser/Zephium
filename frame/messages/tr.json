@@ -1522,6 +1522,7 @@
   "onb_launcher_body": "Başlatıcı herhangi bir uygulamanın üzerinde açılır. Pencereler arasında geçiş yapmadan bir sekme, geçmişinizden bir sayfa, bir not ya da web'i bulun.",
   "onb_launcher_try": "Şimdi herhangi bir uygulamadan deneyin.",
   "onb_launcher_browser_try": "Zephium’da bir sayfanın adresi için.",
+  "onb_launcher_ask": "Görüntülediğiniz sayfa hakkında Zephium’a soru sorun.",
   "onb_launcher_switch": "Sekmeye geç",
   "onb_launcher_history": "Geçmiş",
   "onb_launcher_web": "Web'de \"{query}\" için ara",
