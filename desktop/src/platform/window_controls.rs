@@ -265,10 +265,15 @@ impl WindowControls {
             return;
         }
         let shown = self.ivars().reveal.visible();
+        let duration = if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+            0.0
+        } else {
+            LIGHT_SECONDS
+        };
         for button in self.buttons() {
-            fade(&button, if shown { 0.0 } else { 1.0 }, LIGHT_SECONDS);
+            fade(&button, if shown { 0.0 } else { 1.0 }, duration);
         }
-        fade(self, if shown { 1.0 } else { 0.0 }, LIGHT_SECONDS);
+        fade(self, if shown { 1.0 } else { 0.0 }, duration);
         self.setNeedsDisplay(true);
     }
 

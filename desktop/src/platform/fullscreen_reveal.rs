@@ -8,29 +8,31 @@
 //! leaves. This is the state behind those decisions, independent of AppKit so
 //! the behaviour can be tested off macOS.
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+use std::cell::Cell;
+
+#[derive(Default)]
 pub(crate) struct FullscreenReveal {
-    fullscreen: bool,
-    inside: bool,
+    fullscreen: Cell<bool>,
+    inside: Cell<bool>,
 }
 
 impl FullscreenReveal {
     /// Fullscreen begins or ends. Either way the old corner state is stale:
     /// a pointer already in the corner is rediscovered from its position.
-    pub(crate) fn set_fullscreen(&mut self, fullscreen: bool) {
-        self.fullscreen = fullscreen;
-        self.inside = false;
+    pub(crate) fn set_fullscreen(&self, fullscreen: bool) {
+        self.fullscreen.set(fullscreen);
+        self.inside.set(false);
     }
 
     /// The pointer entered or left the top-left region.
-    pub(crate) fn pointer(&mut self, inside: bool) {
-        self.inside = self.fullscreen && inside;
+    pub(crate) fn pointer(&self, inside: bool) {
+        self.inside.set(self.fullscreen.get() && inside);
     }
 
     /// Whether the controls must be visible now. There is deliberately no
     /// timer that hides them while the pointer remains inside.
     pub(crate) fn visible(&self) -> bool {
-        self.fullscreen && self.inside
+        self.fullscreen.get() && self.inside.get()
     }
 }
 
@@ -40,7 +42,7 @@ mod tests {
 
     #[test]
     fn the_corner_reveal_only_exists_in_fullscreen() {
-        let mut reveal = FullscreenReveal::default();
+        let reveal = FullscreenReveal::default();
         reveal.pointer(true);
         assert!(!reveal.visible(), "in a normal window AppKit owns them");
         reveal.set_fullscreen(true);
@@ -49,7 +51,7 @@ mod tests {
 
     #[test]
     fn the_reveal_stays_as_long_as_the_pointer_stays_in_the_corner() {
-        let mut reveal = FullscreenReveal::default();
+        let reveal = FullscreenReveal::default();
         reveal.set_fullscreen(true);
         reveal.pointer(true);
         for _ in 0..1_000 {
@@ -62,7 +64,7 @@ mod tests {
 
     #[test]
     fn leaving_the_corner_hides_the_reveal() {
-        let mut reveal = FullscreenReveal::default();
+        let reveal = FullscreenReveal::default();
         reveal.set_fullscreen(true);
         reveal.pointer(true);
         assert!(reveal.visible());
@@ -74,7 +76,7 @@ mod tests {
 
     #[test]
     fn exiting_fullscreen_drops_the_reveal_and_its_pending_corner_state() {
-        let mut reveal = FullscreenReveal::default();
+        let reveal = FullscreenReveal::default();
         reveal.set_fullscreen(true);
         reveal.pointer(true);
         reveal.set_fullscreen(false);
