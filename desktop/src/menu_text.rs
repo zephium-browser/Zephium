@@ -103,6 +103,9 @@ pub(crate) fn label(english: &str) -> String {
 }
 
 pub(crate) fn key(english: &str) -> String {
+    if english == "New window" {
+        return "menu_new_window".into();
+    }
     let mut key = String::from("native");
     for word in english
         .replace('…', " more")
@@ -131,6 +134,7 @@ mod tests {
         assert_eq!(translated("zh-Hans-CN"), Some("zh-CN"));
         assert_eq!(translated("nl"), None);
         assert_eq!(key("Split View…"), "native_split_view_more");
+        assert_eq!(key("New window"), "menu_new_window");
         assert_eq!(key("Appearance: System"), "native_appearance_system");
     }
 

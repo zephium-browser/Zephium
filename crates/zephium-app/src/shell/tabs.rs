@@ -198,6 +198,17 @@ struct KeptSlot {
 }
 
 impl Shell {
+    pub(super) fn item_visible_in_other_window(&self, id: ItemId, profile: ProfileId) -> bool {
+        let focused = self.windows.focused().map(|window| window.id);
+        self.windows.iter().any(|window| {
+            Some(window.id) != focused
+                && window.kind == zephium_core::windows::WindowKind::Main
+                && window.profile == profile
+                && (window.active == Some(id)
+                    || window.splits.as_ref().is_some_and(|tree| tree.contains(id)))
+        })
+    }
+
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
         self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
@@ -259,11 +270,19 @@ impl Shell {
 
     /// Moves window focus to `id`: lifecycle bookkeeping plus a lazy view.
     pub(super) fn focus_tab(&mut self, id: ItemId) -> Vec<Effect> {
-        let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
+        let Some((focused_window, profile, space)) = self
+            .windows
+            .focused()
+            .map(|win| (win.id, win.profile, win.space))
         else {
             return Vec::new();
         };
         if !self.item_in_scope(id, profile, space) {
+            return Vec::new();
+        }
+        if self.windows.iter().any(|window| {
+            window.id != focused_window && window.profile == profile && window.active == Some(id)
+        }) {
             return Vec::new();
         }
         // Explicit selection supersedes a pending native foreground request.
@@ -470,11 +489,24 @@ impl Shell {
         space: SpaceId,
         at: Option<usize>,
     ) -> Option<ItemId> {
-        let tabs = self.successor_pool(profile, space);
+        let pool = self.successor_pool(profile, space);
+        let focused = self.windows.focused().map(|window| window.id);
+        let available = |id: &ItemId| {
+            !self.windows.iter().any(|window| {
+                Some(window.id) != focused
+                    && window.profile == profile
+                    && window.active == Some(*id)
+            })
+        };
+        let tabs: Vec<_> = pool.iter().filter(|id| available(id)).copied().collect();
         if tabs.is_empty() {
             return None;
         }
-        let at = at.unwrap_or(0);
+        let at = pool
+            .iter()
+            .take(at.unwrap_or(0))
+            .filter(|id| available(id))
+            .count();
         match self.tab_preferences.after_close {
             AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
             AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
@@ -568,10 +600,11 @@ impl Shell {
     pub(super) fn open_tab_for(&self, url: &str) -> Option<ItemId> {
         let window = self.windows.focused()?;
         self.keyboard_tabs(window.space).into_iter().find(|id| {
-            self.items.tab(*id).is_some_and(|tab| {
-                tab.content == zephium_core::item::TabContent::Web
-                    && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
-            })
+            !self.item_visible_in_other_window(*id, window.profile)
+                && self.items.tab(*id).is_some_and(|tab| {
+                    tab.content == zephium_core::item::TabContent::Web
+                        && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
+                })
         })
     }
 
@@ -596,6 +629,42 @@ impl Shell {
     pub(super) fn close_in_any_space(&mut self, id: ItemId) {
         if self.item_in_focused_scope(id) {
             let _ = self.close(id);
+            let affected = self
+                .windows
+                .iter()
+                .filter(|window| {
+                    window.active == Some(id)
+                        || window.splits.as_ref().is_some_and(|tree| tree.contains(id))
+                })
+                .map(|window| (window.id, window.space, window.active == Some(id)))
+                .collect::<Vec<_>>();
+            for (window_id, space, was_active) in affected {
+                let replacement = was_active
+                    .then(|| {
+                        self.today_tabs(space).into_iter().find(|candidate| {
+                            !self.windows.iter().any(|window| {
+                                window.active == Some(*candidate)
+                                    || window
+                                        .splits
+                                        .as_ref()
+                                        .is_some_and(|tree| tree.contains(*candidate))
+                            })
+                        })
+                    })
+                    .flatten();
+                if let Some(window) = self.windows.get_mut(window_id) {
+                    if let Some(tree) = window.splits.take() {
+                        window.splits = tree.remove(id);
+                    }
+                    if was_active {
+                        window.active = replacement;
+                    }
+                }
+                if let Some(replacement) = replacement {
+                    self.items.set_lifecycle(replacement, Lifecycle::Active);
+                }
+            }
+            let _ = self.commit(Vec::new());
             return;
         }
         self.forget_removed_tab_state(id);
@@ -841,6 +910,15 @@ impl Shell {
             || !self.item_in_scope(dropped, profile, space)
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if [target, dropped]
+            .into_iter()
+            .any(|id| self.item_visible_in_other_window(id, profile))
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
         }
         if [target, dropped].into_iter().any(|id| {
             self.items

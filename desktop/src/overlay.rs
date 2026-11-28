@@ -27,6 +27,14 @@ pub const EVENT_STATE: &str = "zephium:panel-state";
 #[derive(Default)]
 pub struct ContextCache(Mutex<Option<Owner>>);
 impl ContextCache {
+    pub fn owner_window_id(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|owner| owner.window.clone())
+    }
+
     /// A provider must match the current browser owner even before the panel exists.
     pub fn search_private(&self, context: &SearchContext) -> Option<bool> {
         let current = self.0.lock().unwrap_or_else(|e| e.into_inner());

@@ -6,8 +6,9 @@ mod swipe;
 pub use log::redirect_stderr;
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ptr::null_mut;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1025,47 +1026,133 @@ mod tests {
     }
 }
 
+pub(crate) type KeyTable =
+    Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>;
+#[derive(Default)]
+struct KeyMonitorWindows {
+    labels_by_window: HashMap<usize, String>,
+    registrations: HashMap<String, KeyMonitorWindow>,
+}
+
+impl KeyMonitorWindows {
+    fn insert(&mut self, native_window: usize, label: String, registration: KeyMonitorWindow) {
+        self.labels_by_window.insert(native_window, label.clone());
+        self.registrations.insert(label, registration);
+    }
+
+    fn remove_label(&mut self, label: &str) {
+        self.registrations.remove(label);
+        self.labels_by_window
+            .retain(|_, registered| registered != label);
+    }
+
+    fn label_for_window(&self, native_window: usize) -> Option<&str> {
+        self.labels_by_window
+            .get(&native_window)
+            .map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod key_monitor_windows_tests {
+    use super::{KeyMonitorWindow, KeyMonitorWindows};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn destroyed_window_registration_is_removed_by_label() {
+        let mut windows = KeyMonitorWindows::default();
+        windows.insert(
+            42,
+            "browser-42".into(),
+            KeyMonitorWindow {
+                table: Arc::new(RwLock::new(Vec::new())),
+                on: Box::new(|_| {}),
+            },
+        );
+
+        windows.remove_label("browser-42");
+
+        assert_eq!(windows.label_for_window(42), None);
+        assert!(!windows.registrations.contains_key("browser-42"));
+    }
+}
+
 thread_local! {
     static KEY_MONITOR: RefCell<Option<Retained<objc2::runtime::AnyObject>>> =
         const { RefCell::new(None) };
+    static KEY_WINDOWS: RefCell<Option<Rc<RefCell<KeyMonitorWindows>>>> =
+        const { RefCell::new(None) };
+}
+
+struct KeyMonitorWindow {
+    table: KeyTable,
+    on: Box<dyn Fn(&str)>,
 }
 
 /// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
 /// key equivalent, and Next/Previous Tab must not reach the page (a page
 /// keystroke hides the pointer), so a local monitor matches them before the
 /// focused web view sees the keystroke, and extensions' commands after them.
-/// Only the main window's keys are considered; the launcher panel keeps its own.
-pub fn install_key_monitor(
+/// Every registered browser window shares one local app key monitor; the
+/// launcher panel keeps its own shortcuts.
+pub(crate) fn install_key_monitor(
     window: &WebviewWindow,
-    table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,
+    table: KeyTable,
     on: impl Fn(&str) + 'static,
 ) {
     use block2::RcBlock;
     use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
     use std::ptr::NonNull;
 
-    let Ok(main_window) = window.ns_window() else {
+    let Ok(native_window) = window.ns_window() else {
         return;
     };
-    let main_window = main_window as usize;
+    let native_window = native_window as usize;
+    let label = window.label().to_owned();
+    let windows = KEY_WINDOWS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let windows =
+            slot.get_or_insert_with(|| Rc::new(RefCell::new(KeyMonitorWindows::default())));
+        let mut registrations = windows.borrow_mut();
+        registrations.insert(
+            native_window,
+            label,
+            KeyMonitorWindow {
+                table,
+                on: Box::new(on),
+            },
+        );
+        windows.clone()
+    });
+    let should_install = KEY_MONITOR.with(|slot| slot.borrow().is_none());
+    if !should_install {
+        return;
+    }
+    let handler_windows = windows.clone();
     let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event_ref = unsafe { event.as_ref() };
         let Some(mtm) = MainThreadMarker::new() else {
             return event.as_ptr();
         };
-        let in_main = event_ref
-            .window(mtm)
-            .is_some_and(|w| Retained::as_ptr(&w) as usize == main_window);
-        if !in_main {
+        let Some(native_window) = event_ref.window(mtm) else {
             return event.as_ptr();
-        }
+        };
+        let native_window = Retained::as_ptr(&native_window) as usize;
+        let windows = handler_windows.borrow();
+        let Some(label) = windows.label_for_window(native_window) else {
+            return event.as_ptr();
+        };
+        let Some(target) = windows.registrations.get(label) else {
+            return event.as_ptr();
+        };
         let flags = event_ref.modifierFlags();
         let character = event_ref
             .charactersByApplyingModifiers(NSEventModifierFlags::empty())
             .map(|text| text.to_string().to_lowercase());
         let key_code = event_ref.keyCode();
-        let hit = table
+        let hit = target
+            .table
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
@@ -1080,7 +1167,7 @@ pub fn install_key_monitor(
         match hit {
             Some(id) => {
                 if !event_ref.isARepeat() {
-                    on(id);
+                    (target.on)(id);
                 }
                 std::ptr::null_mut()
             }
@@ -1096,6 +1183,15 @@ pub fn install_key_monitor(
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
     };
     KEY_MONITOR.with(|slot| *slot.borrow_mut() = monitor);
+}
+
+pub(crate) fn remove_key_monitor(label: &str) {
+    KEY_WINDOWS.with(|slot| {
+        if let Some(windows) = slot.borrow().as_ref() {
+            let mut windows = windows.borrow_mut();
+            windows.remove_label(label);
+        }
+    });
 }
 
 /// Printable keys compare by the character they type unmodified, so the

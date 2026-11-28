@@ -530,6 +530,28 @@ pub enum Command {
     /// OS focus is separate from visibility: background pages may keep playing
     /// audio, but they may not initiate or retain browser-owned device consent.
     SetWindowFocused(bool),
+    /// A full browser window was built and attached to the engine.
+    BrowserWindowAttached {
+        window: WindowId,
+        size: Size,
+    },
+    /// The native browser window changed size independently of the focused
+    /// window.
+    BrowserWindowResized {
+        window: WindowId,
+        size: Size,
+    },
+    /// Native focus and visibility belong to a specific browser window.
+    BrowserWindowFocused {
+        window: WindowId,
+        focused: bool,
+    },
+    BrowserWindowVisible {
+        window: WindowId,
+        visible: bool,
+    },
+    /// The native window was closed or could not be constructed.
+    BrowserWindowClosed(WindowId),
     StopMediaCapture {
         item: ItemId,
         navigation: zephium_core::ports::engine::NavigationPresentationId,

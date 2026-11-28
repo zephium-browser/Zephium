@@ -1342,6 +1342,13 @@ pub struct MiniOpenedView {
     pub height: f64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct BrowserWindowOpenedView {
+    pub window: u64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// The shell let a mini window go. `reveal_main` brings the main window
 /// forward because the page just moved into it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1864,6 +1871,8 @@ pub enum Projection {
     /// The sidebar's player, sent when it changes; `None` hides it.
     MediaPlayer(Option<MediaPlayerView>),
     MiniOpened(MiniOpenedView),
+    BrowserWindowOpened(BrowserWindowOpenedView),
+    BrowserWindowClosed(u64),
     Mini(MiniView),
     MiniClosed(MiniClosedView),
     /// Links another application handed over opened as tabs, so the main

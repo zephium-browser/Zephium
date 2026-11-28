@@ -565,6 +565,14 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        let focused_window = self.windows.focused().map(|window| window.id);
+        if self
+            .windows
+            .iter()
+            .any(|window| Some(window.id) != focused_window && window.active == Some(id))
+        {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
         let active = self.windows.focused().and_then(|window| window.active);
         if active == Some(id)
             && self
@@ -808,6 +816,15 @@ impl Shell {
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        if [active, other]
+            .into_iter()
+            .any(|id| self.item_visible_in_other_window(id, profile))
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
+        }
         if [active, other].into_iter().any(|id| {
             self.items.tab(id).is_some_and(|tab| {
                 matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
@@ -1044,6 +1061,7 @@ impl Shell {
         };
         match id {
             "tab.new" => self.operation_open(),
+            "window.new" => self.open_browser_window(),
             "window.newPrivate" => self.operation_enter_private(),
             // The desktop opens the launcher for a mini window instead; this
             // runs only while the private window is in front, whose pages
@@ -1202,21 +1220,37 @@ impl Shell {
     }
 
     fn operation_cycle_tab(&mut self, step: isize) -> OperationDisposition {
-        let Some(win) = self.windows.focused() else {
+        let Some((window_id, profile, space, active)) = self
+            .windows
+            .focused()
+            .map(|win| (win.id, win.profile, win.space, win.active))
+        else {
             return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
         };
-        let Some(active) = win.active else {
+        let Some(active) = active else {
             return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
         };
-        let tabs = self.keyboard_tabs(win.space);
+        let tabs = self.keyboard_tabs(space);
         let Some(position) = tabs.iter().position(|id| *id == active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         if tabs.len() < 2 {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
-        let next = (position as isize + step).rem_euclid(tabs.len() as isize) as usize;
-        self.operation_activate(tabs[next])
+        for distance in 1..tabs.len() {
+            let next = (position as isize + step * distance as isize)
+                .rem_euclid(tabs.len() as isize) as usize;
+            let candidate = tabs[next];
+            if self.windows.iter().any(|window| {
+                window.id != window_id
+                    && window.profile == profile
+                    && window.active == Some(candidate)
+            }) {
+                continue;
+            }
+            return self.operation_activate(candidate);
+        }
+        operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged)
     }
 
     /// Selects by sidebar position, counting from one. `None` is the last tab,

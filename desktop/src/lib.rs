@@ -72,6 +72,7 @@ mod blocker_bench;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
+mod browser_window;
 mod content_fullscreen;
 mod data_export;
 mod default_browser;
@@ -643,6 +644,9 @@ impl UiStartupGate {
             #[cfg(feature = "adblock-qa")]
             blocker_bench::window_shown();
             on_main_window_mapped(window);
+            if window.label() != MAIN_LABEL {
+                let _ = window.set_focus();
+            }
             #[cfg(feature = "work-development-traces")]
             startup_styles::after_show(window, &self.expected());
         }
@@ -2389,6 +2393,8 @@ fn navigation_lock() -> tauri::plugin::TauriPlugin<tauri::Wry> {
                     || ui_navigation_allowed(url),
                     |gate| gate.permits_navigation(url),
                 )
+            } else if let Some(allowed) = browser_window::navigation_allowed(webview.label(), url) {
+                allowed
             } else {
                 ui_navigation_allowed(url)
             };
@@ -2437,20 +2443,47 @@ fn try_emit_to_privileged<T: Serialize>(
     event: &str,
     payload: &T,
 ) -> bool {
+    let targets = if label == MAIN_LABEL {
+        browser_window::labels(app)
+    } else {
+        vec![label.to_owned()]
+    };
+    try_emit_to_privileged_targets(app, targets, event, payload)
+}
+
+fn try_emit_to_privileged_only<T: Serialize>(
+    app: &tauri::AppHandle,
+    label: &str,
+    event: &str,
+    payload: &T,
+) -> bool {
+    try_emit_to_privileged_targets(app, vec![label.to_owned()], event, payload)
+}
+
+fn try_emit_to_privileged_targets<T: Serialize>(
+    app: &tauri::AppHandle,
+    targets: Vec<String>,
+    event: &str,
+    payload: &T,
+) -> bool {
     let (Ok(event), Ok(payload)) = (serde_json::to_string(event), serde_json::to_string(payload))
     else {
         diagnostic!("projection: failed to serialize privileged event");
         return false;
     };
-    let Some(window) = app.get_webview_window(label) else {
-        return false;
-    };
     let script = format!("window.dispatchEvent(new CustomEvent({event},{{detail:{payload}}}));");
-    if let Err(error) = window.eval(&script) {
-        diagnostic!("projection: delivery to {label} failed: {error}");
-        return false;
+    let mut delivered = false;
+    for target in targets {
+        let Some(window) = app.get_webview_window(&target) else {
+            continue;
+        };
+        if let Err(error) = window.eval(&script) {
+            diagnostic!("projection: delivery to {target} failed: {error}");
+        } else {
+            delivered = true;
+        }
     }
-    true
+    delivered
 }
 
 pub(crate) fn emit_media_changed(app: &tauri::AppHandle, profile: &str, id: &str, revision: &str) {
@@ -2465,6 +2498,22 @@ pub(crate) fn emit_media_changed(app: &tauri::AppHandle, profile: &str, id: &str
 
 fn emit_to_privileged<T: Serialize>(app: &tauri::AppHandle, label: &str, event: &str, payload: &T) {
     let _ = try_emit_to_privileged(app, label, event, payload);
+}
+
+fn browser_projection_label(window_id: Option<&str>) -> String {
+    window_id
+        .and_then(|id| id.parse::<u64>().ok())
+        .filter(|id| *id > 0)
+        .map(browser_window::label)
+        .unwrap_or_else(|| MAIN_LABEL.to_owned())
+}
+
+fn emit_to_browser_owner<T: Serialize>(app: &tauri::AppHandle, event: &str, payload: &T) {
+    let window_id = app
+        .try_state::<overlay::ContextCache>()
+        .and_then(|context| context.owner_window_id());
+    let label = browser_projection_label(window_id.as_deref());
+    let _ = try_emit_to_privileged_only(app, &label, event, payload);
 }
 
 /// Applies one exact revision-bearing tab projection and verifies the
@@ -2783,13 +2832,14 @@ enum CallerPolicy {
 // `WebviewWindow` is injected from Tauri's invoke message (and omitted by
 // Specta), so the label cannot be forged as a serialized command argument.
 fn caller_allowed(policy: CallerPolicy, label: &str) -> bool {
+    let browser_window = label == MAIN_LABEL || browser_window::window_of(label).is_some();
     match policy {
-        CallerPolicy::Main => label == MAIN_LABEL,
+        CallerPolicy::Main => browser_window,
         CallerPolicy::Panel => label == overlay::PANEL_LABEL,
-        CallerPolicy::Both => matches!(label, MAIN_LABEL | overlay::PANEL_LABEL),
+        CallerPolicy::Both => browser_window || label == overlay::PANEL_LABEL,
         CallerPolicy::Mini => mini::window_of(label).is_some(),
         CallerPolicy::AnyChrome => {
-            matches!(label, MAIN_LABEL | overlay::PANEL_LABEL) || mini::window_of(label).is_some()
+            browser_window || label == overlay::PANEL_LABEL || mini::window_of(label).is_some()
         }
     }
 }
@@ -4253,7 +4303,9 @@ fn execute_command_or(
     }
     // A page that holds the screen is left with its own controls.
     if id == "window.fullscreen" {
-        let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+        let Some(window) =
+            browser_window::focused(app).or_else(|| app.get_webview_window(MAIN_LABEL))
+        else {
             return rejected_operation();
         };
         return if !content_fullscreen::held()
@@ -4356,9 +4408,19 @@ fn execute_command_or(
     // authoritative URL of the page it shows.
     if matches!(
         id,
-        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous" | "work.dictate"
+        "page.copyLink" | "find.show" | "find.next" | "find.previous" | "work.dictate"
     ) {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
+    if id == "note.new" {
+        let label = browser_window::focused(app)
+            .map(|window| window.label().to_owned())
+            .unwrap_or_else(|| MAIN_LABEL.to_owned());
+        return if try_emit_to_privileged_only(app, &label, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
             rejected_operation()
@@ -4909,7 +4971,11 @@ fn ui_ready(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "ui_ready") {
         return false;
     }
-    gate.mark_frontend_ready(&caller)
+    if caller.label() == MAIN_LABEL {
+        gate.mark_frontend_ready(&caller)
+    } else {
+        browser_window::ui_ready(&caller)
+    }
 }
 
 #[tauri::command]
@@ -6514,7 +6580,10 @@ fn build_menu(
         .show_all_with_text(menu_text::label("Show All"))
         .separator();
     let app_menu = app_menu.item(&build_quit_menu_item(handle)?).build()?;
-    let file = SubmenuBuilder::new(handle, menu_text::label("File"))
+    let file = SubmenuBuilder::new(handle, menu_text::label("File"));
+    #[cfg(target_os = "macos")]
+    let file = file.item(&item("window.new")?);
+    let file = file
         .item(&item("tab.new")?)
         .item(&item("window.newPrivate")?)
         .item(&item("window.newMini")?)
@@ -7345,7 +7414,7 @@ fn finish_browser_setup(
               })();
             "#);
     let ui_startup_gate = if onboarding {
-        UiStartupGate::onboarding_first(app_url.clone(), browser_url)
+        UiStartupGate::onboarding_first(app_url.clone(), browser_url.clone())
     } else {
         UiStartupGate::new(app_url.clone())
     };
@@ -7679,6 +7748,8 @@ fn finish_browser_setup(
     let emit_handle = handle.clone();
     let disposition_ledger = operation_ledger.clone();
     let emit: EmitFn = Box::new(move |projection| match projection {
+        Projection::BrowserWindowOpened(opened) => browser_window::open(&emit_handle, opened),
+        Projection::BrowserWindowClosed(window) => browser_window::close(&emit_handle, window),
         Projection::WorkEnvironmentChanged(change) => emit_to_privileged(
             &emit_handle,
             MAIN_LABEL,
@@ -7697,7 +7768,7 @@ fn finish_browser_setup(
             blocker_bench::items(&state);
             spaces::follow(&emit_handle, &state);
             page_assist::observe_items(&state);
-            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
+            emit_to_browser_owner(&emit_handle, EVENT_ITEMS, &state)
         }
         Projection::Tab(tab) => {
             #[cfg(feature = "adblock-qa")]
@@ -7813,22 +7884,29 @@ fn finish_browser_setup(
             if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
                 keymap.set_work_pane_shown(&emit_handle, layout.work_pane.is_some());
             }
-            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
+            emit_to_browser_owner(&emit_handle, EVENT_LAYOUT, &layout)
         }
         Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
         Projection::RaiseWindow => {
             let app = emit_handle.clone();
             let _ = emit_handle.run_on_main_thread(move || {
-                let Some(main) = app.get_webview_window(MAIN_LABEL) else {
+                let Some(window) = browser_window::focused(&app)
+                    .or_else(|| app.get_webview_window(MAIN_LABEL))
+                    .or_else(|| {
+                        browser_window::labels(&app)
+                            .into_iter()
+                            .find_map(|label| app.get_webview_window(&label))
+                    })
+                else {
                     return;
                 };
                 #[cfg(target_os = "macos")]
-                panel::raise(&main);
+                panel::raise(&window);
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = main.unminimize();
-                    let _ = main.show();
-                    let _ = main.set_focus();
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
             });
         }
@@ -8058,6 +8136,14 @@ fn finish_browser_setup(
     }
     #[cfg(feature = "work-product")]
     page_assist::install(app, engine.clone(), store.clone());
+    browser_window::install(
+        app,
+        browser_url.clone(),
+        main_config.clone(),
+        engine.clone(),
+        #[cfg(target_os = "windows")]
+        privileged_runtime.main.clone(),
+    );
     mini::install(
         app,
         engine.clone(),
@@ -8145,6 +8231,7 @@ fn finish_browser_setup(
     }
 
     let initial = platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
+    // Bootstrap consumes these seed values before it creates logical window 1.
     shell.dispatch(Command::SetWindowSize(initial));
     shell.dispatch(Command::SetWindowFocused(
         window.is_focused().unwrap_or(false),
@@ -8164,7 +8251,7 @@ fn finish_browser_setup(
                         let minimized = resize_window
                             .is_minimized()
                             .unwrap_or(size.width == 0 || size.height == 0);
-                        resize_shell.dispatch(Command::SetWindowVisible(!minimized));
+                        resize_shell.dispatch(Command::BrowserWindowVisible { window: 1, visible: !minimized });
                         #[cfg(target_os = "windows")]
                         platform::imp::set_chrome_minimized(&resize_window, minimized);
                         if minimized {
@@ -8172,7 +8259,7 @@ fn finish_browser_setup(
                         }
                         let size = platform::imp::content_size(&resize_window)
                             .unwrap_or_else(|| inner_logical(&resize_window));
-                        resize_shell.dispatch(Command::SetWindowSize(size));
+                        resize_shell.dispatch(Command::BrowserWindowResized { window: 1, size });
                     }
                     #[cfg(target_os = "windows")]
                     tauri::WindowEvent::Moved(_)
@@ -8186,13 +8273,13 @@ fn finish_browser_setup(
                         // emits only the position-dependent native delta.
                         let size = platform::imp::content_size(&resize_window)
                             .unwrap_or_else(|| inner_logical(&resize_window));
-                        resize_shell.dispatch(Command::SetWindowSize(size));
+                        resize_shell.dispatch(Command::BrowserWindowResized { window: 1, size });
                     }
                     tauri::WindowEvent::ScaleFactorChanged { .. }
                         if !window_shutdown.terminal_started() =>
                     {
                         let minimized = resize_window.is_minimized().unwrap_or(false);
-                        resize_shell.dispatch(Command::SetWindowVisible(!minimized));
+                        resize_shell.dispatch(Command::BrowserWindowVisible { window: 1, visible: !minimized });
                         #[cfg(target_os = "windows")]
                         platform::imp::set_chrome_minimized(&resize_window, minimized);
                         if !minimized {
@@ -8202,7 +8289,7 @@ fn finish_browser_setup(
                             // notifications using the new per-monitor DPI.
                             let size = platform::imp::content_size(&resize_window)
                                 .unwrap_or_else(|| inner_logical(&resize_window));
-                            resize_shell.dispatch(Command::SetWindowSize(size));
+                            resize_shell.dispatch(Command::BrowserWindowResized { window: 1, size });
                         }
                     }
                     tauri::WindowEvent::ThemeChanged(_theme)
@@ -8216,6 +8303,18 @@ fn finish_browser_setup(
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         if updates::blocks_exit(&exit_handle) { return; }
+                        if browser_window::labels(&exit_handle).len() > 1 {
+                            let shell = resize_shell.clone();
+                            resource_close::request_with_result(
+                                exit_handle.clone(),
+                                move |proceed| {
+                                    if proceed {
+                                        shell.dispatch(Command::BrowserWindowClosed(1));
+                                    }
+                                },
+                            );
+                            return;
+                        }
                         let owner=window_shutdown.clone();
                         let app=exit_handle.clone();
                         let shell=resize_shell.clone();
@@ -8224,13 +8323,23 @@ fn finish_browser_setup(
                     // Fallback for platform/programmatic destruction paths
                     // that do not emit a preventable close request first.
                     tauri::WindowEvent::Destroyed => {
+                        resource_close::forget_window(&exit_handle, MAIN_LABEL);
+                        #[cfg(target_os = "macos")]
+                        platform::imp::remove_key_monitor(MAIN_LABEL);
                         #[cfg(target_os = "windows")]
                         if !platform::imp::remove_privileged_version_observer(MAIN_LABEL) {
                             diagnostic!(
                                 "runtime: main WebView2 update observer removal was reentrant"
                             );
                         }
-                        window_shutdown.request(exit_handle.clone(), resize_shell.clone())
+                        if browser_window::labels(&exit_handle)
+                            .iter()
+                            .any(|label| label != MAIN_LABEL)
+                        {
+                            resize_shell.dispatch(Command::BrowserWindowClosed(1));
+                        } else {
+                            window_shutdown.request(exit_handle.clone(), resize_shell.clone())
+                        }
                     }
                     tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop {
                         paths,
@@ -8265,11 +8374,11 @@ fn finish_browser_setup(
                         }
                     }
                     tauri::WindowEvent::Focused(true) => {
-                        resize_shell.dispatch(Command::SetWindowFocused(true));
+                        resize_shell.dispatch(Command::BrowserWindowFocused { window: 1, focused: true });
                         // Some window managers restore without a distinct
                         // resize notification. Wake content before it can be
                         // interacted with.
-                        resize_shell.dispatch(Command::SetWindowVisible(true));
+                        resize_shell.dispatch(Command::BrowserWindowVisible { window: 1, visible: true });
                         #[cfg(target_os = "windows")]
                         platform::imp::set_chrome_minimized(&resize_window, false);
                         #[cfg(target_os = "windows")]
@@ -8280,10 +8389,10 @@ fn finish_browser_setup(
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
-                        resize_shell.dispatch(Command::SetWindowFocused(false));
+                        resize_shell.dispatch(Command::BrowserWindowFocused { window: 1, focused: false });
                         voice::window_blurred(resize_window.app_handle());
                         if resize_window.is_minimized().unwrap_or(false) {
-                            resize_shell.dispatch(Command::SetWindowVisible(false));
+                            resize_shell.dispatch(Command::BrowserWindowVisible { window: 1, visible: false });
                             #[cfg(target_os = "windows")]
                             platform::imp::set_chrome_minimized(&resize_window, true);
                         }
@@ -8941,6 +9050,39 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn main_close_flushes_with_siblings() {
+        let source = include_str!("lib.rs");
+        let close = source
+            .split("if browser_window::labels(&exit_handle).len() > 1 {")
+            .nth(1)
+            .expect("main close with sibling windows")
+            .split("let owner=window_shutdown.clone()")
+            .next()
+            .expect("sibling close branch ends before app shutdown");
+        let flush = close
+            .find("resource_close::request_with_result")
+            .expect("flush before destroying main");
+        let destroy = close
+            .find("Command::BrowserWindowClosed(1)")
+            .expect("destroy main after flush decision");
+        assert!(flush < destroy);
+    }
+
+    #[test]
+    fn projections_follow_owner_window() {
+        assert_eq!(
+            super::browser_projection_label(Some("1")),
+            super::MAIN_LABEL
+        );
+        assert_eq!(super::browser_projection_label(Some("2")), "browser-2");
+        assert_eq!(super::browser_projection_label(None), super::MAIN_LABEL);
+        assert_eq!(
+            super::browser_projection_label(Some("invalid")),
+            super::MAIN_LABEL
+        );
+    }
+
     fn composed_setup_source(production: &str) -> String {
         let initial = production
             .split(".setup(move |app| {")
@@ -11390,6 +11532,8 @@ mod tests {
         use super::CallerPolicy::{Both, Main, Panel};
 
         assert!(super::caller_allowed(Main, "main"));
+        assert!(super::caller_allowed(Main, "browser-2"));
+        assert!(!super::caller_allowed(Main, "browser-02"));
         assert!(!super::caller_allowed(Main, "panel"));
         assert!(!super::caller_allowed(Main, "content"));
 

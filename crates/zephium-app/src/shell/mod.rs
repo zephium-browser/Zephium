@@ -207,6 +207,7 @@ impl AgentLifecycleOwner {
 }
 
 mod browser_pages;
+mod browser_windows;
 mod kept_sites;
 mod spaces;
 mod work_pane;
@@ -1035,6 +1036,19 @@ impl Shell {
                     self.cancel_page_permission_if_not_foreground();
                 }
             }
+            Command::BrowserWindowAttached { window, size } => {
+                self.browser_window_attached(window, size);
+            }
+            Command::BrowserWindowResized { window, size } => {
+                self.browser_window_resized(window, size);
+            }
+            Command::BrowserWindowFocused { window, focused } => {
+                self.browser_window_focused(window, focused);
+            }
+            Command::BrowserWindowVisible { window, visible } => {
+                self.browser_window_visible(window, visible);
+            }
+            Command::BrowserWindowClosed(window) => self.browser_window_closed(window),
             Command::StopMediaCapture { item, navigation } => {
                 let _ = self.operation_stop_media_capture(item, navigation);
             }
@@ -1045,8 +1059,14 @@ impl Shell {
                 let _ = self.operation_media_player(id, action);
             }
             Command::SetWindowVisible(visible) => {
-                if self.window_visible != visible {
-                    self.window_visible = visible;
+                if let Some(window) = self.windows.focused_mut() {
+                    window.visible = visible;
+                }
+                let any_main_visible = self.windows.iter().any(|window| {
+                    window.kind == zephium_core::windows::WindowKind::Main && window.visible
+                });
+                if self.window_visible != any_main_visible {
+                    self.window_visible = any_main_visible;
                     // Do not immediately suspend a page that was actively in
                     // use when the window minimized. The ordinary idle grace
                     // still applies after every content view becomes hidden.

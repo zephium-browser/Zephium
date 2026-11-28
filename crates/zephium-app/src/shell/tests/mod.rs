@@ -2356,6 +2356,8 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::MiniOpened(_)
         | Projection::Mini(_)
         | Projection::MiniClosed(_)
+        | Projection::BrowserWindowOpened(_)
+        | Projection::BrowserWindowClosed(_)
         | Projection::ExternalTabsOpened => {}
     }
 }

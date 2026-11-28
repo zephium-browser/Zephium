@@ -40,7 +40,8 @@ pub fn report_app_active(app: &tauri::AppHandle) {
         app.get_webview_window(label)
             .is_some_and(|window| window.is_focused().unwrap_or(false))
     };
-    let active = focused(crate::MAIN_LABEL) || focused(crate::overlay::PANEL_LABEL);
+    let active =
+        crate::browser_window::focused(app).is_some() || focused(crate::overlay::PANEL_LABEL);
     if let Some(shell) = app.try_state::<Handle>() {
         let _ = shell.dispatch(Command::SetAppActive(active));
     }
