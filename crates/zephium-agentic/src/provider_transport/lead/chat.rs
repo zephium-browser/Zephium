@@ -1,126 +1,4 @@
-//! OpenAI-compatible Chat Completions: DeepSeek, OpenRouter, Mistral, Groq,
-//! Cerebras and custom endpoints. Reasoning the provider requires back (DeepSeek
-//! `reasoning_content`, OpenRouter `reasoning_details`) rides in a replay part.
-
-use serde_json::{json, Map, Value};
-use zephium_core::work::model::*;
-
-use super::sse::SseEvent;
-use super::*;
-
-const WIRE: &str = "chat";
-/// A replay key, not a field: it becomes the message's leading thinking chunk.
-const MISTRAL_THINKING: &str = "thinking";
-
-pub(super) fn body(
-    request: &WorkModelRequest,
-    target: &LeadTarget,
-) -> Result<Value, WorkModelError> {
-    let upstream = target.upstream();
-    let mut messages = Vec::new();
-    let cache_marks =
-        upstream == WorkModelProvider::OpenRouter && request.system.iter().any(|block| block.cache);
-    if cache_marks {
-        // OpenRouter forwards breakpoints to providers that need them.
-        let parts: Vec<Value> = request
-            .system
-            .iter()
-            .filter(|block| !block.text.is_empty())
-            .map(|block| {
-                let mut part = json!({"type": "text", "text": block.text});
-                if block.cache {
-                    part["cache_control"] = json!({"type": "ephemeral"});
-                }
-                part
-            })
-            .collect();
-        messages.push(json!({"role": "system", "content": parts}));
-    } else {
-        let system = system_text(request);
-        if !system.is_empty() {
-            messages.push(json!({"role": "system", "content": system}));
-        }
-    }
-    for message in &request.messages {
-        match message {
-            WorkModelMessage::User(parts) => {
-                let images = parts
-                    .iter()
-                    .any(|part| matches!(part, WorkModelPart::Image { .. }));
-                if images {
-                    let mut content = Vec::new();
-                    for part in parts {
-                        match part {
-                            WorkModelPart::Text(text) => {
-                                content.push(json!({"type": "text", "text": text}))
-                            }
-                            WorkModelPart::Image { media_type, bytes } => {
-                                media_type_ok(media_type)?;
-                                content.push(json!({"type": "image_url", "image_url": {
-                                    "url": format!("data:{media_type};base64,{}", image_base64(bytes)?),
-                                }}));
-                            }
-                            _ => {}
-                        }
-                    }
-                    messages.push(json!({"role": "user", "content": content}));
-                } else {
-                    let text: Vec<&str> = parts
-                        .iter()
-                        .filter_map(|part| match part {
-                            WorkModelPart::Text(text) => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    if !text.is_empty() {
-                        messages.push(json!({"role": "user", "content": text.join("\n\n")}));
-                    }
-                }
-            }
-            WorkModelMessage::Assistant(parts) => {
-                let mut text = String::new();
-                let mut calls = Vec::new();
-                let mut thinking = None;
-                let mut message = json!({"role": "assistant"});
-                for part in parts {
-                    match part {
-                        WorkModelPart::Text(piece) => text.push_str(piece),
-                        WorkModelPart::ToolCall(call) => calls.push(json!({
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": serde_json::to_string(&call.arguments).map_err(|_| WorkModelError::BadRequest)?,
-                            },
-                        })),
-                        part => {
-                            if let Some(extra) = replayed(part, WIRE).and_then(Value::as_object) {
-                                for (key, value) in extra {
-                                    if key == MISTRAL_THINKING {
-                                        thinking = value.as_str().map(str::to_owned);
-                                    } else {
-                                        message[key] = value.clone();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                message["content"] = match thinking {
-                    Some(thinking) if upstream == WorkModelProvider::Mistral => {
-                        let mut chunks = vec![json!({
-                            "type": "thinking",
-                            "thinking": [{"type": "text", "text": thinking}],
-                        })];
-                        if !text.is_empty() {
-                            chunks.push(json!({"type": "text", "text": text}));
-                        }
-                        Value::Array(chunks)
-                    }
-                    _ if text.is_empty() => Value::Null,
-                    _ => json!(text),
-                };
-                if !calls.is_empty() {
+           if !calls.is_empty() {
                     message["tool_calls"] = Value::Array(calls);
                 }
                 if !text.is_empty() || message.get("tool_calls").is_some() {
@@ -178,6 +56,20 @@ pub(super) fn body(
         body.insert("tool_choice".into(), choice);
         if !request.parallel_tools && upstream != WorkModelProvider::Cerebras {
             body.insert("parallel_tool_calls".into(), json!(false));
+        }
+    }
+    // Go takes every effort the catalog advertises, named as in the core
+    // enum. Other compatible endpoints keep their own effort conventions.
+    if upstream == WorkModelProvider::Compatible && target.is_go() {
+        if let Some(reasoning) = request.reasoning {
+            let effort = match reasoning {
+                WorkModelReasoning::Low => "low",
+                WorkModelReasoning::Medium => "medium",
+                WorkModelReasoning::High => "high",
+                WorkModelReasoning::XHigh => "xhigh",
+                WorkModelReasoning::Max => "max",
+            };
+            body.insert("reasoning_effort".into(), json!(effort));
         }
     }
     // DeepSeek's thinking mode does not take a forced tool.
@@ -252,6 +144,8 @@ struct PendingCall {
 
 #[derive(Default)]
 pub(super) struct Decoder {
+    /// OpenCode Go reports its plan charge as `usage.opencode.allowance`.
+    go: bool,
     text: String,
     reasoning: String,
     /// Mistral's reasoning, which it wants back as a thinking chunk.
@@ -264,6 +158,13 @@ pub(super) struct Decoder {
 }
 
 impl Decoder {
+    pub(super) fn new(go: bool) -> Self {
+        Self {
+            go,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn event(
         &mut self,
         frame: &SseEvent,
@@ -295,6 +196,26 @@ impl Decoder {
                 .and_then(Value::as_f64)
                 .filter(|cost| cost.is_finite() && *cost >= 0.0)
                 .map(|cost| (cost * 1_000_000.0).round() as u64);
+            // Inside a Go plan `usage.cost` is always zero; the normalised
+            // charge is the allowance debited for this call.
+            if self.go && self.cost_micros.is_none_or(|cost| cost == 0) {
+                let billed = usage
+                    .pointer("/opencode/billing_source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| matches!(source, "go" | "go-plus"));
+                let allowance = usage
+                    .pointer("/opencode/allowance")
+                    .and_then(|value| {
+                        value
+                            .as_f64()
+                            .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
+                    })
+                    .filter(|amount| amount.is_finite() && *amount >= 0.0)
+                    .map(|amount| (amount * 1_000_000.0).round() as u64);
+                if billed {
+                    self.cost_micros = allowance;
+                }
+            }
         }
         let Some(choice) = data.pointer("/choices/0") else {
             return Ok(Flow::Continue);

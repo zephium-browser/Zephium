@@ -1,404 +1,21 @@
-//! A provider's own model list ("More models") and a cheap key check.
-
-use futures_util::StreamExt as _;
-use reqwest::header::HeaderMap;
-use serde_json::Value;
-use zephium_core::work::model::*;
-
-use super::models::{builtin_price, entry_id, valid_text};
-use super::{http, join, LeadSecret, LeadTarget};
-
-const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
-const MAX_LISTED: usize = 400;
-
-/// What a key check found. It never carries provider text.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LeadKeyCheck {
-    /// The provider accepted the key.
-    Valid(Vec<WorkModelEntry>),
-    /// The provider refused the key.
-    Invalid,
-    /// The provider could not be asked (offline, outage, limits).
-    Unreachable,
-    /// Billing or quota prevents calls.
-    Billing,
-    /// The provider asks for a later retry.
-    RateLimited,
-    /// The provider is temporarily unavailable.
-    ProviderDown,
-    /// The response could not be understood.
-    Failed,
-}
-
-async fn get(
-    target: &LeadTarget,
-    path: &str,
-    query: Option<&str>,
-    secret: &LeadSecret,
-) -> Result<(u16, Vec<u8>), WorkModelError> {
-    let mut url = join(&target.base, path)?;
-    url.set_query(query);
-    let mut headers = HeaderMap::new();
-    target.authorize(&mut headers, secret)?;
-    let response = http(url.scheme() == "http")?
-        .get(url)
-        .headers(headers)
-        .timeout(std::time::Duration::from_secs(12))
-        .send()
-        .await
-        .map_err(|_| WorkModelError::Network)?;
-    let status = response.status().as_u16();
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WorkModelError::Network)?;
-        if body.len() + chunk.len() > MAX_LIST_BYTES {
-            return Err(WorkModelError::Protocol);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok((status, body))
-}
-
-/// Asks the provider whether it accepts `secret`, with one read-only request
-/// that costs nothing (a model list, or OpenRouter's key endpoint).
-pub async fn check_key(target: &LeadTarget, secret: &LeadSecret) -> LeadKeyCheck {
-    let path = if target.upstream == WorkModelProvider::OpenRouter {
-        "key"
-    } else {
-        "models"
-    };
-    let query = match target.upstream {
-        WorkModelProvider::Anthropic => Some("limit=1000"),
-        WorkModelProvider::Google => Some("pageSize=1000"),
-        _ => None,
-    };
-    match get(target, path, query, secret).await {
-        Ok((200..=299, body)) => match serde_json::from_slice::<Value>(&body) {
-            Ok(body)
-                if body.get("data").is_some_and(Value::is_array)
-                    || body.get("models").is_some_and(Value::is_array)
-                    || (target.upstream == WorkModelProvider::OpenRouter
-                        && body.get("data").is_some_and(Value::is_object)) =>
-            {
-                LeadKeyCheck::Valid(parse_list(target, &body))
-            }
-            Ok(_) => LeadKeyCheck::Failed,
-            Err(_) => LeadKeyCheck::Failed,
-        },
-        Ok((status, body)) => {
-            let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let invalid_google = target.upstream == WorkModelProvider::Google
-                && json
-                    .pointer("/error/details")
-                    .and_then(Value::as_array)
-                    .is_some_and(|details| {
-                        details.iter().any(|d| {
-                            d.get("reason").and_then(Value::as_str) == Some("API_KEY_INVALID")
-                        })
-                    });
-            if invalid_google {
-                return LeadKeyCheck::Invalid;
-            }
-            match super::classify(
-                reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_REQUEST),
-                &body,
-            ) {
-                WorkModelError::Unauthorized => LeadKeyCheck::Invalid,
-                WorkModelError::OverBudget => LeadKeyCheck::Billing,
-                WorkModelError::RateLimited { .. } => LeadKeyCheck::RateLimited,
-                WorkModelError::Overloaded => LeadKeyCheck::ProviderDown,
-                _ => LeadKeyCheck::Failed,
-            }
-        }
-        Err(_) => LeadKeyCheck::Unreachable,
-    }
-}
-
-/// A model server running on this Mac that speaks Chat Completions.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocalServer {
-    /// Which server answered.
-    pub kind: LocalServerKind,
-    /// The base to configure, such as `http://localhost:11434/v1`.
-    pub base: &'static str,
-    /// Models it serves now.
-    pub models: usize,
-}
-
-/// The local model servers Zephium recognises.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LocalServerKind {
-    /// Ollama, on port 11434.
-    Ollama,
-    /// LM Studio's server, on port 1234.
-    LmStudio,
-}
-
-/// Looks for Ollama and LM Studio on their default ports, briefly, without
-/// a key. A server that does not answer like itself is not reported.
-pub async fn detect_local_servers() -> Vec<LocalServer> {
-    const PROBES: [(LocalServerKind, &str); 2] = [
-        (LocalServerKind::Ollama, "http://127.0.0.1:11434/v1"),
-        (LocalServerKind::LmStudio, "http://127.0.0.1:1234/v1"),
-    ];
-    let probe = |kind: LocalServerKind, base: &'static str| async move {
-        let client = super::http(true).ok()?;
-        let url = format!("{base}/models");
-        let response = client
-            .get(url)
-            .timeout(std::time::Duration::from_millis(900))
-            .send()
-            .await
-            .ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.ok()?;
-            if body.len() + chunk.len() > MAX_LIST_BYTES {
-                return None;
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let body: Value = serde_json::from_slice(&body).ok()?;
-        let models = body.get("data")?.as_array()?.len();
-        Some(LocalServer {
-            kind,
-            base: match kind {
-                LocalServerKind::Ollama => "http://localhost:11434/v1",
-                LocalServerKind::LmStudio => "http://localhost:1234/v1",
-            },
-            models,
-        })
-    };
-    let (ollama, lm_studio) = futures_util::future::join(
-        probe(PROBES[0].0, PROBES[0].1),
-        probe(PROBES[1].0, PROBES[1].1),
-    )
-    .await;
-    [ollama, lm_studio].into_iter().flatten().collect()
-}
-
-/// Lists the chat models the provider offers to this key, as catalog entries.
-pub async fn list_models(
-    target: &LeadTarget,
-    secret: &LeadSecret,
-) -> Result<Vec<WorkModelEntry>, WorkModelError> {
-    let query = match target.upstream {
-        WorkModelProvider::Anthropic => Some("limit=1000"),
-        WorkModelProvider::Google => Some("pageSize=1000"),
-        _ => None,
-    };
-    let (status, body) = get(target, "models", query, secret).await?;
-    if !(200..=299).contains(&status) {
-        return Err(super::classify(
-            reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_REQUEST),
-            &body,
-        ));
-    }
-    let body: Value = serde_json::from_slice(&body).map_err(|_| WorkModelError::Protocol)?;
-    Ok(parse_list(target, &body))
-}
-
-/// A signed-in session's hosted catalog.
-#[derive(Clone, Debug, Default)]
-pub struct CloudCatalog {
-    /// Chat models for the Work roles.
-    pub models: Vec<super::models::CloudModel>,
-    /// The server's per-role defaults, when it states them.
-    pub defaults: Option<super::models::CloudDefaults>,
-    /// The speech-to-text model, when the account has one.
-    pub transcriber: Option<super::models::CloudTranscriber>,
-}
-
-/// Fetches Zephium Cloud's `GET /v1/models` for a signed-in session.
-pub async fn fetch_cloud_catalog(
-    base: &str,
-    secret: &LeadSecret,
-) -> Result<CloudCatalog, WorkModelError> {
-    let root = reqwest::Url::parse(base).map_err(|_| WorkModelError::BadRequest)?;
-    let target = LeadTarget {
-        wire: WorkModelWire::ChatCompletions,
-        upstream: WorkModelProvider::Cloud,
-        base: join(&root, "v1")?,
-        cloud: true,
-        search_calls: None,
-    };
-    let (status, body) = get(&target, "models", None, secret).await?;
-    match status {
-        200..=299 => {}
-        401 | 403 => return Err(WorkModelError::Unauthorized),
-        _ => return Err(WorkModelError::Protocol),
-    }
-    let body: Value = serde_json::from_slice(&body).map_err(|_| WorkModelError::Protocol)?;
-    Ok(CloudCatalog {
-        models: super::models::parse_cloud(&body),
-        defaults: super::models::parse_cloud_defaults(&body),
-        transcriber: super::models::parse_cloud_transcriber(&body),
-    })
-}
-
-pub(super) fn parse_list(target: &LeadTarget, body: &Value) -> Vec<WorkModelEntry> {
-    let provider = target.upstream;
-    let rows = body
-        .get("data")
-        .or_else(|| body.get("models"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut entries: Vec<WorkModelEntry> = rows
-        .iter()
-        .filter_map(|row| row_entry(provider, target.wire, row))
-        .collect();
-    entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-    entries.dedup_by(|a, b| a.id == b.id);
-    entries.truncate(MAX_LISTED);
-    entries
-}
-
-fn row_entry(
-    provider: WorkModelProvider,
-    wire: WorkModelWire,
-    row: &Value,
-) -> Option<WorkModelEntry> {
-    if row.get("deprecated").and_then(Value::as_bool) == Some(true)
-        || row.get("deprecation").is_some_and(|value| !value.is_null())
-        || matches!(
-            row.get("status").and_then(Value::as_str),
-            Some("deprecated" | "retired")
-        )
-    {
-        return None;
-    }
-    let text = |key: &str| row.get(key).and_then(Value::as_str);
-    let number = |value: Option<&Value>| {
-        value
-            .and_then(Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-    };
-    let (model, name, context, output, vision, tools) = match provider {
-        WorkModelProvider::OpenAi => {
-            let id = text("id")?;
-            if !chat_model(id, &["gpt-", "o1", "o3", "o4", "o5", "chatgpt-"]) {
-                return None;
-            }
-            (id.to_owned(), id.to_owned(), None, None, true, true)
-        }
-        WorkModelProvider::Anthropic => {
-            let id = text("id")?;
-            (
-                id.to_owned(),
-                text("display_name").unwrap_or(id).to_owned(),
-                number(row.get("max_input_tokens")),
-                number(row.get("max_tokens")),
-                true,
-                true,
-            )
-        }
-        WorkModelProvider::Google => {
-            let id = text("name")?.strip_prefix("models/")?;
-            let generates = row
-                .get("supportedGenerationMethods")
-                .and_then(Value::as_array)
-                .is_some_and(|methods| {
-                    methods
-                        .iter()
-                        .any(|m| m.as_str() == Some("generateContent"))
-                });
-            if !generates || !chat_model(id, &["gemini-"]) {
-                return None;
-            }
-            (
-                id.to_owned(),
-                text("displayName").unwrap_or(id).to_owned(),
-                number(row.get("inputTokenLimit")),
-                number(row.get("outputTokenLimit")),
-                true,
-                true,
-            )
-        }
-        WorkModelProvider::OpenRouter => {
-            let id = text("id")?;
-            let tools = row
-                .get("supported_parameters")
-                .and_then(Value::as_array)
-                .is_some_and(|p| p.iter().any(|p| p.as_str() == Some("tools")));
-            if !tools {
-                return None;
-            }
-            let vision = row
-                .pointer("/architecture/input_modalities")
-                .and_then(Value::as_array)
-                .is_some_and(|m| m.iter().any(|m| m.as_str() == Some("image")));
-            (
-                id.to_owned(),
-                text("name").unwrap_or(id).to_owned(),
-                number(row.get("context_length")),
-                number(row.pointer("/top_provider/max_completion_tokens")),
-                vision,
-                true,
-            )
-        }
-        WorkModelProvider::DeepSeek | WorkModelProvider::Compatible => {
-            let id = text("id")?;
-            (id.to_owned(), id.to_owned(), None, None, false, true)
-        }
-        WorkModelProvider::XAi
-        | WorkModelProvider::Mistral
-        | WorkModelProvider::Groq
-        | WorkModelProvider::Cerebras => {
-            let id = text("id")?;
-            // Their lists mix chat models with speech, embedding, image and
-            // safety models, which cannot run a turn.
-            let other = [
-                "embed",
-                "whisper",
-                "tts",
-                "guard",
-                "moderation",
-                "ocr",
-                "image",
-                "imagine",
-                "audio",
-                "transcri",
-                "voxtral",
-                "safeguard",
-            ];
-            if other
-                .iter()
-                .any(|word| id.to_ascii_lowercase().contains(word))
-            {
-                return None;
-            }
-            let window =
-                number(row.get("context_window")).or_else(|| number(row.get("max_context_length")));
-            (id.to_owned(), id.to_owned(), window, None, false, true)
-        }
-        WorkModelProvider::Cloud => return None,
-    };
-    if deprecated(provider, &model) || !valid_text(&model, 160) || !valid_text(&name, 96) {
-        return None;
-    }
-    let price = if provider == WorkModelProvider::OpenRouter {
-        openrouter_price(row)
-    } else {
-        builtin_price(provider, &model)
+ties/reasoning/effort") {
+        Some(Value::Array(efforts)) => !efforts.is_empty(),
+        Some(Value::Object(efforts)) => !efforts.is_empty(),
+        Some(Value::String(effort)) => !effort.is_empty(),
+        _ => false,
     };
     let mut roles = vec![WorkModelRole::Lead, WorkModelRole::Light];
     if vision {
         roles.insert(1, WorkModelRole::Page);
     }
     Some(WorkModelEntry {
-        id: entry_id(provider, &model),
+        id: entry_id(WorkModelProvider::Compatible, id),
         model: WorkModelRef {
-            provider,
+            provider: WorkModelProvider::Compatible,
             wire,
-            model,
+            model: id.to_owned(),
         },
-        display_name: name,
+        display_name: name.to_owned(),
         roles,
         recommended: false,
         context_window: context.unwrap_or(128_000),
@@ -406,22 +23,56 @@ fn row_entry(
         supports: WorkModelSupports {
             tools,
             vision,
-            prompt_cache: matches!(
-                provider,
-                WorkModelProvider::OpenAi
-                    | WorkModelProvider::Anthropic
-                    | WorkModelProvider::Google
-                    | WorkModelProvider::DeepSeek
-            ),
-            reasoning: false,
-            native_search: matches!(
-                provider,
-                WorkModelProvider::OpenAi
-                    | WorkModelProvider::Anthropic
-                    | WorkModelProvider::Google
-            ),
+            prompt_cache: false,
+            reasoning,
+            native_search: false,
         },
-        price,
+        price: go_price(row),
+    })
+}
+
+/// Go prices text per million tokens. Long-context tiers override the base
+/// rate; for reservation we keep the highest applicable rate, so a long call
+/// is never charged at the entry price.
+fn go_price(row: &Value) -> Option<WorkModelPrice> {
+    let text = row.pointer("/cost/text")?;
+    let micros = |value: Option<&Value>| -> Option<u64> {
+        let amount = value.and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
+        })?;
+        (amount.is_finite() && amount >= 0.0)
+            .then(|| (amount * 1_000_000.0).min(u64::MAX as f64).round() as u64)
+    };
+    let mut input = micros(text.get("input"))?;
+    let mut output = micros(text.get("output"))?;
+    let mut cached = micros(text.get("cached_input"))
+        .or_else(|| micros(text.pointer("/cache/read")))
+        .unwrap_or(input);
+    for tier in text
+        .get("overrides")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let rates = tier.get("cost").unwrap_or(tier);
+        if let Some(rate) = micros(rates.get("input")) {
+            input = input.max(rate);
+        }
+        if let Some(rate) = micros(rates.get("output")) {
+            output = output.max(rate);
+        }
+        if let Some(rate) =
+            micros(rates.get("cached_input")).or_else(|| micros(rates.pointer("/cache/read")))
+        {
+            cached = cached.max(rate);
+        }
+    }
+    Some(WorkModelPrice {
+        input,
+        cached_input: cached,
+        output,
     })
 }
 
@@ -622,6 +273,82 @@ mod tests {
             );
             server.await.unwrap();
         }
+    }
+
+    #[test]
+    fn go_profile_derives_its_catalog_and_session_hint() {
+        let go = LeadTarget::compatible("https://api.opencode.ai/inference/go/openai/v1").unwrap();
+        assert!(go.is_go());
+        assert_eq!(
+            go.catalog_url().unwrap().as_str(),
+            "https://api.opencode.ai/inference/go/v1/models"
+        );
+        assert_eq!(
+            go.call_url("glm-5.3-flash", false).unwrap().as_str(),
+            "https://api.opencode.ai/inference/go/openai/v1/chat/completions"
+        );
+        let mut request = super::super::tests::request(WorkModelWire::ChatCompletions, "go-model");
+        request.cache_key = Some("zk_0123456789abcdef".into());
+        assert_eq!(
+            go.go_session(&request).unwrap().to_str().unwrap(),
+            "ses_0123456789abcdef"
+        );
+        request.cache_key = Some("not-a-cache-key".into());
+        assert!(go.go_session(&request).is_none());
+
+        let plain = LeadTarget::compatible("https://host.example/v1").unwrap();
+        assert!(!plain.is_go());
+        assert_eq!(
+            plain.catalog_url().unwrap().as_str(),
+            "https://host.example/v1/models"
+        );
+        assert!(plain.go_session(&request).is_none());
+    }
+
+    #[test]
+    fn go_catalog_rows_carry_limits_modalities_reasoning_and_tiered_prices() {
+        let go = LeadTarget::compatible("https://api.opencode.ai/inference/go/openai/v1").unwrap();
+        let listed = parse_list(
+            &go,
+            &json!({"data": [
+                {"id": "glm-5.3-flash", "name": "GLM 5.3 Flash",
+                 "limit": {"context": 1_000_000, "input": 500_000, "output": 64_000},
+                 "modalities": {"input": ["text", "image"]},
+                 "capabilities": {"tools": true,
+                                  "reasoning": {"effort": ["low", "medium", "high", "xhigh", "max"]}},
+                 "cost": {"text": {"input": "2", "output": "8", "cached_input": "0.5",
+                     "overrides": [
+                         {"up_to": 200000, "input": "2", "output": "8"},
+                         {"input": "6", "output": "24", "cached_input": "1.5"}]}}},
+                {"id": "text-only",
+                 "limit": {"context": 128000, "input": 100000},
+                 "capabilities": {"reasoning": {"effort": []}}}
+            ]}),
+        );
+        assert_eq!(listed.len(), 2);
+        let vision = listed
+            .iter()
+            .find(|entry| entry.model.model == "glm-5.3-flash")
+            .unwrap();
+        assert_eq!(vision.context_window, 1_000_000);
+        assert_eq!(vision.max_output, 64_000);
+        assert!(vision.roles.contains(&WorkModelRole::Page));
+        assert!(vision.supports.vision && vision.supports.tools && vision.supports.reasoning);
+        assert_eq!(
+            vision.price,
+            Some(WorkModelPrice {
+                input: 6_000_000,
+                cached_input: 1_500_000,
+                output: 24_000_000,
+            })
+        );
+        let plain = listed
+            .iter()
+            .find(|entry| entry.model.model == "text-only")
+            .unwrap();
+        assert!(!plain.supports.vision && !plain.supports.reasoning);
+        assert_eq!(plain.max_output, 28_000);
+        assert!(plain.price.is_none());
     }
 
     #[test]
