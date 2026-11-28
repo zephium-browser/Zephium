@@ -99,16 +99,53 @@ fn closing_the_last_private_tab_erases_the_partition_and_returns() {
 }
 
 #[test]
-fn the_shortcut_inside_private_opens_another_private_tab() {
-    let (mut shell, _engine, screen, _store) = browsed();
+fn the_shortcut_inside_private_returns_to_the_regular_window() {
+    let (mut shell, engine, screen, _store) = browsed();
+    shell.handle(Command::Open);
+    let regular = active_id(&screen);
+    let regular_profile = profile(&shell);
     shell.handle(Command::Run("window.newPrivate".into()));
-    let first = active_id(&screen);
+    let private = active_id(&screen);
     let private_profile = profile(&shell);
+    assert_ne!(private, regular);
 
     shell.handle(Command::Run("window.newPrivate".into()));
 
-    assert_ne!(active_id(&screen), first);
+    // The regular window is still here, with its own tab and profile; the
+    // private one was only put aside, not closed or erased.
+    assert!(!shell.private_shown());
+    assert_eq!(profile(&shell), regular_profile);
+    assert_eq!(active_id(&screen), regular);
+    assert!(engine.erasure_requests().is_empty());
+    assert_eq!(shell.profiles_view().unwrap().private_tabs, Some(1));
+
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(shell.private_shown());
     assert_eq!(profile(&shell), private_profile);
+    assert_eq!(active_id(&screen), private);
+    assert!(engine.erasure_requests().is_empty());
+}
+
+#[test]
+fn the_regular_window_stays_switchable_while_private_tabs_are_open() {
+    let (mut shell, engine, screen, _store) = browsed();
+    shell.handle(Command::Open);
+    let regular = active_id(&screen);
+    let regular_profile = profile(&shell);
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let private_profile = profile(&shell);
+    shell.handle(Command::Run("tab.new".into()));
+    let second_private = active_id(&screen);
+
+    shell.handle(Command::Run("window.showRegular".into()));
+    assert_eq!(profile(&shell), regular_profile);
+    assert_eq!(active_id(&screen), regular);
+    assert_eq!(shell.profiles_view().unwrap().private_tabs, Some(2));
+
+    shell.handle(Command::Run("window.showPrivate".into()));
+    assert_eq!(profile(&shell), private_profile);
+    assert_eq!(active_id(&screen), second_private);
+    assert!(engine.erasure_requests().is_empty());
 }
 
 #[test]
