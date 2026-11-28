@@ -995,6 +995,7 @@ pub(in crate::webext) async fn open_options(shell: &Handle, id: &str) -> Result<
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(in crate::webext) fn answer_access(
     dispatch: impl FnOnce(zephium_app::Command),
     extensions: &WebExtensions,

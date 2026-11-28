@@ -1141,6 +1141,7 @@ impl RetirementGate {
             | event @ EngineEvent::ExtensionPageClosed { .. }
             | event @ EngineEvent::PermissionRequested { .. }
             | event @ EngineEvent::WebExtensionAccessRequested(_)
+            | event @ EngineEvent::WebExtensionAccessDismissed { .. }
             | event @ EngineEvent::WebExtensionAccessRemoved(_)
             | event @ EngineEvent::WebExtensionDataRequested(_) => Some(event),
             event @ EngineEvent::WebExtensionDataInterest { profile, .. } => {
@@ -2831,7 +2832,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn answer_web_extension_access(
         &self,
         profile: ProfileId,

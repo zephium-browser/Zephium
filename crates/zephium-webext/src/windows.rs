@@ -1,13 +1,18 @@
 //! Manifest host-access narrowing for native WebView2 packages.
-//! This never implements extension APIs; Chromium enforces the resulting grants.
+//! Chromium enforces manifest grants. The permissions shim routes optional
+//! requests through the browser's own access prompt.
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
+
+pub mod permissions;
 
 pub const HOST_DIRECTORY: &str = "zephium-windows-host";
 const READY_FILE: &str = "zephium-windows-prepared.txt";
 const OBSERVER: &str = include_str!("windows/action-observer.js");
 const WORKER_COMPAT: &str = include_str!("windows/worker-compat.js");
+const PERMISSIONS_COMPAT: &str = include_str!("windows/permissions.js");
+const PERMISSIONS_HOST: &str = include_str!("windows/permissions-host.js");
 const HOST_SCRIPT: &str = include_str!("windows/action-host.js");
 pub const POPUP_TARGET_SCRIPT: &str = include_str!("windows/popup-target.js");
 pub const POPUP_SIZE_SCRIPT: &str = include_str!("windows/popup-size.js");
@@ -21,14 +26,21 @@ pub fn prepare(dir: &Path, sites: Option<&[String]>) -> Result<(), String> {
     if let Some(sites) = sites {
         narrow_hosts(&mut raw, sites)?;
     }
+    let mut files = Vec::new();
+    crate::prepare::list_files(dir, "", &mut files).map_err(|e| e.to_string())?;
     let owned = dir.join(HOST_DIRECTORY);
     fs::create_dir(&owned).map_err(|e| e.to_string())?;
     fs::write(
         owned.join("observer.js"),
-        format!("{WORKER_COMPAT}\n{OBSERVER}"),
+        format!("{PERMISSIONS_COMPAT}\n{WORKER_COMPAT}\n{OBSERVER}"),
     )
     .map_err(|e| e.to_string())?;
-    fs::write(owned.join("host.js"), HOST_SCRIPT).map_err(|e| e.to_string())?;
+    fs::write(owned.join("permissions.js"), PERMISSIONS_COMPAT).map_err(|e| e.to_string())?;
+    fs::write(
+        owned.join("host.js"),
+        format!("{PERMISSIONS_HOST}\n{HOST_SCRIPT}"),
+    )
+    .map_err(|e| e.to_string())?;
     fs::write(
         owned.join("host.html"),
         "<!doctype html><meta charset=utf-8><script src=host.js></script>",
@@ -48,6 +60,14 @@ pub fn prepare(dir: &Path, sites: Option<&[String]>) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    crate::prepare::inject_extension_pages(
+        dir,
+        &manifest,
+        &files,
+        &format!("/{HOST_DIRECTORY}/permissions.js"),
+        &mut Default::default(),
+    )
+    .map_err(|e| e.to_string())?;
     fs::write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&raw).map_err(|e| e.to_string())?,
@@ -107,6 +127,8 @@ pub fn access_revision(sites: Option<&[String]>) -> String {
     hash.update(b"zephium-windows-manifest-v1");
     hash.update(OBSERVER);
     hash.update(WORKER_COMPAT);
+    hash.update(PERMISSIONS_COMPAT);
+    hash.update(PERMISSIONS_HOST);
     hash.update(HOST_SCRIPT);
     hash.update(serde_json::to_vec(&sites).expect("string lists serialize"));
     format!("windows-{:x}", hash.finalize())[..40].to_owned()
@@ -315,6 +337,32 @@ mod tests {
         assert!(fs::read_to_string(dir.join("worker.js"))
             .unwrap()
             .contains("observer.js"));
+    }
+
+    #[test]
+    fn permission_shim_precedes_scripts_in_privileged_extension_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let manifest = json!({
+            "manifest_version": 3, "name": "Test", "version": "1.0",
+            "action": {"default_popup": "popup.html"},
+            "options_ui": {"page": "options.html"},
+            "side_panel": {"default_path": "side.htm"},
+            "sandbox": {"pages": ["sandbox.html"]},
+        });
+        fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+        let html = "<head><script src=extension.js></script></head>";
+        for name in ["popup.html", "options.html", "side.htm", "sandbox.html"] {
+            fs::write(dir.join(name), html).unwrap();
+        }
+        prepare(dir, None).unwrap();
+        for name in ["popup.html", "options.html", "side.htm"] {
+            let prepared = fs::read_to_string(dir.join(name)).unwrap();
+            assert!(prepared.starts_with(&format!(
+                "<head><script src=\"/{HOST_DIRECTORY}/permissions.js\"></script>"
+            )));
+        }
+        assert_eq!(fs::read_to_string(dir.join("sandbox.html")).unwrap(), html);
     }
 }
 

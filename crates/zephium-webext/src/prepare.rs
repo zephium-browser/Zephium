@@ -194,6 +194,22 @@ pub fn prepare(dir: &Path, compat: &CompatLayer) -> Result<PrepareReport, Prepar
         report.worker = Some(file);
     }
 
+    inject_extension_pages(dir, &manifest, &files, &url, &mut report)?;
+
+    if rewritten != original {
+        fs::write(&manifest_path, rewritten)?;
+        report.manifest_rewritten = true;
+    }
+    Ok(report)
+}
+
+pub(crate) fn inject_extension_pages(
+    dir: &Path,
+    manifest: &Manifest,
+    files: &[String],
+    url: &str,
+    report: &mut PrepareReport,
+) -> io::Result<()> {
     let sandboxed: HashSet<String> = manifest
         .sandbox_pages()
         .iter()
@@ -213,14 +229,10 @@ pub fn prepare(dir: &Path, compat: &CompatLayer) -> Result<PrepareReport, Prepar
         }
     }
 
-    if rewritten != original {
-        fs::write(&manifest_path, rewritten)?;
-        report.manifest_rewritten = true;
-    }
-    Ok(report)
+    Ok(())
 }
 
-fn list_files(root: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
+pub(crate) fn list_files(root: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
     let mut entries = fs::read_dir(root.join(prefix))?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {

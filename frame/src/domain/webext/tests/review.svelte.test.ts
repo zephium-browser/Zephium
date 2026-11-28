@@ -8,6 +8,7 @@ const native = vi.hoisted(() => ({
   list: vi.fn(),
   answer: vi.fn(),
   accessListen: vi.fn(),
+  dismissalListen: vi.fn(),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -22,7 +23,10 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 vi.mock("$shared/ipc/native-events", () => ({
-  events: { webExtensionAccessRequested: { listen: native.accessListen } },
+  events: {
+    webExtensionAccessRequested: { listen: native.accessListen },
+    webExtensionAccessDismissed: { listen: native.dismissalListen },
+  },
 }));
 
 function review(reviewId: string): WebExtensionReview {
@@ -46,6 +50,7 @@ beforeEach(() => {
   native.confirm.mockResolvedValue({ status: "ok", data: null });
   native.cancel.mockResolvedValue(undefined);
   native.list.mockResolvedValue({ status: "ok", data: [] });
+  native.dismissalListen.mockResolvedValue(() => {});
 });
 
 test("confirmation identifies the exact displayed review", async () => {
@@ -165,4 +170,34 @@ test("access approval can be retried after a failed save", async () => {
   expect(native.answer).toHaveBeenLastCalledWith(request, true);
   expect(webext.accessRequest()).toBeNull();
   expect(webext.accessError()).toBeNull();
+});
+
+test("a native dismissal during an answer leaves the next prompt queued", async () => {
+  const webext = await import("../webext.svelte");
+  const first = {
+    profile_id: "first",
+    request: "1",
+    extension_id: "extension",
+    warnings: [],
+    permissions: ["privacy"],
+    patterns: [],
+  };
+  const second = { ...first, profile_id: "second" };
+  let dismiss!: (event: { payload: { profile_id: string; request: string } }) => void;
+  native.dismissalListen.mockImplementation((listener) => {
+    dismiss = listener;
+    return Promise.resolve(() => {});
+  });
+  native.accessListen.mockImplementation((listener) => {
+    listener({ payload: first });
+    listener({ payload: second });
+    return Promise.resolve(() => {});
+  });
+  await webext.listenForAccess();
+  native.answer.mockImplementationOnce(async () => {
+    dismiss({ payload: first });
+    return { status: "ok", data: null };
+  });
+  await webext.answerAccess(true);
+  expect(webext.accessRequest()).toEqual(second);
 });

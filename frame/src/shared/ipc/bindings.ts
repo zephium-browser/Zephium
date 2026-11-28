@@ -746,6 +746,7 @@ export const events = {
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
+	webExtensionAccessDismissed: makeEvent<WebExtensionAccessDismissed>("web-extension-access-dismissed"),
 	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 	webExtensionStoreClicked: makeEvent<WebExtensionStoreClicked>("web-extension-store-clicked"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
@@ -3690,6 +3691,13 @@ export type VoiceStatusV1 = {
 	on_device: string | null,
 	microphone: VoicePermissionV1,
 };
+
+export type WebExtensionAccessDismissalView = {
+	profile_id: string,
+	request: string,
+};
+
+export type WebExtensionAccessDismissed = WebExtensionAccessDismissalView;
 
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {

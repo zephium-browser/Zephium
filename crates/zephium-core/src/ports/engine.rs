@@ -1691,6 +1691,10 @@ pub enum EngineEvent {
     /// An extension asked at run time for access the user must approve;
     /// answered through [`EnginePort::answer_web_extension_access`].
     WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),
+    WebExtensionAccessDismissed {
+        profile: ProfileId,
+        request: u64,
+    },
     WebExtensionAccessRemoved(Box<WebExtensionAccessRemoval>),
     /// An extension asked for the profile's history, bookmarks or closed
     /// tabs; answered through [`EnginePort::answer_web_extension_data`].

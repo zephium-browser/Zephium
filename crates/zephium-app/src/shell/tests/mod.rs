@@ -2335,6 +2335,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActionShortcut(_) => {}
         Projection::PagePermissionPrompt(_) => {}
         Projection::WebExtensionAccessRequest(_) => {}
+        Projection::WebExtensionAccessDismissed(_) => {}
         Projection::WebExtensionAccessRemoved(_) => {}
         Projection::WebExtensionStoreClick(_) => {}
         Projection::Favicons(_) => {}

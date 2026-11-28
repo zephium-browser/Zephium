@@ -331,6 +331,14 @@ impl Shell {
                     },
                 ));
             }
+            EngineEvent::WebExtensionAccessDismissed { profile, request } => {
+                (self.emit)(Projection::WebExtensionAccessDismissed(
+                    zephium_ipc::WebExtensionAccessDismissalView {
+                        profile_id: profile.to_string(),
+                        request: request.to_string(),
+                    },
+                ));
+            }
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 let refresh = self.refresh_extension_actions(profile);
                 if refresh.rejected {
@@ -857,6 +865,7 @@ impl Shell {
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
+            EngineEvent::WebExtensionAccessDismissed { .. } => None,
             EngineEvent::WebExtensionAccessRemoved(removal) => Some(removal.profile),
             // Answered even during retirement, so the extension hears why.
             EngineEvent::WebExtensionDataRequested(_) => None,
