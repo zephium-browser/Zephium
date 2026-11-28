@@ -1,670 +1,97 @@
-use url::Url;
-
-const SEARCH_BASE: &str = "https://duckduckgo.com/";
-/// Bounded page-navigation budget shared by native adapters. Long identity
-/// redirects and deep links are distinct from small search/chrome inputs.
-pub const MAX_URL_BYTES: usize = 256 * 1024;
-const MAX_SEARCH_URL_BYTES: usize = 8 * 1024;
-const RESERVED_HOSTS: &[&str] = &[
-    "asset.localhost",
-    "ipc.localhost",
-    "tauri.localhost",
-    "zephium-onboarding.localhost",
-];
-
-fn is_reserved_host(host: &str) -> bool {
-    let host = host.trim_end_matches('.');
-    RESERVED_HOSTS
-        .iter()
-        .any(|reserved| host.eq_ignore_ascii_case(reserved))
-}
-
-/// Turn raw omnibox text into an allowed URL. Explicit but forbidden or
-/// malformed URL-like input is rejected instead of being sent to the search
-/// provider: a local file path or password-bearing URL must not become a
-/// network query merely because native navigation policy blocks it.
-pub fn classify(input: &str) -> Option<Url> {
-    let s = input.trim();
-    if s.is_empty() {
-        return Url::parse("about:blank").ok();
-    }
-    match classify_input(s) {
-        InputKind::Direct(url) | InputKind::Search(url) => Some(url),
-        InputKind::Rejected => None,
-    }
-}
-
-/// Whether the omnibox input will be treated as a web search rather than a URL.
-pub fn is_query(input: &str) -> bool {
-    let s = input.trim();
-    !s.is_empty() && matches!(classify_input(s), InputKind::Search(_))
-}
-
-/// Converts an explicit browser-search request into the configured provider
-/// URL without reinterpreting host-shaped text as navigation. Dangerous
-/// absolute schemes, credentials, and local paths retain the omnibox's
-/// exfiltration guard even when supplied by an extension search API.
-pub fn search_query(input: &str) -> Option<Url> {
-    let value = input.trim();
-    if value.is_empty() || looks_like_local_path(value) {
-        return None;
-    }
-    if has_leading_scheme_separator(value) || Url::parse(value).is_ok() {
-        let parsed = Url::parse(value).ok()?;
-        if !is_allowed(&parsed) && !opaque_search_phrase(value, &parsed) {
-            return None;
-        }
-    }
-    if !embedded_web_targets_allowed(value) {
-        return None;
-    }
-    search_url(value)
-}
-
-enum InputKind {
-    Direct(Url),
-    Search(Url),
-    Rejected,
-}
-
-fn classify_input(s: &str) -> InputKind {
-    // Path-shaped input is commonly pasted into an omnibox by mistake. Never
-    // disclose it to a remote search provider. Explicit file: URLs are caught
-    // by the absolute-URL branch below; this handles native paths that the URL
-    // parser intentionally does not recognize as URLs.
-    if looks_like_local_path(s) {
-        return InputKind::Rejected;
-    }
-    if looks_like_host(s) || bare_host_with_port(s) {
-        return Url::parse(&format!("https://{s}"))
-            .ok()
-            .filter(is_allowed)
-            .map_or(InputKind::Rejected, InputKind::Direct);
-    }
-
-    // Absolute targets remain navigation intent, including file:, data: and
-    // javascript:. Only explicit prose/search prefixes such as TypeError or
-    // site are reconsidered as search when followed by a phrase. Arbitrary
-    // custom protocols retain refusal instead of exposing their payloads.
-    // A malformed leading scheme:// also remains an explicit target.
-    if has_leading_scheme_separator(s) {
-        return Url::parse(s)
-            .ok()
-            .filter(is_browser_target)
-            .map_or(InputKind::Rejected, InputKind::Direct);
-    }
-    if let Ok(parsed) = Url::parse(s) {
-        if is_browser_target(&parsed) {
-            return InputKind::Direct(parsed);
-        }
-        if !opaque_search_phrase(s, &parsed) {
-            return InputKind::Rejected;
-        }
-    }
-    if !embedded_web_targets_allowed(s) {
-        return InputKind::Rejected;
-    }
-
-    search_url(s).map_or(InputKind::Rejected, InputKind::Search)
-}
-
-// These application names avoid ambiguity with a numeric host:port. Opaque
-// phrases search only the explicit prose prefixes below, never arbitrary
-// registered or unknown application protocols.
-const EXPLICIT_APP_SCHEMES: &[&str] = &[
-    "mailto",
-    "tel",
-    "sms",
-    "facetime",
-    "facetime-audio",
-    "slack",
-    "msteams",
-    "zoommtg",
-    "steam",
-    "ssh",
-    "git",
-    "vscode",
-];
-
-fn explicit_non_search_scheme(scheme: &str) -> bool {
-    NOT_FOR_APPS.contains(&scheme)
-        || EXPLICIT_APP_SCHEMES.contains(&scheme)
-        || scheme.starts_with("zephium")
-}
-
-const PROSE_SEARCH_PREFIXES: &[&str] = &[
-    "typeerror",
-    "referenceerror",
-    "syntaxerror",
-    "rangeerror",
-    "urierror",
-    "evalerror",
-    "aggregateerror",
-    "error",
-    "site",
-    "define",
-    "re",
-];
-
-fn opaque_search_phrase(value: &str, parsed: &Url) -> bool {
-    value.contains(char::is_whitespace)
-        && parsed.cannot_be_a_base()
-        && PROSE_SEARCH_PREFIXES.contains(&parsed.scheme())
-}
-
-fn bare_host_with_port(value: &str) -> bool {
-    if value.contains(char::is_whitespace) {
-        return false;
-    }
-    let authority = value.split(['/', '?', '#']).next().unwrap_or(value);
-    let Some((host, port)) = authority.rsplit_once(':') else {
-        return false;
-    };
-    !host.is_empty()
-        && (!host
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.')
-            || host.parse::<std::net::Ipv4Addr>().is_ok())
-        && !host.contains([':', '@'])
-        && !explicit_non_search_scheme(&host.to_ascii_lowercase())
-        && !port.is_empty()
-        && port.bytes().all(|byte| byte.is_ascii_digit())
-        && port.parse::<u16>().is_ok()
-        && match url::Host::parse(host) {
-            Ok(url::Host::Domain(_)) => true,
-            Ok(url::Host::Ipv4(_)) => host.parse::<std::net::Ipv4Addr>().is_ok(),
-            _ => false,
-        }
-}
-
-fn search_url(value: &str) -> Option<Url> {
-    if value.len() > MAX_SEARCH_URL_BYTES {
-        return None;
-    }
-    let mut url = Url::parse(SEARCH_BASE).ok()?;
-    url.query_pairs_mut().append_pair("q", value);
-    // Percent-encoding can expand an otherwise bounded input. Apply the
-    // native URL ceiling to the final request.
-    (url.as_str().len() <= MAX_SEARCH_URL_BYTES && is_allowed(&url)).then_some(url)
-}
-
-/// A malformed absolute URL can fail `Url::parse` but still be target-shaped.
-/// Only a valid scheme at the start counts; `compare https://example.com` is
-/// prose and can remain a search query after its embedded target is checked.
-fn has_leading_scheme_separator(value: &str) -> bool {
-    let Some((scheme, _)) = value.split_once("://") else {
-        return false;
-    };
-    valid_scheme(scheme)
-}
-
-fn valid_scheme(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    matches!(bytes.next(), Some(first) if first.is_ascii_alphabetic())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
-}
-
-/// Search prose may contain ordinary HTTP(S) links, but must not turn a
-/// password-bearing URL, local-file URL, app link, or malformed absolute target
-/// into a remote search query. This keeps the original exfiltration boundary
-/// while allowing normal text such as `compare https://a.example with ...`.
-fn embedded_web_targets_allowed(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut offset = 0;
-    while let Some(relative) = value[offset..].find("://") {
-        let separator = offset + relative;
-        let mut start = separator;
-        while start > 0 {
-            let byte = bytes[start - 1];
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.') {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        if start == separator || !bytes[start].is_ascii_alphabetic() {
-            offset = separator + 3;
-            continue;
-        }
-        let scheme = &value[start..separator];
-        let end = value[separator + 3..]
-            .find(char::is_whitespace)
-            .map_or(value.len(), |relative| separator + 3 + relative);
-        let candidate = value[start..end].trim_end_matches(|ch: char| {
-            matches!(ch, ',' | ';' | '.' | '!' | ')' | ']' | '}' | '"' | '\'')
-        });
-        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-            return false;
-        }
-        let Ok(url) = Url::parse(candidate) else {
-            return false;
-        };
-        if !is_allowed(&url) {
-            return false;
-        }
-        offset = separator + 3;
-    }
-    true
-}
-
-fn looks_like_local_path(s: &str) -> bool {
-    s.starts_with('/')
-        || s.starts_with("~/")
-        || s.starts_with("./")
-        || s.starts_with("../")
-        || s.starts_with('\\')
-        || matches!(
-            s.as_bytes(),
-            [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic()
-        )
-}
-
-/// Whether a URL may commit. Blocks file, javascript, internal and external app
-/// schemes; only http(s) and exact `about:blank` pass. Internal pseudo-hosts
-/// and credentials are rejected even if a platform happens to expose them as
-/// http(s).
-pub fn is_allowed(url: &Url) -> bool {
-    if url.as_str() == "about:blank" {
-        return true;
-    }
-    matches!(url.scheme(), "http" | "https")
-        && url.as_str().len() <= MAX_URL_BYTES
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.host_str().is_some_and(|host| !is_reserved_host(host))
-}
-
-/// Gate for page-initiated navigations (the engine hands us a resolved URL).
-pub fn is_allowed_str(url: &str) -> bool {
-    Url::parse(url).map(|u| is_allowed(&u)).unwrap_or(false)
-}
-
-/// Typed text read only as a web address, as when bookmarking one by hand:
-/// `example.com/docs` is the page, while words that would be searched for in
-/// the address field are not an address at all.
-pub fn web_address(input: &str) -> Option<Url> {
-    let input = input.trim();
-    if input.is_empty() || input.len() > MAX_URL_BYTES {
-        return None;
-    }
-    match classify_input(input) {
-        InputKind::Direct(url) if matches!(url.scheme(), "http" | "https") && is_allowed(&url) => {
-            Some(url)
-        }
-        _ => None,
-    }
-}
-
-/// Addresses one hand-off from another application may carry.
-pub const MAX_EXTERNAL_TARGETS: usize = 16;
-
-/// An address handed to Zephium by another application: a clicked link, or
-/// the command line of a launch. Only ordinary web pages are admitted, so a
-/// hand-off can never open an internal page, run script, or read a file.
-pub fn external_target(argument: &str) -> Option<Url> {
-    if argument.len() > MAX_URL_BYTES {
-        return None;
-    }
-    Url::parse(argument.trim())
-        .ok()
-        .filter(|url| matches!(url.scheme(), "http" | "https") && is_allowed(url))
-}
-
-/// A document a page builds for one of its own frames: an `about:srcdoc` or
-/// `about:blank` frame, or one from `data:` or `blob:`. The engine keeps
-/// these in the page's own origin rules; they are never a top-level page.
-pub fn is_subframe_document(target: &str) -> bool {
-    if target.len() > MAX_URL_BYTES {
-        return false;
-    }
-    Url::parse(target).is_ok_and(|url| match url.scheme() {
-        "about" => matches!(url.path(), "blank" | "srcdoc"),
-        "data" | "blob" => true,
-        _ => false,
-    })
-}
-
-/// Schemes a page never hands to another application: they load browser
-/// content, run script, reach files or shares, or reach Windows handlers
-/// that have been used to run code from a link.
-const NOT_FOR_APPS: &[&str] = &[
-    "about",
-    "afp",
-    "asset",
-    "blob",
-    "chrome",
-    "chrome-extension",
-    "data",
-    "disk",
-    "disks",
-    "edge",
-    "file",
-    "filesystem",
-    "ftp",
-    "hcp",
-    "http",
-    "https",
-    "ie.http",
-    "intent",
-    "ipc",
-    "javascript",
-    "mk",
-    "ms-appinstaller",
-    "ms-cxh",
-    "ms-cxh-full",
-    "ms-help",
-    "ms-its",
-    "ms-msdt",
-    "ms-officecmd",
-    "ms-search",
-    "ms-settings",
-    "nfs",
-    "nntp",
-    "res",
-    "safari-web-extension",
-    "search",
-    "search-ms",
-    "shell",
-    "smb",
-    "tauri",
-    "vbscript",
-    "view-source",
-    "vnd.ms.radio",
-    "webkit-extension",
-    "ws",
-    "wss",
-    "x-apple-systempreferences",
-    "x-apple.systempreferences",
-    "zephium",
-];
-
-/// Application link grants one profile keeps.
-pub const MAX_APP_LINK_SITES: usize = 512;
-
-/// A scheme an application link grant may name: one `external_app_link`
-/// itself would hand on.
-pub fn app_link_scheme(scheme: &str) -> bool {
-    scheme.len() <= 64
-        && scheme
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_lowercase())
-        && scheme.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
-        })
-        && !NOT_FOR_APPS.contains(&scheme)
-        && !scheme.starts_with("zephium")
-}
-
-/// The https address an `http` page is first tried at, as Chrome's HTTPS
-/// upgrades do: a public DNS name on the default port. Addresses on the
-/// person's own network, IP literals and other ports stay as asked.
-pub fn https_upgrade(url: &Url) -> Option<Url> {
-    if url.scheme() != "http" || url.port().is_some() || !url.username().is_empty() {
-        return None;
-    }
-    let url::Host::Domain(host) = url.host()? else {
-        return None;
-    };
-    if !host.contains('.') || crate::certificates::is_local_host(host) {
-        return None;
-    }
-    let mut upgraded = url.clone();
-    upgraded.set_scheme("https").ok()?;
-    // One byte longer can pass what a page may be opened at; it then loads as
-    // asked.
-    (upgraded.as_str().len() <= MAX_URL_BYTES).then_some(upgraded)
-}
-
-/// A link meant for an application on this computer, such as `zoommtg:`,
-/// `mailto:` or `slack:`. It never loads in a tab; the person decides
-/// whether the application it names may open it.
-pub fn external_app_link(target: &str) -> Option<Url> {
-    if target.len() > MAX_URL_BYTES {
-        return None;
-    }
-    let url = Url::parse(target).ok()?;
-    let scheme = url.scheme();
-    (scheme.len() <= 64
-        && !NOT_FOR_APPS.contains(&scheme)
-        && !scheme.starts_with("zephium")
-        && url.username().is_empty()
-        && url.password().is_none())
-    .then_some(url)
-}
-
-/// What a link for another application leads to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppLinkOutcome {
-    /// An app is registered: the person is asked before it opens.
-    Ask,
-    /// No app is registered but the person clicked: say so quietly.
-    Show,
-    /// No app is registered and the page acted by itself: do nothing, as
-    /// other browsers do, so a script redirect never nags.
-    Silent,
-}
-
-pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
-    match (app_known, user_gesture) {
-        (true, _) => AppLinkOutcome::Ask,
-        (false, true) => AppLinkOutcome::Show,
-        (false, false) => AppLinkOutcome::Silent,
-    }
-}
-
-/// Which document asked to open an application link.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AppLinkSource {
-    /// The tab's own document.
-    Page,
-    /// A frame from another site; it is named on the card and its own
-    /// answers are kept apart from the tab's.
-    Frame(crate::permissions::PageOrigin),
-    /// The engine cannot say which document asked, as for a link opened
-    /// into a new tab. A kept answer never opens it, and the card names no
-    /// site.
-    Unknown,
-}
-
-/// Syntactic browser-tab target. Windows extension documents additionally
-/// require the engine's live, profile-specific installation grant. This is not
-/// permission to load an extension or to expose its resources to web pages.
-pub fn is_browser_target(url: &Url) -> bool {
-    is_allowed(url) || (cfg!(target_os = "windows") && extension_document_id(url).is_some())
-}
-
-pub fn is_browser_target_str(target: &str) -> bool {
-    Url::parse(target).is_ok_and(|url| is_browser_target(&url))
-}
-
-pub fn extension_document_id(url: &Url) -> Option<&str> {
-    let id = url.host_str()?;
-    (url.scheme() == "chrome-extension"
-        && id.len() == 32
-        && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && url.as_str().len() <= MAX_URL_BYTES)
-        .then_some(id)
-}
-
-fn looks_like_host(s: &str) -> bool {
-    if s.contains(char::is_whitespace) {
-        return false;
-    }
-    if s == "localhost" || s.starts_with("localhost:") || s.starts_with("localhost/") {
-        return true;
-    }
-    let authority = s.split(['/', '?', '#']).next().unwrap_or(s);
-    // `user@host` in bare input is an email or a `trusted.com@evil.com`
-    // spoof; both belong in search, never in the address.
-    if authority.contains('@') {
-        return false;
-    }
-    if authority
-        .strip_prefix('[')
-        .and_then(|value| value.split_once(']'))
-        .is_some_and(|(host, _)| host.parse::<std::net::Ipv6Addr>().is_ok())
-    {
-        return true;
-    }
-    let host = authority.split(':').next().unwrap_or(authority);
-    if host.parse::<std::net::Ipv4Addr>().is_ok() {
-        return true;
-    }
-    // WHATWG host parsing accepts abbreviated/numeric IPv4 forms. A bare
-    // decimal-looking token must not become a network address by expansion.
-    if host
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || byte == b'.')
-    {
-        return false;
-    }
-    let Ok(url::Host::Domain(host)) = url::Host::parse(host) else {
-        return false;
-    };
-    let host = host.trim_end_matches('.');
-    // Reserved/local input is intentional host syntax even without a public
-    // suffix. Keep these names off the search provider as before.
-    if host == "localhost"
-        || is_reserved_host(host)
-        || host.ends_with(".example")
-        || host.ends_with(".invalid")
-    {
-        return true;
-    }
-    if host.contains('.') && crate::certificates::is_local_host(host) {
-        return true;
-    }
-    psl::domain(host.as_bytes()).is_some_and(|domain| domain.suffix().is_known())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{app_link_outcome, AppLinkOutcome};
-
-    #[test]
-    fn bare_file_names_and_abbreviated_numeric_hosts_search_without_network_navigation() {
-        for input in [
-            "index.html",
-            "node.js",
-            "report.pdf",
-            "1.25",
-            "127.1",
-            "1.25:8080",
-            "0x7f000001:8080",
-            "0177.0.0.1:8080",
-        ] {
-            assert!(is_query(input), "{input}");
-            assert_eq!(classify(input).unwrap().host_str(), Some("duckduckgo.com"));
-        }
-        for input in [
-            "example.com",
-            "example.co.uk",
-            "127.0.0.1",
-            "127.0.0.1:8080",
-            "printer.local",
-            "router.lan",
-            "localhost:8080",
-            "localhost.",
-            "LOCALHOST.",
-            "mail.example",
-            "private.invalid",
+tp://localhost:8080/"),
+            ("app.localhost", "http://app.localhost/"),
+            (
+                "app.localhost:3000/x?y=1#z",
+                "http://app.localhost:3000/x?y=1#z",
+            ),
+            ("127.0.0.1", "http://127.0.0.1/"),
+            (
+                "127.0.0.1:8080/admin?q=1#frag",
+                "http://127.0.0.1:8080/admin?q=1#frag",
+            ),
+            ("127.42.7.9:8080", "http://127.42.7.9:8080/"),
+            ("[::1]", "http://[::1]/"),
+            ("[::1]:7474/path?q=1#f", "http://[::1]:7474/path?q=1#f"),
         ] {
             assert!(!is_query(input), "{input}");
-            assert!(classify(input).is_some(), "{input}");
+            assert_eq!(classify(input).unwrap().as_str(), expected, "{input}");
         }
-        assert!(!is_query("tauri.localhost/index.html"));
-        assert!(classify("tauri.localhost/index.html").is_none());
         assert_eq!(
-            classify("https://index.html/").unwrap().as_str(),
-            "https://index.html/"
-        );
-        assert_eq!(
-            classify("http://127.1/").unwrap().as_str(),
-            "http://127.0.0.1/"
+            web_address(" app.localhost:3000/x ").unwrap().as_str(),
+            "http://app.localhost:3000/x"
         );
     }
 
     #[test]
-    fn opaque_prose_with_colons_searches_while_explicit_protocols_stay_refused() {
+    fn loopback_lookalikes_and_non_loopback_hosts_keep_https() {
         for input in [
-            "TypeError: Cannot read properties of undefined",
-            "ERROR: relation users does not exist",
-            "site:reddit.com laptops",
-            "define: serendipity",
-            "Re: meeting notes",
+            "localhost.evil.com",
+            "evil.localhost.com",
+            "mylocalhost:8080",
+            "127.0.0.1.evil.com",
+            "127.0.0.1.example:8080",
+            "example.com",
+            "192.168.1.1:8080",
+            "[::2]:8080",
+            "[2001:db8::1]:8080",
         ] {
-            assert!(is_query(input), "{input}");
-            assert_eq!(
-                classify(input)
-                    .unwrap()
-                    .query_pairs()
-                    .find(|(key, _)| key == "q")
-                    .unwrap()
-                    .1,
-                input
-            );
-            assert!(search_query(input).is_some());
+            let url = classify(input).unwrap_or_else(|| panic!("classified {input}"));
+            assert_eq!(url.scheme(), "https", "{input}");
+        }
+    }
+
+    #[test]
+    fn loopback_scheme_default_keeps_explicit_and_security_rules() {
+        for input in [
+            "https://localhost:8080/a?b#c",
+            "https://app.localhost/a",
+            "https://127.0.0.1:8080/a",
+            "https://[::1]:8080/a",
+        ] {
+            assert_eq!(classify(input).unwrap().as_str(), input);
         }
         assert_eq!(
-            classify("myrouter:8080").unwrap().as_str(),
-            "https://myrouter:8080/"
+            classify("http://localhost:8080/a").unwrap().as_str(),
+            "http://localhost:8080/a"
+        );
+        // User info is never turned into a bare loopback navigation.
+        assert!(is_query("user@localhost:8080"));
+        assert_eq!(
+            classify("user@localhost:8080").unwrap().host_str(),
+            Some("duckduckgo.com")
         );
         for input in [
-            "javascript: alert(1)",
-            "file: /private/document",
-            "data: text/plain,secret",
-            "mailto: private@example.test",
-            "slack: secret channel",
-            "custom:payload",
-            "custom: payload with spaces",
-            "steam://run/123 text",
+            "http://user:pass@localhost:8080/",
+            "https://user:pass@localhost:8080/",
         ] {
             assert!(classify(input).is_none(), "{input}");
-            assert!(search_query(input).is_none(), "{input}");
         }
-    }
-
-    #[test]
-    fn system_settings_links_never_reach_external_app_admission() {
-        for scheme in ["x-apple.systempreferences", "x-apple-systempreferences"] {
-            let target = format!("{scheme}:com.apple.preference.security?Privacy_AllFiles");
-            assert!(external_app_link(&target).is_none());
-            assert!(!app_link_scheme(scheme));
-            assert!(classify(&target).is_none());
-        }
-    }
-
-    #[test]
-    fn long_web_redirects_keep_a_finite_navigation_bound_without_expanding_search_inputs() {
-        let long = format!(
-            "https://sso.example.test/callback?state={}",
-            "a".repeat(32 * 1024)
-        );
-        assert!(is_allowed_str(&long));
-        assert_eq!(classify(&long).unwrap().as_str(), long);
-        let prefix = "https://example.test/";
-        let exact = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
-        assert!(is_allowed_str(&exact));
-        assert!(!is_allowed_str(&(exact + "a")));
-        assert!(search_query(&"x".repeat(8 * 1024)).is_none());
-        assert!(search_query(&"word ".repeat(2000)).is_none());
-    }
-
-    #[test]
-    fn bracketed_ipv6_input_is_a_web_address_not_a_search() {
-        for (input, expected) in [
-            ("[::1]:7474/path", "https://[::1]:7474/path"),
-            ("[2001:db8::1]", "https://[2001:db8::1]/"),
+        // Reserved application hosts stay denied even as `.localhost` names.
+        for host in [
+            "asset.localhost",
+            "ipc.localhost",
+            "tauri.localhost",
+            "zephium-onboarding.localhost",
         ] {
-            assert!(!super::is_query(input));
-            assert_eq!(super::classify(input).unwrap().as_str(), expected);
+            for input in [host.to_owned(), format!("{host}:8080/x")] {
+                assert!(classify(&input).is_none(), "{input}");
+                assert!(!is_query(&input), "{input}");
+            }
         }
-        assert!(super::classify("[::1]:99999").is_none());
-        assert!(super::classify("https://user:password@[::1]/").is_none());
+    }
+
+    #[test]
+    fn bare_loopback_urls_are_never_attempted_over_https_first() {
+        for url in [
+            "http://localhost/",
+            "http://localhost:8080/",
+            "http://app.localhost/",
+            "http://app.localhost:3000/x",
+            "http://127.0.0.1:8080/x",
+            "http://[::1]:7474/x",
+        ] {
+            assert_eq!(https_upgrade(&Url::parse(url).unwrap()), None, "{url}");
+        }
     }
 
     #[test]
@@ -714,6 +141,10 @@ mod tests {
             ("http://printer.local/", None),
             ("http://intranet/", None),
             ("http://localhost/", None),
+            ("http://localhost:8080/", None),
+            ("http://app.localhost/", None),
+            ("http://127.0.0.1:8080/", None),
+            ("http://[::1]:7474/", None),
         ] {
             let url = Url::parse(from).unwrap();
             assert_eq!(
